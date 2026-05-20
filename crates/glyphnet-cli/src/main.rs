@@ -177,16 +177,18 @@ fn main() -> Result<()> {
             format,
             width_modules,
             height_modules,
-        } => encode(
-            data.as_bytes(),
-            output,
-            profile.into(),
-            mode.map(Into::into),
-            ecc.map(Into::into),
-            format,
-            width_modules,
-            height_modules,
-        ),
+        } => {
+            let geometry = geometry_override(width_modules, height_modules)?;
+            encode(
+                data.as_bytes(),
+                output,
+                profile.into(),
+                mode.map(Into::into),
+                ecc.map(Into::into),
+                format,
+                geometry,
+            )
+        }
         Command::Decode { input } => decode(input),
         Command::Inspect {
             data,
@@ -195,14 +197,16 @@ fn main() -> Result<()> {
             ecc,
             width_modules,
             height_modules,
-        } => inspect(
-            data.as_bytes(),
-            profile.into(),
-            mode.map(Into::into),
-            ecc.map(Into::into),
-            width_modules,
-            height_modules,
-        ),
+        } => {
+            let geometry = geometry_override(width_modules, height_modules)?;
+            inspect(
+                data.as_bytes(),
+                profile.into(),
+                mode.map(Into::into),
+                ecc.map(Into::into),
+                geometry,
+            )
+        }
         Command::Burst {
             data,
             output_dir,
@@ -210,14 +214,16 @@ fn main() -> Result<()> {
             frame_payload,
             width_modules,
             height_modules,
-        } => burst(
-            data.as_bytes(),
-            output_dir,
-            profile.into(),
-            frame_payload,
-            width_modules,
-            height_modules,
-        ),
+        } => {
+            let geometry = geometry_override(width_modules, height_modules)?;
+            burst(
+                data.as_bytes(),
+                output_dir,
+                profile.into(),
+                frame_payload,
+                geometry,
+            )
+        }
         Command::Profiles => profiles(),
         Command::BenchPlan => bench_plan(),
     }
@@ -263,10 +269,8 @@ fn encode(
     mode: Option<TransmissionMode>,
     ecc_level: Option<EccLevel>,
     format: FormatArg,
-    width_modules: Option<u16>,
-    height_modules: Option<u16>,
+    geometry: Option<SymbolGeometry>,
 ) -> Result<()> {
-    let geometry = geometry_override(width_modules, height_modules)?;
     let encoded = encoder(profile, mode, ecc_level, geometry)
         .encode_static(payload)
         .context("failed to encode payload")?;
@@ -318,10 +322,8 @@ fn inspect(
     profile: ProfileId,
     mode: Option<TransmissionMode>,
     ecc_level: Option<EccLevel>,
-    width_modules: Option<u16>,
-    height_modules: Option<u16>,
+    geometry: Option<SymbolGeometry>,
 ) -> Result<()> {
-    let geometry = geometry_override(width_modules, height_modules)?;
     let encoded = encoder(profile, mode, ecc_level, geometry)
         .encode_static(payload)
         .context("failed to encode descriptor")?;
@@ -334,12 +336,10 @@ fn burst(
     output_dir: PathBuf,
     profile: ProfileId,
     frame_payload: usize,
-    width_modules: Option<u16>,
-    height_modules: Option<u16>,
+    geometry: Option<SymbolGeometry>,
 ) -> Result<()> {
     fs::create_dir_all(&output_dir)
         .with_context(|| format!("failed to create {}", output_dir.display()))?;
-    let geometry = geometry_override(width_modules, height_modules)?;
     let mut config = EncoderConfig::for_profile(profile);
     config.mode = TransmissionMode::Burst;
     config.max_frame_payload = frame_payload;
