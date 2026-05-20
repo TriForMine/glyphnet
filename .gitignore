@@ -1,0 +1,13 @@
+/target/
+/fuzz/target/
+/dist/
+/coverage/
+/tarpaulin-report.html
+*.profraw
+*.profdata
+*.wasm
+*.dSYM/
+.DS_Store
+Thumbs.db
+node_modules/
+pkg/

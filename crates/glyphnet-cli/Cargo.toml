@@ -1,0 +1,27 @@
+[package]
+name = "glyphnet-cli"
+description = "Command-line tools for generating, inspecting, decoding, benchmarking, and validating GlyphNet codes."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[[bin]]
+name = "glyphnet"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+glyphnet-core = { path = "../glyphnet-core", version = "0.1.0" }
+glyphnet-decode = { path = "../glyphnet-decode", version = "0.1.0" }
+glyphnet-encode = { path = "../glyphnet-encode", version = "0.1.0" }
+glyphnet-render = { path = "../glyphnet-render", version = "0.1.0" }
+image.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

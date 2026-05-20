@@ -1,0 +1,27 @@
+[package]
+name = "glyphnet-scanner"
+description = "Real-time GlyphNet scanner orchestration for cameras and frame streams."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[features]
+default = ["std"]
+std = []
+async = ["tokio"]
+
+[dependencies]
+glyphnet-core = { path = "../glyphnet-core", version = "0.1.0" }
+glyphnet-cv = { path = "../glyphnet-cv", version = "0.1.0" }
+glyphnet-decode = { path = "../glyphnet-decode", version = "0.1.0" }
+image.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, optional = true }
+tracing.workspace = true
+
+[lints]
+workspace = true

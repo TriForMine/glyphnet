@@ -1,0 +1,33 @@
+[package]
+name = "glyphnet-wasm"
+description = "WebAssembly bindings for browser and mobile-web GlyphNet applications."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+glyphnet-core = { path = "../glyphnet-core", version = "0.1.0" }
+glyphnet-decode = { path = "../glyphnet-decode", version = "0.1.0" }
+glyphnet-encode = { path = "../glyphnet-encode", version = "0.1.0" }
+glyphnet-render = { path = "../glyphnet-render", version = "0.1.0" }
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen.workspace = true
+
+[features]
+default = ["svg"]
+svg = ["glyphnet-render/svg"]
+camera = []
+burst = ["glyphnet-encode/burst"]
+
+[lints]
+workspace = true

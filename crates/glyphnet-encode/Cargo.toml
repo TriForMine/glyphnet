@@ -1,0 +1,33 @@
+[package]
+name = "glyphnet-encode"
+description = "Static and animated GlyphNet encoders."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[dependencies]
+glyphnet-core = { path = "../glyphnet-core", version = "0.1.0" }
+glyphnet-ecc = { path = "../glyphnet-ecc", version = "0.1.0" }
+blake3.workspace = true
+thiserror.workspace = true
+
+[features]
+default = ["static", "burst"]
+static = []
+burst = []
+adaptive = []
+
+[dev-dependencies]
+criterion.workspace = true
+proptest.workspace = true
+
+[[bench]]
+name = "encode"
+harness = false
+
+[lints]
+workspace = true

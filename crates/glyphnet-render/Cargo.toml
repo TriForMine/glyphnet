@@ -1,0 +1,24 @@
+[package]
+name = "glyphnet-render"
+description = "Raster and SVG renderers for GlyphNet visual symbols."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[dependencies]
+glyphnet-core = { path = "../glyphnet-core", version = "0.1.0" }
+image.workspace = true
+thiserror.workspace = true
+
+[features]
+default = ["raster", "svg"]
+raster = []
+svg = []
+gpu = []
+
+[lints]
+workspace = true

@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>GlyphNet Browser Demo</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 2rem;
+        color: #111;
+      }
+      textarea {
+        width: min(40rem, 100%);
+        min-height: 8rem;
+      }
+      #output svg {
+        width: min(32rem, 100%);
+        height: auto;
+        border: 1px solid #ddd;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>GlyphNet Browser Demo</h1>
+      <textarea id="payload">hello glyphnet</textarea>
+      <p><button id="render">Render</button></p>
+      <div id="output"></div>
+    </main>
+    <script type="module">
+      const output = document.querySelector("#output");
+      document.querySelector("#render").addEventListener("click", () => {
+        output.textContent =
+          "Build glyphnet-wasm with wasm-pack, then wire @glyphnet/browser here.";
+      });
+    </script>
+  </body>
+</html>

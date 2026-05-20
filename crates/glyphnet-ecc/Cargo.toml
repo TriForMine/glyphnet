@@ -1,0 +1,27 @@
+[package]
+name = "glyphnet-ecc"
+description = "Error-correction and erasure-recovery building blocks for GlyphNet."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[dependencies]
+glyphnet-core = { path = "../glyphnet-core", version = "0.1.0" }
+thiserror.workspace = true
+
+[features]
+default = ["parity"]
+parity = []
+ldpc = []
+fountain = []
+raptorq = []
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

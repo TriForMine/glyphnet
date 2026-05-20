@@ -1,0 +1,23 @@
+[package]
+name = "glyphnet-testkit"
+description = "Reusable protocol fixtures, conformance tests, property tests, and image degradation tools for GlyphNet."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[dependencies]
+glyphnet-core = { path = "../glyphnet-core", version = "0.1.0" }
+glyphnet-decode = { path = "../glyphnet-decode", version = "0.1.0" }
+glyphnet-encode = { path = "../glyphnet-encode", version = "0.1.0" }
+glyphnet-render = { path = "../glyphnet-render", version = "0.1.0" }
+image.workspace = true
+proptest.workspace = true
+rand.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

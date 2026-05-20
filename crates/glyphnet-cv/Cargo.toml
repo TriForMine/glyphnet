@@ -1,0 +1,25 @@
+[package]
+name = "glyphnet-cv"
+description = "Computer-vision primitives for locating, rectifying, and sampling GlyphNet symbols."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[dependencies]
+glyphnet-core = { path = "../glyphnet-core", version = "0.1.0" }
+image.workspace = true
+thiserror.workspace = true
+
+[features]
+default = ["software"]
+software = []
+simd = []
+gpu = []
+opencv = []
+
+[lints]
+workspace = true

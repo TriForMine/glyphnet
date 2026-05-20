@@ -1,0 +1,30 @@
+[package]
+name = "glyphnet-decode"
+description = "GlyphNet matrix and raster decoders."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[dependencies]
+glyphnet-core = { path = "../glyphnet-core", version = "0.1.0" }
+glyphnet-ecc = { path = "../glyphnet-ecc", version = "0.1.0" }
+image.workspace = true
+thiserror.workspace = true
+
+[features]
+default = ["raster"]
+raster = []
+simd = []
+gpu = []
+
+[dev-dependencies]
+glyphnet-encode = { path = "../glyphnet-encode", version = "0.1.0" }
+glyphnet-render = { path = "../glyphnet-render", version = "0.1.0" }
+proptest.workspace = true
+
+[lints]
+workspace = true

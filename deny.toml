@@ -1,0 +1,15 @@
+[licenses]
+allow = ["Apache-2.0", "MIT", "Unicode-3.0", "BSD-3-Clause", "BSD-2-Clause", "Zlib"]
+confidence-threshold = 0.9
+
+[advisories]
+ignore = []
+severity-threshold = "medium"
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

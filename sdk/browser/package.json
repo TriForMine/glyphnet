@@ -1,0 +1,17 @@
+{
+  "name": "@glyphnet/browser",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "description": "Browser SDK facade for GlyphNet WebAssembly.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build:wasm": "wasm-pack build ../../crates/glyphnet-wasm --target web --out-dir ../../sdk/browser/pkg",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}
