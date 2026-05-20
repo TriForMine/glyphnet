@@ -158,4 +158,4 @@ The CI setup is designed to keep the project maintainable:
 
 ## License
 
-GlyphNet is licensed under either Apache-2.0 or MIT, at your option.
+GlyphNet is licensed under the Apache-2.0 license.
