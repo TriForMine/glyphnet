@@ -85,6 +85,12 @@ Reference rendering is intentionally simple:
 5. Place bits in canonical order.
 6. Render with explicit module size, quiet zone, and visual primitive profile.
 
+Geometry (module width/height) is chosen by the encoder. Pixel size is chosen
+by the renderer. If you need a symbol to fit within a specific pixel box while
+keeping the geometry fixed, use `glyphnet-render::RenderOptions::fit_to_size`
+which selects the largest integer module size that fits inside the target
+bounds without distortion.
+
 The default primitive profile is intentionally non-QR:
 
 - continuous ribbon payload strokes;

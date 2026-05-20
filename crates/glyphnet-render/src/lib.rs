@@ -16,6 +16,12 @@ pub enum RenderError {
     /// The requested image dimensions overflowed `u32`.
     #[error("rendered image dimensions overflowed")]
     DimensionOverflow,
+    /// The symbol geometry is invalid.
+    #[error("symbol geometry must be non-zero")]
+    InvalidGeometry,
+    /// The target pixel size is too small for the symbol geometry.
+    #[error("target size is too small to fit symbol geometry")]
+    TargetTooSmall,
 }
 
 /// RGBA color.
@@ -164,6 +170,36 @@ impl RenderOptions {
             }
         }
         options
+    }
+
+    /// Fit module size to a target pixel box for a given symbol geometry.
+    ///
+    /// This keeps the symbol geometry fixed and selects the largest integer
+    /// module size that fits inside the requested pixel dimensions.
+    pub fn fit_to_size(
+        mut self,
+        symbol_width: u16,
+        symbol_height: u16,
+        target_width_px: u32,
+        target_height_px: u32,
+    ) -> Result<Self> {
+        if symbol_width == 0 || symbol_height == 0 {
+            return Err(RenderError::InvalidGeometry);
+        }
+        let quiet = self.quiet_zone_modules;
+        let quiet_total = quiet.checked_mul(2).ok_or(RenderError::DimensionOverflow)?;
+        let total_modules_x = u32::from(symbol_width)
+            .checked_add(quiet_total)
+            .ok_or(RenderError::DimensionOverflow)?;
+        let total_modules_y = u32::from(symbol_height)
+            .checked_add(quiet_total)
+            .ok_or(RenderError::DimensionOverflow)?;
+        let module_px = (target_width_px / total_modules_x).min(target_height_px / total_modules_y);
+        if module_px == 0 {
+            return Err(RenderError::TargetTooSmall);
+        }
+        self.module_px = module_px;
+        Ok(self)
     }
 
     fn color_for_at(
@@ -619,5 +655,13 @@ mod tests {
         assert!(svg.contains("#081860"));
         assert!(svg.contains("#003840"));
         assert!(svg.contains("#341864"));
+    }
+
+    #[test]
+    fn fit_to_size_selects_largest_module_size() {
+        let options = RenderOptions::default()
+            .fit_to_size(96, 36, 1200, 400)
+            .unwrap();
+        assert_eq!(options.module_px, 9);
     }
 }

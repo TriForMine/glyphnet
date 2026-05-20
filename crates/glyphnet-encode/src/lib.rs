@@ -3,7 +3,7 @@
 use blake3::Hash;
 use glyphnet_core::{
     Capability, CapabilitySet, ColorEncoding, EccLevel, Frame, GlyphError, LayoutFamily, ProfileId,
-    ProtocolVersion, SymbolDescriptor, SymbolMatrix, TransmissionMode, bitstream,
+    ProtocolVersion, SymbolDescriptor, SymbolGeometry, SymbolMatrix, TransmissionMode, bitstream,
     choose_symbol_geometry, profile_spec,
 };
 use glyphnet_ecc::{BlockCode, ParityCode};
@@ -33,6 +33,8 @@ pub struct EncoderConfig {
     pub color: ColorEncoding,
     /// Maximum raw payload bytes per burst frame.
     pub max_frame_payload: usize,
+    /// Optional explicit module geometry override.
+    pub geometry: Option<SymbolGeometry>,
 }
 
 impl Default for EncoderConfig {
@@ -43,6 +45,7 @@ impl Default for EncoderConfig {
             layout: LayoutFamily::RibbonWeave,
             color: ColorEncoding::Mono,
             max_frame_payload: 512,
+            geometry: None,
         }
     }
 }
@@ -57,6 +60,7 @@ impl EncoderConfig {
             layout: spec.layout,
             color: spec.color,
             max_frame_payload: spec.max_frame_payload,
+            geometry: None,
         }
     }
 }
@@ -117,7 +121,14 @@ impl Encoder {
         let ecc = ParityCode::from_level(self.config.ecc_level, wire.len());
         let codewords = ecc.encode(&wire);
         let bits = bitstream::bytes_to_bits(&codewords);
-        let geometry = choose_symbol_geometry(mode, self.config.layout, bits.len())?;
+        let geometry = if let Some(geometry) = self.config.geometry {
+            geometry
+        } else {
+            choose_symbol_geometry(mode, self.config.layout, bits.len())?
+        };
+        if geometry.width == 0 || geometry.height == 0 {
+            return Err(GlyphError::InvalidArgument("symbol geometry must be non-zero").into());
+        }
         let mut matrix =
             SymbolMatrix::with_layout(geometry.width, geometry.height, self.config.layout);
         let capacity = matrix.data_capacity_bits();
@@ -217,7 +228,7 @@ fn capabilities_for(mode: TransmissionMode, color: ColorEncoding) -> CapabilityS
 
 #[cfg(test)]
 mod tests {
-    use glyphnet_core::Frame;
+    use glyphnet_core::{Frame, SymbolGeometry};
 
     use super::*;
 
@@ -243,5 +254,16 @@ mod tests {
         assert_eq!(frames.len(), 3);
         assert_eq!(frames[0].descriptor.frame_count, 3);
         assert_eq!(frames[2].frame.payload, b"g");
+    }
+
+    #[test]
+    fn custom_geometry_overrides_default() {
+        let encoder = Encoder::new(EncoderConfig {
+            geometry: Some(SymbolGeometry::new(80, 80)),
+            ..EncoderConfig::default()
+        });
+        let encoded = encoder.encode_static(b"hello").unwrap();
+        assert_eq!(encoded.descriptor.width, 80);
+        assert_eq!(encoded.descriptor.height, 80);
     }
 }

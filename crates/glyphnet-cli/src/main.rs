@@ -1,8 +1,8 @@
 use std::{fs, path::PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
-use glyphnet_core::{EccLevel, ProfileId, TransmissionMode, profile_catalog};
+use glyphnet_core::{EccLevel, ProfileId, SymbolGeometry, TransmissionMode, profile_catalog};
 use glyphnet_decode::RasterDecoder;
 use glyphnet_encode::{Encoder, EncoderConfig};
 use glyphnet_render::{RasterRenderer, RenderOptions, SvgRenderer};
@@ -37,6 +37,12 @@ enum Command {
         /// Output format.
         #[arg(long, value_enum, default_value_t = FormatArg::Png)]
         format: FormatArg,
+        /// Explicit symbol width in modules.
+        #[arg(long, value_name = "MODULES")]
+        width_modules: Option<u16>,
+        /// Explicit symbol height in modules.
+        #[arg(long, value_name = "MODULES")]
+        height_modules: Option<u16>,
     },
     /// Decode a rendered PNG/JPEG image produced by the reference renderer.
     Decode {
@@ -57,6 +63,12 @@ enum Command {
         /// ECC level.
         #[arg(long, value_enum)]
         ecc: Option<EccArg>,
+        /// Explicit symbol width in modules.
+        #[arg(long, value_name = "MODULES")]
+        width_modules: Option<u16>,
+        /// Explicit symbol height in modules.
+        #[arg(long, value_name = "MODULES")]
+        height_modules: Option<u16>,
     },
     /// Encode an animated burst stream as numbered SVG frames.
     Burst {
@@ -72,6 +84,12 @@ enum Command {
         /// Maximum payload bytes per frame.
         #[arg(long, default_value_t = 512)]
         frame_payload: usize,
+        /// Explicit symbol width in modules.
+        #[arg(long, value_name = "MODULES")]
+        width_modules: Option<u16>,
+        /// Explicit symbol height in modules.
+        #[arg(long, value_name = "MODULES")]
+        height_modules: Option<u16>,
     },
     /// Print the built-in protocol profile catalog as JSON.
     Profiles,
@@ -157,6 +175,8 @@ fn main() -> Result<()> {
             mode,
             ecc,
             format,
+            width_modules,
+            height_modules,
         } => encode(
             data.as_bytes(),
             output,
@@ -164,6 +184,8 @@ fn main() -> Result<()> {
             mode.map(Into::into),
             ecc.map(Into::into),
             format,
+            width_modules,
+            height_modules,
         ),
         Command::Decode { input } => decode(input),
         Command::Inspect {
@@ -171,20 +193,49 @@ fn main() -> Result<()> {
             profile,
             mode,
             ecc,
+            width_modules,
+            height_modules,
         } => inspect(
             data.as_bytes(),
             profile.into(),
             mode.map(Into::into),
             ecc.map(Into::into),
+            width_modules,
+            height_modules,
         ),
         Command::Burst {
             data,
             output_dir,
             profile,
             frame_payload,
-        } => burst(data.as_bytes(), output_dir, profile.into(), frame_payload),
+            width_modules,
+            height_modules,
+        } => burst(
+            data.as_bytes(),
+            output_dir,
+            profile.into(),
+            frame_payload,
+            width_modules,
+            height_modules,
+        ),
         Command::Profiles => profiles(),
         Command::BenchPlan => bench_plan(),
+    }
+}
+
+fn geometry_override(
+    width_modules: Option<u16>,
+    height_modules: Option<u16>,
+) -> Result<Option<SymbolGeometry>> {
+    match (width_modules, height_modules) {
+        (None, None) => Ok(None),
+        (Some(width), Some(height)) => {
+            if width == 0 || height == 0 {
+                bail!("symbol geometry must be non-zero");
+            }
+            Ok(Some(SymbolGeometry::new(width, height)))
+        }
+        _ => bail!("--width-modules and --height-modules must be set together"),
     }
 }
 
@@ -192,6 +243,7 @@ fn encoder(
     profile: ProfileId,
     mode_override: Option<TransmissionMode>,
     ecc_override: Option<EccLevel>,
+    geometry: Option<SymbolGeometry>,
 ) -> Encoder {
     let mut config = EncoderConfig::for_profile(profile);
     if let Some(mode) = mode_override {
@@ -200,6 +252,7 @@ fn encoder(
     if let Some(ecc_level) = ecc_override {
         config.ecc_level = ecc_level;
     }
+    config.geometry = geometry;
     Encoder::new(config)
 }
 
@@ -210,8 +263,11 @@ fn encode(
     mode: Option<TransmissionMode>,
     ecc_level: Option<EccLevel>,
     format: FormatArg,
+    width_modules: Option<u16>,
+    height_modules: Option<u16>,
 ) -> Result<()> {
-    let encoded = encoder(profile, mode, ecc_level)
+    let geometry = geometry_override(width_modules, height_modules)?;
+    let encoded = encoder(profile, mode, ecc_level, geometry)
         .encode_static(payload)
         .context("failed to encode payload")?;
     let render_options = RenderOptions::for_descriptor(&encoded.descriptor);
@@ -262,8 +318,11 @@ fn inspect(
     profile: ProfileId,
     mode: Option<TransmissionMode>,
     ecc_level: Option<EccLevel>,
+    width_modules: Option<u16>,
+    height_modules: Option<u16>,
 ) -> Result<()> {
-    let encoded = encoder(profile, mode, ecc_level)
+    let geometry = geometry_override(width_modules, height_modules)?;
+    let encoded = encoder(profile, mode, ecc_level, geometry)
         .encode_static(payload)
         .context("failed to encode descriptor")?;
     println!("{}", serde_json::to_string_pretty(&encoded.descriptor)?);
@@ -275,12 +334,16 @@ fn burst(
     output_dir: PathBuf,
     profile: ProfileId,
     frame_payload: usize,
+    width_modules: Option<u16>,
+    height_modules: Option<u16>,
 ) -> Result<()> {
     fs::create_dir_all(&output_dir)
         .with_context(|| format!("failed to create {}", output_dir.display()))?;
+    let geometry = geometry_override(width_modules, height_modules)?;
     let mut config = EncoderConfig::for_profile(profile);
     config.mode = TransmissionMode::Burst;
     config.max_frame_payload = frame_payload;
+    config.geometry = geometry;
     let encoder = Encoder::new(config);
     let frames = encoder
         .encode_burst(payload)
