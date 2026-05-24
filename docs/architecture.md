@@ -117,10 +117,11 @@ The current decoder supports rendered reference images. The scanner roadmap is:
 2. Adaptive threshold and denoise.
 3. Detect anchor candidates.
 4. Estimate perspective transform.
-5. Sample modules using timing and alignment markers.
-6. Decode matrix bits.
-7. Validate header, payload CRC, and ECC.
-8. Assemble burst streams and surface telemetry.
+5. (Optional) auto-infer module size and quiet zone from rendered images.
+6. Sample modules using timing and alignment markers.
+7. Decode matrix bits.
+8. Validate header, payload CRC, and ECC.
+9. Assemble burst streams and surface telemetry.
 
 ## Performance Plan
 

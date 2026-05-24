@@ -23,6 +23,9 @@ pub enum DecodeError {
     /// ECC/parity validation failed.
     #[error("error-correction parity validation failed")]
     EccMismatch,
+    /// Failed to infer module size and quiet zone automatically.
+    #[error("failed to infer module size and quiet zone")]
+    AutoDetectFailed,
 }
 
 /// Raster sampling options.
@@ -95,53 +98,97 @@ impl RasterDecoder {
         decode_matrix(&matrix)
     }
 
+    /// Decode a rendered GlyphNet image by inferring module size and quiet zone.
+    pub fn decode_auto(&self, image: &DynamicImage) -> Result<DecodedSymbol> {
+        let width = image.width();
+        let height = image.height();
+        if width == 0 || height == 0 {
+            return Err(DecodeError::InvalidImageDimensions);
+        }
+        let gcd = gcd_u32(width, height);
+        let mut candidates = divisors_desc(gcd);
+        if candidates.is_empty() {
+            return Err(DecodeError::AutoDetectFailed);
+        }
+        for module_px in candidates.drain(..) {
+            let width_modules = width / module_px;
+            let height_modules = height / module_px;
+            for quiet_zone in 0..=AUTO_QUIET_ZONE_MAX {
+                if width_modules <= quiet_zone * 2 || height_modules <= quiet_zone * 2 {
+                    continue;
+                }
+                let options = DecodeOptions {
+                    module_px,
+                    quiet_zone_modules: quiet_zone,
+                    threshold: self.options.threshold,
+                    layout: self.options.layout,
+                };
+                let matrix = match Self::sample_matrix_with_options(image, &options) {
+                    Ok(matrix) => matrix,
+                    Err(_) => continue,
+                };
+                if let Ok(decoded) = decode_matrix(&matrix) {
+                    return Ok(decoded);
+                }
+            }
+        }
+        Err(DecodeError::AutoDetectFailed)
+    }
+
     /// Sample a rendered image into a symbol matrix.
     pub fn sample_matrix(&self, image: &DynamicImage) -> Result<SymbolMatrix> {
-        if self.options.module_px == 0 {
+        Self::sample_matrix_with_options(image, &self.options)
+    }
+
+    /// Sample a rendered image by inferring module size and quiet zone.
+    pub fn sample_matrix_auto(&self, image: &DynamicImage) -> Result<SymbolMatrix> {
+        Ok(self.decode_auto(image)?.matrix)
+    }
+
+    fn sample_matrix_with_options(
+        image: &DynamicImage,
+        options: &DecodeOptions,
+    ) -> Result<SymbolMatrix> {
+        if options.module_px == 0 {
             return Err(DecodeError::InvalidImageDimensions);
         }
 
         let width_modules = image
             .width()
-            .checked_div(self.options.module_px)
+            .checked_div(options.module_px)
             .ok_or(DecodeError::InvalidImageDimensions)?;
         let height_modules = image
             .height()
-            .checked_div(self.options.module_px)
+            .checked_div(options.module_px)
             .ok_or(DecodeError::InvalidImageDimensions)?;
-        if image.width() % self.options.module_px != 0
-            || image.height() % self.options.module_px != 0
-            || width_modules <= self.options.quiet_zone_modules * 2
-            || height_modules <= self.options.quiet_zone_modules * 2
+        if image.width() % options.module_px != 0
+            || image.height() % options.module_px != 0
+            || width_modules <= options.quiet_zone_modules * 2
+            || height_modules <= options.quiet_zone_modules * 2
         {
             return Err(DecodeError::InvalidImageDimensions);
         }
 
-        let symbol_width = (width_modules - self.options.quiet_zone_modules * 2) as u16;
-        let symbol_height = (height_modules - self.options.quiet_zone_modules * 2) as u16;
+        let symbol_width = (width_modules - options.quiet_zone_modules * 2) as u16;
+        let symbol_height = (height_modules - options.quiet_zone_modules * 2) as u16;
         let luma = image.to_luma8();
-        let mut matrix =
-            SymbolMatrix::with_layout(symbol_width, symbol_height, self.options.layout);
+        let mut matrix = SymbolMatrix::with_layout(symbol_width, symbol_height, options.layout);
 
         for y in 0..symbol_height {
             for x in 0..symbol_width {
-                if let Some(cell) = layout::function_cell_for(
-                    self.options.layout,
-                    symbol_width,
-                    symbol_height,
-                    x,
-                    y,
-                ) {
+                if let Some(cell) =
+                    layout::function_cell_for(options.layout, symbol_width, symbol_height, x, y)
+                {
                     matrix.set(x, y, cell)?;
                 } else {
                     let avg = average_module_luma(
                         &luma,
                         u32::from(x),
                         u32::from(y),
-                        self.options.module_px,
-                        self.options.quiet_zone_modules,
+                        options.module_px,
+                        options.quiet_zone_modules,
                     );
-                    matrix.set(x, y, Cell::Data(avg < self.options.threshold))?;
+                    matrix.set(x, y, Cell::Data(avg < options.threshold))?;
                 }
             }
         }
@@ -154,6 +201,38 @@ impl Default for RasterDecoder {
     fn default() -> Self {
         Self::new(DecodeOptions::default())
     }
+}
+
+const AUTO_QUIET_ZONE_MAX: u32 = 12;
+
+fn gcd_u32(mut a: u32, mut b: u32) -> u32 {
+    while b != 0 {
+        let tmp = a % b;
+        a = b;
+        b = tmp;
+    }
+    a
+}
+
+fn divisors_desc(value: u32) -> Vec<u32> {
+    if value == 0 {
+        return Vec::new();
+    }
+    let mut small = Vec::new();
+    let mut large = Vec::new();
+    let mut i = 1u32;
+    while i * i <= value {
+        if value % i == 0 {
+            small.push(i);
+            let other = value / i;
+            if other != i {
+                large.push(other);
+            }
+        }
+        i += 1;
+    }
+    large.extend(small.into_iter().rev());
+    large
 }
 
 fn average_module_luma(
@@ -193,6 +272,16 @@ mod tests {
         let image = RasterRenderer::default().render(&encoded.matrix).unwrap();
         let decoded = RasterDecoder::default()
             .decode(&DynamicImage::ImageRgba8(image))
+            .unwrap();
+        assert_eq!(decoded.frame.payload, b"roundtrip");
+    }
+
+    #[test]
+    fn rendered_symbol_roundtrips_with_auto_sampling() {
+        let encoded = Encoder::default().encode_static(b"roundtrip").unwrap();
+        let image = RasterRenderer::default().render(&encoded.matrix).unwrap();
+        let decoded = RasterDecoder::default()
+            .decode_auto(&DynamicImage::ImageRgba8(image))
             .unwrap();
         assert_eq!(decoded.frame.payload, b"roundtrip");
     }

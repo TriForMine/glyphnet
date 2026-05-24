@@ -54,6 +54,9 @@ enum Command {
     Decode {
         /// Input image path.
         input: PathBuf,
+        /// Infer module size and quiet zone automatically.
+        #[arg(long)]
+        auto: bool,
     },
     /// Print descriptor JSON without rendering.
     Inspect {
@@ -203,7 +206,7 @@ fn main() -> Result<()> {
                 sizing,
             )
         }
-        Command::Decode { input } => decode(input),
+        Command::Decode { input, auto } => decode(input, auto),
         Command::Inspect {
             data,
             profile,
@@ -371,12 +374,18 @@ fn encode(
     Ok(())
 }
 
-fn decode(input: PathBuf) -> Result<()> {
+fn decode(input: PathBuf, auto: bool) -> Result<()> {
     let image =
         image::open(&input).with_context(|| format!("failed to open image {}", input.display()))?;
-    let decoded = RasterDecoder::default()
-        .decode(&image)
-        .context("failed to decode GlyphNet image")?;
+    let decoded = if auto {
+        RasterDecoder::default()
+            .decode_auto(&image)
+            .context("failed to auto-decode GlyphNet image")?
+    } else {
+        RasterDecoder::default()
+            .decode(&image)
+            .context("failed to decode GlyphNet image")?
+    };
     println!(
         "{}",
         serde_json::json!({
