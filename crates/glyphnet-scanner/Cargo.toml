@@ -26,6 +26,8 @@ tracing.workspace = true
 [dev-dependencies]
 glyphnet-encode = { path = "../glyphnet-encode", version = "0.1.0" }
 glyphnet-render = { path = "../glyphnet-render", version = "0.1.0" }
+glyphnet-testkit = { path = "../glyphnet-testkit", version = "0.1.0" }
+rand.workspace = true
 
 [lints]
 workspace = true

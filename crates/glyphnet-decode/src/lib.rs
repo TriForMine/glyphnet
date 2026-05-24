@@ -1,8 +1,8 @@
 //! GlyphNet matrix and raster decoders.
 
 use glyphnet_core::{
-    Cell, Frame, GlyphError, HEADER_LEN, LayoutFamily, Result as CoreResult, SymbolMatrix,
-    bitstream, layout,
+    Cell, Frame, FrameHeader, GlyphError, HEADER_LEN, LayoutFamily, Result as CoreResult,
+    SymbolMatrix, bitstream, layout,
 };
 use glyphnet_ecc::{BlockCode, ParityCode};
 use image::{DynamicImage, GrayImage};
@@ -134,7 +134,7 @@ impl RasterDecoder {
             return Err(DecodeError::InvalidImageDimensions);
         }
         let gcd = gcd_u32(width, height);
-        let mut candidates = divisors_desc(gcd);
+        let mut candidates = module_candidates(gcd, self.options.module_px);
         if candidates.is_empty() {
             return Err(DecodeError::AutoDetectFailed);
         }
@@ -143,19 +143,40 @@ impl RasterDecoder {
         for module_px in candidates.drain(..) {
             let width_modules = width / module_px;
             let height_modules = height / module_px;
-            for quiet_zone in 0..=AUTO_QUIET_ZONE_MAX {
-                if width_modules <= quiet_zone * 2 || height_modules <= quiet_zone * 2 {
+            for (quiet_zone_x, quiet_zone_y) in quiet_zone_candidates(width_modules, height_modules)
+            {
+                if width_modules <= quiet_zone_x * 2 || height_modules <= quiet_zone_y * 2 {
+                    continue;
+                }
+                let symbol_width = width_modules - quiet_zone_x * 2;
+                let symbol_height = height_modules - quiet_zone_y * 2;
+                if !plausible_symbol_geometry(symbol_width, symbol_height) {
                     continue;
                 }
                 for layout in &layouts {
                     for threshold in &thresholds {
                         let options = DecodeOptions {
                             module_px,
-                            quiet_zone_modules: quiet_zone,
+                            quiet_zone_modules: quiet_zone_x.min(quiet_zone_y),
                             threshold: *threshold,
                             layout: *layout,
                         };
-                        let matrix = match Self::sample_matrix_with_luma(&luma, &options) {
+                        if !header_precheck(
+                            &luma,
+                            &options,
+                            quiet_zone_x,
+                            quiet_zone_y,
+                            symbol_width as u16,
+                            symbol_height as u16,
+                        ) {
+                            continue;
+                        }
+                        let matrix = match Self::sample_matrix_with_luma_asymmetric(
+                            &luma,
+                            &options,
+                            quiet_zone_x,
+                            quiet_zone_y,
+                        ) {
                             Ok(matrix) => matrix,
                             Err(_) => continue,
                         };
@@ -164,7 +185,7 @@ impl RasterDecoder {
                                 decoded,
                                 info: AutoDecodeInfo {
                                     module_px,
-                                    quiet_zone_modules: quiet_zone,
+                                    quiet_zone_modules: quiet_zone_x.min(quiet_zone_y),
                                     threshold: *threshold,
                                     layout: *layout,
                                 },
@@ -216,8 +237,42 @@ impl RasterDecoder {
             return Err(DecodeError::InvalidImageDimensions);
         }
 
-        let symbol_width = (width_modules - options.quiet_zone_modules * 2) as u16;
-        let symbol_height = (height_modules - options.quiet_zone_modules * 2) as u16;
+        Self::sample_matrix_with_luma_asymmetric(
+            luma,
+            options,
+            options.quiet_zone_modules,
+            options.quiet_zone_modules,
+        )
+    }
+
+    fn sample_matrix_with_luma_asymmetric(
+        luma: &GrayImage,
+        options: &DecodeOptions,
+        quiet_zone_x_modules: u32,
+        quiet_zone_y_modules: u32,
+    ) -> Result<SymbolMatrix> {
+        if options.module_px == 0 {
+            return Err(DecodeError::InvalidImageDimensions);
+        }
+
+        let width_modules = luma
+            .width()
+            .checked_div(options.module_px)
+            .ok_or(DecodeError::InvalidImageDimensions)?;
+        let height_modules = luma
+            .height()
+            .checked_div(options.module_px)
+            .ok_or(DecodeError::InvalidImageDimensions)?;
+        if luma.width() % options.module_px != 0
+            || luma.height() % options.module_px != 0
+            || width_modules <= quiet_zone_x_modules * 2
+            || height_modules <= quiet_zone_y_modules * 2
+        {
+            return Err(DecodeError::InvalidImageDimensions);
+        }
+
+        let symbol_width = (width_modules - quiet_zone_x_modules * 2) as u16;
+        let symbol_height = (height_modules - quiet_zone_y_modules * 2) as u16;
         let mut matrix = SymbolMatrix::with_layout(symbol_width, symbol_height, options.layout);
 
         for y in 0..symbol_height {
@@ -232,7 +287,8 @@ impl RasterDecoder {
                         u32::from(x),
                         u32::from(y),
                         options.module_px,
-                        options.quiet_zone_modules,
+                        quiet_zone_x_modules,
+                        quiet_zone_y_modules,
                     );
                     matrix.set(x, y, Cell::Data(avg < options.threshold))?;
                 }
@@ -250,6 +306,10 @@ impl Default for RasterDecoder {
 }
 
 const AUTO_QUIET_ZONE_MAX: u32 = 12;
+const AUTO_MIN_SYMBOL_MODULES: u32 = 20;
+const AUTO_MAX_SYMBOL_WIDTH_MODULES: u32 = 512;
+const AUTO_MAX_SYMBOL_HEIGHT_MODULES: u32 = 256;
+const AUTO_MAX_SYMBOL_AREA_MODULES: u32 = 65_536;
 
 fn gcd_u32(mut a: u32, mut b: u32) -> u32 {
     while b != 0 {
@@ -279,6 +339,76 @@ fn divisors_desc(value: u32) -> Vec<u32> {
     }
     large.extend(small.into_iter().rev());
     large
+}
+
+fn module_candidates(gcd: u32, preferred: u32) -> Vec<u32> {
+    let mut candidates = Vec::new();
+    if preferred != 0 && gcd % preferred == 0 {
+        candidates.push(preferred);
+    }
+    for candidate in divisors_desc(gcd) {
+        if !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+    }
+    candidates
+}
+
+fn quiet_zone_candidates(width_modules: u32, height_modules: u32) -> Vec<(u32, u32)> {
+    let mut candidates = Vec::new();
+    for quiet in 0..=AUTO_QUIET_ZONE_MAX {
+        if width_modules > quiet * 2 && height_modules > quiet * 2 {
+            let symbol_width = width_modules - quiet * 2;
+            let symbol_height = height_modules - quiet * 2;
+            if reference_sized_geometry(symbol_width, symbol_height) {
+                candidates.push((quiet, quiet));
+            }
+        }
+    }
+    for quiet_x in 0..=AUTO_QUIET_ZONE_MAX {
+        for quiet_y in 0..=AUTO_QUIET_ZONE_MAX {
+            if quiet_x == quiet_y {
+                continue;
+            }
+            if width_modules > quiet_x * 2 && height_modules > quiet_y * 2 {
+                let symbol_width = width_modules - quiet_x * 2;
+                let symbol_height = height_modules - quiet_y * 2;
+                if reference_sized_geometry(symbol_width, symbol_height) {
+                    candidates.push((quiet_x, quiet_y));
+                }
+            }
+        }
+    }
+    candidates
+}
+
+fn reference_sized_geometry(width: u32, height: u32) -> bool {
+    if width == height && width >= 29 {
+        return true;
+    }
+    if width >= 96 && height >= 24 && width % 4 == 0 && height % 4 == 0 {
+        let aspect = width as f32 / height.max(1) as f32;
+        return (2.0..=6.5).contains(&aspect);
+    }
+    if width >= 48 && height >= 28 && width % 2 == 0 && height % 2 == 0 {
+        let aspect = width as f32 / height.max(1) as f32;
+        return (1.0..=3.2).contains(&aspect);
+    }
+    false
+}
+
+fn plausible_symbol_geometry(width: u32, height: u32) -> bool {
+    if width < AUTO_MIN_SYMBOL_MODULES || height < AUTO_MIN_SYMBOL_MODULES {
+        return false;
+    }
+    if width > AUTO_MAX_SYMBOL_WIDTH_MODULES || height > AUTO_MAX_SYMBOL_HEIGHT_MODULES {
+        return false;
+    }
+    if width.saturating_mul(height) > AUTO_MAX_SYMBOL_AREA_MODULES {
+        return false;
+    }
+    let aspect = width as f32 / height.max(1) as f32;
+    (0.5..=8.0).contains(&aspect)
 }
 
 fn layout_candidates(primary: LayoutFamily) -> Vec<LayoutFamily> {
@@ -358,10 +488,11 @@ fn average_module_luma(
     module_x: u32,
     module_y: u32,
     module_px: u32,
-    quiet_zone_modules: u32,
+    quiet_zone_x_modules: u32,
+    quiet_zone_y_modules: u32,
 ) -> u8 {
-    let start_x = (module_x + quiet_zone_modules) * module_px;
-    let start_y = (module_y + quiet_zone_modules) * module_px;
+    let start_x = (module_x + quiet_zone_x_modules) * module_px;
+    let start_y = (module_y + quiet_zone_y_modules) * module_px;
     let mut sum = 0u32;
     for y in start_y..start_y + module_px {
         for x in start_x..start_x + module_px {
@@ -369,6 +500,41 @@ fn average_module_luma(
         }
     }
     (sum / (module_px * module_px)) as u8
+}
+
+fn header_precheck(
+    luma: &GrayImage,
+    options: &DecodeOptions,
+    quiet_zone_x_modules: u32,
+    quiet_zone_y_modules: u32,
+    symbol_width: u16,
+    symbol_height: u16,
+) -> bool {
+    let mut bits = Vec::with_capacity(HEADER_LEN * 8);
+    'rows: for y in 0..symbol_height {
+        for x in 0..symbol_width {
+            if !layout::is_data_module_for(options.layout, symbol_width, symbol_height, x, y) {
+                continue;
+            }
+            let avg = average_module_luma(
+                luma,
+                u32::from(x),
+                u32::from(y),
+                options.module_px,
+                quiet_zone_x_modules,
+                quiet_zone_y_modules,
+            );
+            bits.push(avg < options.threshold);
+            if bits.len() == HEADER_LEN * 8 {
+                break 'rows;
+            }
+        }
+    }
+    if bits.len() < HEADER_LEN * 8 {
+        return false;
+    }
+    let bytes = bitstream::bits_to_bytes(&bits);
+    FrameHeader::decode(&bytes).is_ok()
 }
 
 /// Validate a sampled byte stream without constructing a matrix.

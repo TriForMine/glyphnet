@@ -1,6 +1,6 @@
 //! Real-time scanner orchestration for GlyphNet.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use glyphnet_core::{Frame, TransmissionMode};
 use glyphnet_cv::{
@@ -184,15 +184,17 @@ pub fn scan_still(image: &DynamicImage, mode: TransmissionMode) -> Result<StillS
     let candidates = find_anchor_candidates(&binary, profile)?;
     if let Some(quad) = estimate_quad(&binary, &candidates) {
         let (warp_width, warp_height) = quad_dimensions(quad);
-        let warped = warp_perspective_gray(&gray, quad, warp_width, warp_height)?;
-        let warped = DynamicImage::ImageLuma8(warped);
-        let decoded = decoder.decode_auto_with_info(&warped)?;
-        return Ok(StillScanResult {
-            decoded,
-            crop: None,
-            quad: Some(quad),
-            warp_size: Some((warp_width, warp_height)),
-        });
+        if let Ok(warped) = warp_perspective_gray(&gray, quad, warp_width, warp_height) {
+            let warped = DynamicImage::ImageLuma8(warped);
+            if let Ok(decoded) = decoder.decode_auto_with_info(&warped) {
+                return Ok(StillScanResult {
+                    decoded,
+                    crop: None,
+                    quad: Some(quad),
+                    warp_size: Some((warp_width, warp_height)),
+                });
+            }
+        }
     }
 
     let bounds = match dark_bounds(&binary) {
@@ -221,33 +223,92 @@ pub fn scan_still(image: &DynamicImage, mode: TransmissionMode) -> Result<StillS
 }
 
 fn dark_bounds(binary: &GrayImage) -> Option<ScanRegion> {
-    let mut min_x = binary.width();
-    let mut min_y = binary.height();
-    let mut max_x = 0u32;
-    let mut max_y = 0u32;
-    let mut found = false;
+    let width = binary.width();
+    let height = binary.height();
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let mut visited = vec![false; width as usize * height as usize];
+    let mut best: Option<(u32, ScanRegion)> = None;
+    let mut significant: Option<ScanRegion> = None;
+
     for y in 0..binary.height() {
         for x in 0..binary.width() {
-            if binary.get_pixel(x, y).0[0] == 0 {
-                min_x = min_x.min(x);
-                min_y = min_y.min(y);
-                max_x = max_x.max(x);
-                max_y = max_y.max(y);
-                found = true;
+            let index = pixel_index(width, x, y);
+            if visited[index] || binary.get_pixel(x, y).0[0] != 0 {
+                continue;
+            }
+
+            let mut queue = VecDeque::from([(x, y)]);
+            visited[index] = true;
+            let mut count = 0u32;
+            let mut min_x = x;
+            let mut min_y = y;
+            let mut max_x = x;
+            let mut max_y = y;
+
+            while let Some((cx, cy)) = queue.pop_front() {
+                count += 1;
+                min_x = min_x.min(cx);
+                min_y = min_y.min(cy);
+                max_x = max_x.max(cx);
+                max_y = max_y.max(cy);
+
+                let y_start = cy.saturating_sub(1);
+                let y_end = (cy + 1).min(height - 1);
+                let x_start = cx.saturating_sub(1);
+                let x_end = (cx + 1).min(width - 1);
+                for ny in y_start..=y_end {
+                    for nx in x_start..=x_end {
+                        let neighbor_index = pixel_index(width, nx, ny);
+                        if visited[neighbor_index] || binary.get_pixel(nx, ny).0[0] != 0 {
+                            continue;
+                        }
+                        visited[neighbor_index] = true;
+                        queue.push_back((nx, ny));
+                    }
+                }
+            }
+
+            let region = ScanRegion {
+                x: min_x,
+                y: min_y,
+                width: max_x.saturating_sub(min_x).saturating_add(1),
+                height: max_y.saturating_sub(min_y).saturating_add(1),
+            };
+            if count >= MIN_COMPONENT_PIXELS {
+                significant = Some(match significant {
+                    Some(existing) => union_region(existing, region),
+                    None => region,
+                });
+            }
+            if best.is_none_or(|(best_count, _)| count > best_count) {
+                best = Some((count, region));
             }
         }
     }
-    if !found {
-        return None;
-    }
-    let width = max_x.saturating_sub(min_x).saturating_add(1);
-    let height = max_y.saturating_sub(min_y).saturating_add(1);
-    Some(ScanRegion {
+    significant.or_else(|| best.map(|(_, region)| region))
+}
+
+fn pixel_index(width: u32, x: u32, y: u32) -> usize {
+    y as usize * width as usize + x as usize
+}
+
+const MIN_COMPONENT_PIXELS: u32 = 16;
+
+fn union_region(a: ScanRegion, b: ScanRegion) -> ScanRegion {
+    let min_x = a.x.min(b.x);
+    let min_y = a.y.min(b.y);
+    let max_x = a.x.saturating_add(a.width).max(b.x.saturating_add(b.width));
+    let max_y =
+        a.y.saturating_add(a.height)
+            .max(b.y.saturating_add(b.height));
+    ScanRegion {
         x: min_x,
         y: min_y,
-        width,
-        height,
-    })
+        width: max_x.saturating_sub(min_x),
+        height: max_y.saturating_sub(min_y),
+    }
 }
 
 fn expand_region(region: ScanRegion, padding: u32, width: u32, height: u32) -> ScanRegion {
@@ -314,7 +375,11 @@ mod tests {
     use glyphnet_core::{EccLevel, Frame};
     use glyphnet_encode::Encoder;
     use glyphnet_render::RasterRenderer;
-    use image::{Rgba, RgbaImage};
+    use glyphnet_testkit::{
+        add_salt_pepper_noise, adjust_exposure, blur, place_on_canvas, resize, skew_x_on_white,
+    };
+    use image::Rgba;
+    use rand::{SeedableRng, rngs::StdRng};
 
     use super::*;
 
@@ -347,13 +412,7 @@ mod tests {
     fn scan_still_crops_and_decodes() {
         let encoded = Encoder::default().encode_static(b"scan").unwrap();
         let symbol = RasterRenderer::default().render(&encoded.matrix).unwrap();
-        let padding = 32;
-        let mut canvas = RgbaImage::from_pixel(
-            symbol.width() + padding * 2,
-            symbol.height() + padding * 2,
-            Rgba([255, 255, 255, 255]),
-        );
-        image::imageops::overlay(&mut canvas, &symbol, i64::from(padding), i64::from(padding));
+        let canvas = place_on_canvas(&symbol, 32, 32, Rgba([255, 255, 255, 255]));
         let image = DynamicImage::ImageRgba8(canvas);
         let result = scan_still(&image, TransmissionMode::Print).unwrap();
         assert_eq!(result.decoded.decoded.frame.payload, b"scan");
@@ -368,5 +427,52 @@ mod tests {
             assert!(width > 0);
             assert!(height > 0);
         }
+    }
+
+    #[test]
+    fn scan_still_decodes_resized_symbol() {
+        let encoded = Encoder::default().encode_static(b"resized").unwrap();
+        let symbol = RasterRenderer::default().render(&encoded.matrix).unwrap();
+        let resized = resize(&symbol, symbol.width() / 2, symbol.height() / 2);
+        let canvas = place_on_canvas(&resized, 24, 20, Rgba([255, 255, 255, 255]));
+        let result =
+            scan_still(&DynamicImage::ImageRgba8(canvas), TransmissionMode::Print).unwrap();
+        assert_eq!(result.decoded.decoded.frame.payload, b"resized");
+    }
+
+    #[test]
+    fn scan_still_decodes_noisy_exposure_shifted_symbol() {
+        let encoded = Encoder::default().encode_static(b"weathered").unwrap();
+        let symbol = RasterRenderer::default().render(&encoded.matrix).unwrap();
+        let mut canvas = place_on_canvas(&symbol, 32, 32, Rgba([238, 238, 232, 255]));
+        adjust_exposure(&mut canvas, -8);
+        let mut rng = StdRng::seed_from_u64(0x51a7);
+        add_salt_pepper_noise(&mut canvas, 0.0003, &mut rng);
+        let result =
+            scan_still(&DynamicImage::ImageRgba8(canvas), TransmissionMode::Print).unwrap();
+        assert_eq!(result.decoded.decoded.frame.payload, b"weathered");
+    }
+
+    #[test]
+    fn scan_still_decodes_mildly_blurred_symbol() {
+        let encoded = Encoder::default().encode_static(b"blur").unwrap();
+        let symbol = RasterRenderer::default().render(&encoded.matrix).unwrap();
+        let canvas = place_on_canvas(&symbol, 32, 32, Rgba([255, 255, 255, 255]));
+        let blurred = blur(&canvas, 0.2);
+        let result =
+            scan_still(&DynamicImage::ImageRgba8(blurred), TransmissionMode::Print).unwrap();
+        assert_eq!(result.decoded.decoded.frame.payload, b"blur");
+    }
+
+    #[test]
+    #[ignore = "requires stronger perspective rectification than the current reference scanner"]
+    fn scan_still_decodes_mild_horizontal_skew() {
+        let encoded = Encoder::default().encode_static(b"skew").unwrap();
+        let symbol = RasterRenderer::default().render(&encoded.matrix).unwrap();
+        let canvas = place_on_canvas(&symbol, 28, 28, Rgba([255, 255, 255, 255]));
+        let skewed = skew_x_on_white(&canvas, 10, -10);
+        let result =
+            scan_still(&DynamicImage::ImageRgba8(skewed), TransmissionMode::Print).unwrap();
+        assert_eq!(result.decoded.decoded.frame.payload, b"skew");
     }
 }
