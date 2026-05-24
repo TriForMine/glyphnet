@@ -115,6 +115,7 @@ fountain/RaptorQ-like recovery under dropped frames.
 cargo test --workspace
 cargo run -p glyphnet-cli -- profiles
 cargo run -p glyphnet-cli -- encode --data "hello" --output hello.png
+cargo run -p glyphnet-cli -- encode --data "hello" --output hello-fit.png --fit-width-px 1200 --fit-height-px 400
 cargo run -p glyphnet-cli -- encode --profile spectral-screen --data "hello" --output hello-screen.png
 cargo run -p glyphnet-cli -- decode hello.png
 cargo run -p glyphnet-cli -- burst --profile pulse-burst --data "large payload" --output-dir burst_frames

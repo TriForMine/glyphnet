@@ -43,6 +43,12 @@ enum Command {
         /// Explicit symbol height in modules.
         #[arg(long, value_name = "MODULES")]
         height_modules: Option<u16>,
+        /// Fit output width in pixels.
+        #[arg(long, value_name = "PX")]
+        fit_width_px: Option<u32>,
+        /// Fit output height in pixels.
+        #[arg(long, value_name = "PX")]
+        fit_height_px: Option<u32>,
     },
     /// Decode a rendered PNG/JPEG image produced by the reference renderer.
     Decode {
@@ -90,6 +96,12 @@ enum Command {
         /// Explicit symbol height in modules.
         #[arg(long, value_name = "MODULES")]
         height_modules: Option<u16>,
+        /// Fit output width in pixels.
+        #[arg(long, value_name = "PX")]
+        fit_width_px: Option<u32>,
+        /// Fit output height in pixels.
+        #[arg(long, value_name = "PX")]
+        fit_height_px: Option<u32>,
     },
     /// Print the built-in protocol profile catalog as JSON.
     Profiles,
@@ -177,8 +189,10 @@ fn main() -> Result<()> {
             format,
             width_modules,
             height_modules,
+            fit_width_px,
+            fit_height_px,
         } => {
-            let geometry = geometry_override(width_modules, height_modules)?;
+            let sizing = render_sizing(width_modules, height_modules, fit_width_px, fit_height_px)?;
             encode(
                 data.as_bytes(),
                 output,
@@ -186,7 +200,7 @@ fn main() -> Result<()> {
                 mode.map(Into::into),
                 ecc.map(Into::into),
                 format,
-                geometry,
+                sizing,
             )
         }
         Command::Decode { input } => decode(input),
@@ -214,19 +228,33 @@ fn main() -> Result<()> {
             frame_payload,
             width_modules,
             height_modules,
+            fit_width_px,
+            fit_height_px,
         } => {
-            let geometry = geometry_override(width_modules, height_modules)?;
+            let sizing = render_sizing(width_modules, height_modules, fit_width_px, fit_height_px)?;
             burst(
                 data.as_bytes(),
                 output_dir,
                 profile.into(),
                 frame_payload,
-                geometry,
+                sizing,
             )
         }
         Command::Profiles => profiles(),
         Command::BenchPlan => bench_plan(),
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FitSize {
+    width_px: u32,
+    height_px: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RenderSizing {
+    geometry: Option<SymbolGeometry>,
+    fit: Option<FitSize>,
 }
 
 fn geometry_override(
@@ -242,6 +270,48 @@ fn geometry_override(
             Ok(Some(SymbolGeometry::new(width, height)))
         }
         _ => bail!("--width-modules and --height-modules must be set together"),
+    }
+}
+
+fn fit_override(fit_width_px: Option<u32>, fit_height_px: Option<u32>) -> Result<Option<FitSize>> {
+    match (fit_width_px, fit_height_px) {
+        (None, None) => Ok(None),
+        (Some(width_px), Some(height_px)) => {
+            if width_px == 0 || height_px == 0 {
+                bail!("fit pixel size must be non-zero");
+            }
+            Ok(Some(FitSize {
+                width_px,
+                height_px,
+            }))
+        }
+        _ => bail!("--fit-width-px and --fit-height-px must be set together"),
+    }
+}
+
+fn render_sizing(
+    width_modules: Option<u16>,
+    height_modules: Option<u16>,
+    fit_width_px: Option<u32>,
+    fit_height_px: Option<u32>,
+) -> Result<RenderSizing> {
+    Ok(RenderSizing {
+        geometry: geometry_override(width_modules, height_modules)?,
+        fit: fit_override(fit_width_px, fit_height_px)?,
+    })
+}
+
+fn apply_fit(
+    options: RenderOptions,
+    symbol_width: u16,
+    symbol_height: u16,
+    fit: Option<FitSize>,
+) -> Result<RenderOptions> {
+    match fit {
+        Some(fit) => {
+            Ok(options.fit_to_size(symbol_width, symbol_height, fit.width_px, fit.height_px)?)
+        }
+        None => Ok(options),
     }
 }
 
@@ -269,12 +339,17 @@ fn encode(
     mode: Option<TransmissionMode>,
     ecc_level: Option<EccLevel>,
     format: FormatArg,
-    geometry: Option<SymbolGeometry>,
+    sizing: RenderSizing,
 ) -> Result<()> {
-    let encoded = encoder(profile, mode, ecc_level, geometry)
+    let encoded = encoder(profile, mode, ecc_level, sizing.geometry)
         .encode_static(payload)
         .context("failed to encode payload")?;
-    let render_options = RenderOptions::for_descriptor(&encoded.descriptor);
+    let render_options = apply_fit(
+        RenderOptions::for_descriptor(&encoded.descriptor),
+        encoded.descriptor.width,
+        encoded.descriptor.height,
+        sizing.fit,
+    )?;
     match format {
         FormatArg::Png => {
             let image = RasterRenderer::new(render_options)
@@ -336,20 +411,26 @@ fn burst(
     output_dir: PathBuf,
     profile: ProfileId,
     frame_payload: usize,
-    geometry: Option<SymbolGeometry>,
+    sizing: RenderSizing,
 ) -> Result<()> {
     fs::create_dir_all(&output_dir)
         .with_context(|| format!("failed to create {}", output_dir.display()))?;
     let mut config = EncoderConfig::for_profile(profile);
     config.mode = TransmissionMode::Burst;
     config.max_frame_payload = frame_payload;
-    config.geometry = geometry;
+    config.geometry = sizing.geometry;
     let encoder = Encoder::new(config);
     let frames = encoder
         .encode_burst(payload)
         .context("failed to encode burst")?;
     for frame in frames {
-        let svg = SvgRenderer::new(RenderOptions::for_descriptor(&frame.descriptor))
+        let render_options = apply_fit(
+            RenderOptions::for_descriptor(&frame.descriptor),
+            frame.descriptor.width,
+            frame.descriptor.height,
+            sizing.fit,
+        )?;
+        let svg = SvgRenderer::new(render_options)
             .render(&frame.matrix)
             .context("failed to render burst frame")?;
         let path = output_dir.join(format!("frame_{:04}.svg", frame.descriptor.frame_index));
