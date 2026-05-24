@@ -5,7 +5,7 @@ use glyphnet_core::{
     bitstream, layout,
 };
 use glyphnet_ecc::{BlockCode, ParityCode};
-use image::DynamicImage;
+use image::{DynamicImage, GrayImage};
 use thiserror::Error;
 
 /// Result type for decode operations.
@@ -100,8 +100,9 @@ impl RasterDecoder {
 
     /// Decode a rendered GlyphNet image by inferring module size and quiet zone.
     pub fn decode_auto(&self, image: &DynamicImage) -> Result<DecodedSymbol> {
-        let width = image.width();
-        let height = image.height();
+        let luma = image.to_luma8();
+        let width = luma.width();
+        let height = luma.height();
         if width == 0 || height == 0 {
             return Err(DecodeError::InvalidImageDimensions);
         }
@@ -110,6 +111,7 @@ impl RasterDecoder {
         if candidates.is_empty() {
             return Err(DecodeError::AutoDetectFailed);
         }
+        let thresholds = threshold_candidates(self.options.threshold, &luma);
         let layouts = layout_candidates(self.options.layout);
         for module_px in candidates.drain(..) {
             let width_modules = width / module_px;
@@ -119,18 +121,20 @@ impl RasterDecoder {
                     continue;
                 }
                 for layout in &layouts {
-                    let options = DecodeOptions {
-                        module_px,
-                        quiet_zone_modules: quiet_zone,
-                        threshold: self.options.threshold,
-                        layout: *layout,
-                    };
-                    let matrix = match Self::sample_matrix_with_options(image, &options) {
-                        Ok(matrix) => matrix,
-                        Err(_) => continue,
-                    };
-                    if let Ok(decoded) = decode_matrix(&matrix) {
-                        return Ok(decoded);
+                    for threshold in &thresholds {
+                        let options = DecodeOptions {
+                            module_px,
+                            quiet_zone_modules: quiet_zone,
+                            threshold: *threshold,
+                            layout: *layout,
+                        };
+                        let matrix = match Self::sample_matrix_with_luma(&luma, &options) {
+                            Ok(matrix) => matrix,
+                            Err(_) => continue,
+                        };
+                        if let Ok(decoded) = decode_matrix(&matrix) {
+                            return Ok(decoded);
+                        }
                     }
                 }
             }
@@ -152,20 +156,25 @@ impl RasterDecoder {
         image: &DynamicImage,
         options: &DecodeOptions,
     ) -> Result<SymbolMatrix> {
+        let luma = image.to_luma8();
+        Self::sample_matrix_with_luma(&luma, options)
+    }
+
+    fn sample_matrix_with_luma(luma: &GrayImage, options: &DecodeOptions) -> Result<SymbolMatrix> {
         if options.module_px == 0 {
             return Err(DecodeError::InvalidImageDimensions);
         }
 
-        let width_modules = image
+        let width_modules = luma
             .width()
             .checked_div(options.module_px)
             .ok_or(DecodeError::InvalidImageDimensions)?;
-        let height_modules = image
+        let height_modules = luma
             .height()
             .checked_div(options.module_px)
             .ok_or(DecodeError::InvalidImageDimensions)?;
-        if image.width() % options.module_px != 0
-            || image.height() % options.module_px != 0
+        if luma.width() % options.module_px != 0
+            || luma.height() % options.module_px != 0
             || width_modules <= options.quiet_zone_modules * 2
             || height_modules <= options.quiet_zone_modules * 2
         {
@@ -174,7 +183,6 @@ impl RasterDecoder {
 
         let symbol_width = (width_modules - options.quiet_zone_modules * 2) as u16;
         let symbol_height = (height_modules - options.quiet_zone_modules * 2) as u16;
-        let luma = image.to_luma8();
         let mut matrix = SymbolMatrix::with_layout(symbol_width, symbol_height, options.layout);
 
         for y in 0..symbol_height {
@@ -185,7 +193,7 @@ impl RasterDecoder {
                     matrix.set(x, y, cell)?;
                 } else {
                     let avg = average_module_luma(
-                        &luma,
+                        luma,
                         u32::from(x),
                         u32::from(y),
                         options.module_px,
@@ -259,6 +267,57 @@ fn layout_candidates(primary: LayoutFamily) -> Vec<LayoutFamily> {
     layouts
 }
 
+fn threshold_candidates(configured: u8, luma: &GrayImage) -> Vec<u8> {
+    let estimated = estimate_threshold_otsu(luma);
+    let mut thresholds = vec![estimated];
+    if estimated <= 1 || estimated >= 254 {
+        thresholds.push(128);
+    }
+    if configured != estimated && !thresholds.contains(&configured) {
+        thresholds.push(configured);
+    }
+    thresholds
+}
+
+fn estimate_threshold_otsu(luma: &GrayImage) -> u8 {
+    let mut histogram = [0u32; 256];
+    for pixel in luma.pixels() {
+        histogram[pixel[0] as usize] += 1;
+    }
+    let total = u64::from(luma.width()).saturating_mul(u64::from(luma.height()));
+    if total == 0 {
+        return 0;
+    }
+    let mut sum_total = 0u64;
+    for (i, count) in histogram.iter().enumerate() {
+        sum_total += (i as u64) * u64::from(*count);
+    }
+    let mut sum_background = 0u64;
+    let mut weight_background = 0u64;
+    let mut max_variance = -1.0f64;
+    let mut threshold = 0u8;
+    for (i, count) in histogram.iter().enumerate() {
+        weight_background += u64::from(*count);
+        if weight_background == 0 {
+            continue;
+        }
+        let weight_foreground = total - weight_background;
+        if weight_foreground == 0 {
+            break;
+        }
+        sum_background += (i as u64) * u64::from(*count);
+        let mean_background = sum_background as f64 / weight_background as f64;
+        let mean_foreground = (sum_total - sum_background) as f64 / weight_foreground as f64;
+        let diff = mean_background - mean_foreground;
+        let variance = (weight_background as f64) * (weight_foreground as f64) * diff * diff;
+        if variance > max_variance {
+            max_variance = variance;
+            threshold = i as u8;
+        }
+    }
+    threshold
+}
+
 fn average_module_luma(
     image: &image::GrayImage,
     module_x: u32,
@@ -319,6 +378,20 @@ mod tests {
             .decode_auto(&DynamicImage::ImageRgba8(image))
             .unwrap();
         assert_eq!(decoded.frame.payload, b"matrix");
+    }
+
+    #[test]
+    fn auto_threshold_overrides_bad_config() {
+        let encoded = Encoder::default().encode_static(b"threshold").unwrap();
+        let image = RasterRenderer::default().render(&encoded.matrix).unwrap();
+        let decoder = RasterDecoder::new(DecodeOptions {
+            threshold: 0,
+            ..DecodeOptions::default()
+        });
+        let decoded = decoder
+            .decode_auto(&DynamicImage::ImageRgba8(image))
+            .unwrap();
+        assert_eq!(decoded.frame.payload, b"threshold");
     }
 
     #[test]
