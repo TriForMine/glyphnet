@@ -110,6 +110,7 @@ impl RasterDecoder {
         if candidates.is_empty() {
             return Err(DecodeError::AutoDetectFailed);
         }
+        let layouts = layout_candidates(self.options.layout);
         for module_px in candidates.drain(..) {
             let width_modules = width / module_px;
             let height_modules = height / module_px;
@@ -117,18 +118,20 @@ impl RasterDecoder {
                 if width_modules <= quiet_zone * 2 || height_modules <= quiet_zone * 2 {
                     continue;
                 }
-                let options = DecodeOptions {
-                    module_px,
-                    quiet_zone_modules: quiet_zone,
-                    threshold: self.options.threshold,
-                    layout: self.options.layout,
-                };
-                let matrix = match Self::sample_matrix_with_options(image, &options) {
-                    Ok(matrix) => matrix,
-                    Err(_) => continue,
-                };
-                if let Ok(decoded) = decode_matrix(&matrix) {
-                    return Ok(decoded);
+                for layout in &layouts {
+                    let options = DecodeOptions {
+                        module_px,
+                        quiet_zone_modules: quiet_zone,
+                        threshold: self.options.threshold,
+                        layout: *layout,
+                    };
+                    let matrix = match Self::sample_matrix_with_options(image, &options) {
+                        Ok(matrix) => matrix,
+                        Err(_) => continue,
+                    };
+                    if let Ok(decoded) = decode_matrix(&matrix) {
+                        return Ok(decoded);
+                    }
                 }
             }
         }
@@ -235,6 +238,27 @@ fn divisors_desc(value: u32) -> Vec<u32> {
     large
 }
 
+fn layout_candidates(primary: LayoutFamily) -> Vec<LayoutFamily> {
+    let all = [
+        LayoutFamily::RibbonWeave,
+        LayoutFamily::SpectralMesh,
+        LayoutFamily::PulseStream,
+        LayoutFamily::Constellation,
+        LayoutFamily::FrameGrid,
+        LayoutFamily::Matrix,
+        LayoutFamily::Hexagonal,
+        LayoutFamily::Radial,
+    ];
+    let mut layouts = Vec::with_capacity(all.len());
+    layouts.push(primary);
+    for layout in all {
+        if layout != primary {
+            layouts.push(layout);
+        }
+    }
+    layouts
+}
+
 fn average_module_luma(
     image: &image::GrayImage,
     module_x: u32,
@@ -284,6 +308,17 @@ mod tests {
             .decode_auto(&DynamicImage::ImageRgba8(image))
             .unwrap();
         assert_eq!(decoded.frame.payload, b"roundtrip");
+    }
+
+    #[test]
+    fn matrix_layout_roundtrips_with_auto_layout() {
+        let encoder = Encoder::new(EncoderConfig::for_profile(ProfileId::MatrixCompat));
+        let encoded = encoder.encode_static(b"matrix").unwrap();
+        let image = RasterRenderer::default().render(&encoded.matrix).unwrap();
+        let decoded = RasterDecoder::default()
+            .decode_auto(&DynamicImage::ImageRgba8(image))
+            .unwrap();
+        assert_eq!(decoded.frame.payload, b"matrix");
     }
 
     #[test]

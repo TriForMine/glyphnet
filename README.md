@@ -122,6 +122,8 @@ cargo run -p glyphnet-cli -- decode --auto hello.png
 cargo run -p glyphnet-cli -- burst --profile pulse-burst --data "large payload" --output-dir burst_frames
 ```
 
+`decode --auto` infers module size, quiet zone, and layout family from the image.
+
 ## Engineering Workflow
 
 The CI setup is designed to keep the project maintainable:

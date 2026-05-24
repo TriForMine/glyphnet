@@ -117,7 +117,7 @@ The current decoder supports rendered reference images. The scanner roadmap is:
 2. Adaptive threshold and denoise.
 3. Detect anchor candidates.
 4. Estimate perspective transform.
-5. (Optional) auto-infer module size and quiet zone from rendered images.
+5. (Optional) auto-infer module size, quiet zone, and layout family from rendered images.
 6. Sample modules using timing and alignment markers.
 7. Decode matrix bits.
 8. Validate header, payload CRC, and ECC.
