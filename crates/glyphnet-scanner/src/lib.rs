@@ -3,9 +3,9 @@
 use std::collections::{BTreeMap, HashMap};
 
 use glyphnet_core::{Frame, TransmissionMode};
-use glyphnet_cv::VisionProfile;
-use glyphnet_decode::{DecodeOptions, RasterDecoder};
-use image::DynamicImage;
+use glyphnet_cv::{VisionProfile, adaptive_threshold, grayscale};
+use glyphnet_decode::{AutoDecodedSymbol, DecodeError, DecodeOptions, RasterDecoder};
+use image::{DynamicImage, GrayImage};
 use thiserror::Error;
 
 /// Result type for scanner operations.
@@ -17,6 +17,9 @@ pub enum ScannerError {
     /// Wrapped decode error.
     #[error(transparent)]
     Decode(#[from] glyphnet_decode::DecodeError),
+    /// Wrapped CV error.
+    #[error(transparent)]
+    Cv(#[from] glyphnet_cv::CvError),
     /// Conflicting burst metadata was observed.
     #[error("inconsistent burst metadata for stream {0}")]
     InconsistentBurst(u64),
@@ -67,6 +70,28 @@ pub struct ScanEvent {
     pub complete_payload: Option<Vec<u8>>,
     /// Capture timestamp for diagnostics.
     pub timestamp_micros: u64,
+}
+
+/// Axis-aligned scan region in pixel coordinates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScanRegion {
+    /// Left pixel.
+    pub x: u32,
+    /// Top pixel.
+    pub y: u32,
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+}
+
+/// Result of scanning a still image.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StillScanResult {
+    /// Auto-decoded symbol and inferred parameters.
+    pub decoded: AutoDecodedSymbol,
+    /// Crop region used for decoding, if any.
+    pub crop: Option<ScanRegion>,
 }
 
 /// Stateful real-time scanner.
@@ -134,6 +159,93 @@ impl Default for Scanner {
     }
 }
 
+/// Scan a still image by attempting auto-decode, then a coarse crop if needed.
+pub fn scan_still(image: &DynamicImage, mode: TransmissionMode) -> Result<StillScanResult> {
+    let decoder = RasterDecoder::default();
+    if let Ok(decoded) = decoder.decode_auto_with_info(image) {
+        return Ok(StillScanResult {
+            decoded,
+            crop: None,
+        });
+    }
+
+    let profile = VisionProfile::for_mode(mode);
+    let gray = grayscale(image)?;
+    let binary = adaptive_threshold(&gray, profile.threshold_radius, profile.threshold_bias)?;
+    let bounds = match dark_bounds(&binary) {
+        Some(bounds) => bounds,
+        None => return Err(DecodeError::AutoDetectFailed.into()),
+    };
+    let padding = profile.min_anchor_px.max(8);
+    let expanded = expand_region(bounds, padding, image.width(), image.height());
+    let cropped = image::imageops::crop_imm(
+        image,
+        expanded.x,
+        expanded.y,
+        expanded.width,
+        expanded.height,
+    )
+    .to_image();
+    let cropped = DynamicImage::ImageRgba8(cropped);
+    let decoded = decoder.decode_auto_with_info(&cropped)?;
+
+    Ok(StillScanResult {
+        decoded,
+        crop: Some(expanded),
+    })
+}
+
+fn dark_bounds(binary: &GrayImage) -> Option<ScanRegion> {
+    let mut min_x = binary.width();
+    let mut min_y = binary.height();
+    let mut max_x = 0u32;
+    let mut max_y = 0u32;
+    let mut found = false;
+    for y in 0..binary.height() {
+        for x in 0..binary.width() {
+            if binary.get_pixel(x, y).0[0] == 0 {
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+                found = true;
+            }
+        }
+    }
+    if !found {
+        return None;
+    }
+    let width = max_x.saturating_sub(min_x).saturating_add(1);
+    let height = max_y.saturating_sub(min_y).saturating_add(1);
+    Some(ScanRegion {
+        x: min_x,
+        y: min_y,
+        width,
+        height,
+    })
+}
+
+fn expand_region(region: ScanRegion, padding: u32, width: u32, height: u32) -> ScanRegion {
+    let x = region.x.saturating_sub(padding);
+    let y = region.y.saturating_sub(padding);
+    let max_x = region
+        .x
+        .saturating_add(region.width)
+        .saturating_add(padding)
+        .min(width);
+    let max_y = region
+        .y
+        .saturating_add(region.height)
+        .saturating_add(padding)
+        .min(height);
+    ScanRegion {
+        x,
+        y,
+        width: max_x.saturating_sub(x).max(1),
+        height: max_y.saturating_sub(y).max(1),
+    }
+}
+
 /// Burst frame assembly state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BurstAssembler {
@@ -175,6 +287,9 @@ impl BurstAssembler {
 #[cfg(test)]
 mod tests {
     use glyphnet_core::{EccLevel, Frame};
+    use glyphnet_encode::Encoder;
+    use glyphnet_render::RasterRenderer;
+    use image::{Rgba, RgbaImage};
 
     use super::*;
 
@@ -201,5 +316,25 @@ mod tests {
         .unwrap();
         assert!(assembler.push(&second).unwrap().is_none());
         assert_eq!(assembler.push(&first).unwrap(), Some(b"abcd".to_vec()));
+    }
+
+    #[test]
+    fn scan_still_crops_and_decodes() {
+        let encoded = Encoder::default().encode_static(b"scan").unwrap();
+        let symbol = RasterRenderer::default().render(&encoded.matrix).unwrap();
+        let padding = 32;
+        let mut canvas = RgbaImage::from_pixel(
+            symbol.width() + padding * 2,
+            symbol.height() + padding * 2,
+            Rgba([255, 255, 255, 255]),
+        );
+        image::imageops::overlay(&mut canvas, &symbol, i64::from(padding), i64::from(padding));
+        let image = DynamicImage::ImageRgba8(canvas);
+        let result = scan_still(&image, TransmissionMode::Print).unwrap();
+        assert_eq!(result.decoded.decoded.frame.payload, b"scan");
+        if let Some(crop) = result.crop {
+            assert!(crop.width <= image.width());
+            assert!(crop.height <= image.height());
+        }
     }
 }

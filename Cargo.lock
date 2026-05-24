@@ -616,6 +616,7 @@ dependencies = [
  "glyphnet-decode",
  "glyphnet-encode",
  "glyphnet-render",
+ "glyphnet-scanner",
  "image",
  "serde_json",
 ]
@@ -689,6 +690,8 @@ dependencies = [
  "glyphnet-core",
  "glyphnet-cv",
  "glyphnet-decode",
+ "glyphnet-encode",
+ "glyphnet-render",
  "image",
  "thiserror",
  "tokio",

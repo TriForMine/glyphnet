@@ -119,10 +119,11 @@ cargo run -p glyphnet-cli -- encode --data "hello" --output hello-fit.png --fit-
 cargo run -p glyphnet-cli -- encode --profile spectral-screen --data "hello" --output hello-screen.png
 cargo run -p glyphnet-cli -- decode hello.png
 cargo run -p glyphnet-cli -- decode --auto hello.png
+cargo run -p glyphnet-cli -- scan --mode print hello.png
 cargo run -p glyphnet-cli -- burst --profile pulse-burst --data "large payload" --output-dir burst_frames
 ```
 
-`decode --auto` infers module size, quiet zone, layout family, and threshold from the image and reports them in the JSON output.
+`decode --auto` infers module size, quiet zone, layout family, and threshold from the image and reports them in the JSON output. `scan` attempts a coarse auto-crop before decoding.
 
 ## Engineering Workflow
 

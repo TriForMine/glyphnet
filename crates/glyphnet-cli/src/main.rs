@@ -6,6 +6,7 @@ use glyphnet_core::{EccLevel, ProfileId, SymbolGeometry, TransmissionMode, profi
 use glyphnet_decode::RasterDecoder;
 use glyphnet_encode::{Encoder, EncoderConfig};
 use glyphnet_render::{RasterRenderer, RenderOptions, SvgRenderer};
+use glyphnet_scanner::scan_still;
 
 #[derive(Debug, Parser)]
 #[command(name = "glyphnet")]
@@ -57,6 +58,14 @@ enum Command {
         /// Infer module size and quiet zone automatically.
         #[arg(long)]
         auto: bool,
+    },
+    /// Scan an image, attempting coarse auto-crop before decoding.
+    Scan {
+        /// Input image path.
+        input: PathBuf,
+        /// Transmission mode used for CV tuning.
+        #[arg(long, value_enum, default_value_t = ModeArg::Print)]
+        mode: ModeArg,
     },
     /// Print descriptor JSON without rendering.
     Inspect {
@@ -207,6 +216,7 @@ fn main() -> Result<()> {
             )
         }
         Command::Decode { input, auto } => decode(input, auto),
+        Command::Scan { input, mode } => scan(input, mode.into()),
         Command::Inspect {
             data,
             profile,
@@ -394,24 +404,7 @@ fn decode(input: PathBuf, auto: bool) -> Result<()> {
         let auto_decoded = RasterDecoder::default()
             .decode_auto_with_info(&image)
             .context("failed to auto-decode GlyphNet image")?;
-        println!(
-            "{}",
-            serde_json::json!({
-                "stream_id": auto_decoded.decoded.frame.header.stream_id,
-                "frame_index": auto_decoded.decoded.frame.header.frame_index,
-                "frame_count": auto_decoded.decoded.frame.header.frame_count,
-                "mode": auto_decoded.decoded.frame.header.mode.to_string(),
-                "ecc": auto_decoded.decoded.frame.header.ecc_level.to_string(),
-                "payload_utf8_lossy": String::from_utf8_lossy(&auto_decoded.decoded.frame.payload),
-                "payload_len": auto_decoded.decoded.frame.payload.len(),
-                "auto": {
-                    "module_px": auto_decoded.info.module_px,
-                    "quiet_zone_modules": auto_decoded.info.quiet_zone_modules,
-                    "threshold": auto_decoded.info.threshold,
-                    "layout": layout_name(auto_decoded.info.layout)
-                }
-            })
-        );
+        println!("{}", decode_json(&auto_decoded, None));
     } else {
         let decoded = RasterDecoder::default()
             .decode(&image)
@@ -430,6 +423,47 @@ fn decode(input: PathBuf, auto: bool) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn scan(input: PathBuf, mode: TransmissionMode) -> Result<()> {
+    let image =
+        image::open(&input).with_context(|| format!("failed to open image {}", input.display()))?;
+    let scanned = scan_still(&image, mode).context("failed to scan image")?;
+    let crop = scanned.crop.map(|region| {
+        serde_json::json!({
+            "x": region.x,
+            "y": region.y,
+            "width": region.width,
+            "height": region.height
+        })
+    });
+    println!("{}", decode_json(&scanned.decoded, crop));
+    Ok(())
+}
+
+fn decode_json(
+    auto_decoded: &glyphnet_decode::AutoDecodedSymbol,
+    crop: Option<serde_json::Value>,
+) -> serde_json::Value {
+    let mut payload = serde_json::json!({
+        "stream_id": auto_decoded.decoded.frame.header.stream_id,
+        "frame_index": auto_decoded.decoded.frame.header.frame_index,
+        "frame_count": auto_decoded.decoded.frame.header.frame_count,
+        "mode": auto_decoded.decoded.frame.header.mode.to_string(),
+        "ecc": auto_decoded.decoded.frame.header.ecc_level.to_string(),
+        "payload_utf8_lossy": String::from_utf8_lossy(&auto_decoded.decoded.frame.payload),
+        "payload_len": auto_decoded.decoded.frame.payload.len(),
+        "auto": {
+            "module_px": auto_decoded.info.module_px,
+            "quiet_zone_modules": auto_decoded.info.quiet_zone_modules,
+            "threshold": auto_decoded.info.threshold,
+            "layout": layout_name(auto_decoded.info.layout)
+        }
+    });
+    if let Some(crop) = crop {
+        payload["crop"] = crop;
+    }
+    payload
 }
 
 fn inspect(
