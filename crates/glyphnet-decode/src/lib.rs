@@ -63,6 +63,28 @@ pub struct DecodedSymbol {
     pub sampled_bytes: Vec<u8>,
 }
 
+/// Auto-detected decode parameters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AutoDecodeInfo {
+    /// Pixels per module.
+    pub module_px: u32,
+    /// Quiet-zone width in modules.
+    pub quiet_zone_modules: u32,
+    /// Luma threshold below which a sampled module is considered dark.
+    pub threshold: u8,
+    /// Inferred layout family.
+    pub layout: LayoutFamily,
+}
+
+/// Auto-decoded symbol and inference metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutoDecodedSymbol {
+    /// Decoded symbol payload and matrix.
+    pub decoded: DecodedSymbol,
+    /// Auto-detected parameters.
+    pub info: AutoDecodeInfo,
+}
+
 /// Decode a matrix into a binary frame.
 pub fn decode_matrix(matrix: &SymbolMatrix) -> Result<DecodedSymbol> {
     let bits = matrix.read_data_bits();
@@ -100,6 +122,11 @@ impl RasterDecoder {
 
     /// Decode a rendered GlyphNet image by inferring module size and quiet zone.
     pub fn decode_auto(&self, image: &DynamicImage) -> Result<DecodedSymbol> {
+        Ok(self.decode_auto_with_info(image)?.decoded)
+    }
+
+    /// Decode a rendered GlyphNet image and return the inferred parameters.
+    pub fn decode_auto_with_info(&self, image: &DynamicImage) -> Result<AutoDecodedSymbol> {
         let luma = image.to_luma8();
         let width = luma.width();
         let height = luma.height();
@@ -133,7 +160,15 @@ impl RasterDecoder {
                             Err(_) => continue,
                         };
                         if let Ok(decoded) = decode_matrix(&matrix) {
-                            return Ok(decoded);
+                            return Ok(AutoDecodedSymbol {
+                                decoded,
+                                info: AutoDecodeInfo {
+                                    module_px,
+                                    quiet_zone_modules: quiet_zone,
+                                    threshold: *threshold,
+                                    layout: *layout,
+                                },
+                            });
                         }
                     }
                 }

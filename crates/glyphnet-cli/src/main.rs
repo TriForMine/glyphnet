@@ -318,6 +318,19 @@ fn apply_fit(
     }
 }
 
+fn layout_name(layout: glyphnet_core::LayoutFamily) -> &'static str {
+    match layout {
+        glyphnet_core::LayoutFamily::RibbonWeave => "ribbon-weave",
+        glyphnet_core::LayoutFamily::SpectralMesh => "spectral-mesh",
+        glyphnet_core::LayoutFamily::PulseStream => "pulse-stream",
+        glyphnet_core::LayoutFamily::Constellation => "constellation",
+        glyphnet_core::LayoutFamily::FrameGrid => "frame-grid",
+        glyphnet_core::LayoutFamily::Matrix => "matrix",
+        glyphnet_core::LayoutFamily::Hexagonal => "hexagonal",
+        glyphnet_core::LayoutFamily::Radial => "radial",
+    }
+}
+
 fn encoder(
     profile: ProfileId,
     mode_override: Option<TransmissionMode>,
@@ -377,27 +390,45 @@ fn encode(
 fn decode(input: PathBuf, auto: bool) -> Result<()> {
     let image =
         image::open(&input).with_context(|| format!("failed to open image {}", input.display()))?;
-    let decoded = if auto {
-        RasterDecoder::default()
-            .decode_auto(&image)
-            .context("failed to auto-decode GlyphNet image")?
+    if auto {
+        let auto_decoded = RasterDecoder::default()
+            .decode_auto_with_info(&image)
+            .context("failed to auto-decode GlyphNet image")?;
+        println!(
+            "{}",
+            serde_json::json!({
+                "stream_id": auto_decoded.decoded.frame.header.stream_id,
+                "frame_index": auto_decoded.decoded.frame.header.frame_index,
+                "frame_count": auto_decoded.decoded.frame.header.frame_count,
+                "mode": auto_decoded.decoded.frame.header.mode.to_string(),
+                "ecc": auto_decoded.decoded.frame.header.ecc_level.to_string(),
+                "payload_utf8_lossy": String::from_utf8_lossy(&auto_decoded.decoded.frame.payload),
+                "payload_len": auto_decoded.decoded.frame.payload.len(),
+                "auto": {
+                    "module_px": auto_decoded.info.module_px,
+                    "quiet_zone_modules": auto_decoded.info.quiet_zone_modules,
+                    "threshold": auto_decoded.info.threshold,
+                    "layout": layout_name(auto_decoded.info.layout)
+                }
+            })
+        );
     } else {
-        RasterDecoder::default()
+        let decoded = RasterDecoder::default()
             .decode(&image)
-            .context("failed to decode GlyphNet image")?
-    };
-    println!(
-        "{}",
-        serde_json::json!({
-            "stream_id": decoded.frame.header.stream_id,
-            "frame_index": decoded.frame.header.frame_index,
-            "frame_count": decoded.frame.header.frame_count,
-            "mode": decoded.frame.header.mode.to_string(),
-            "ecc": decoded.frame.header.ecc_level.to_string(),
-            "payload_utf8_lossy": String::from_utf8_lossy(&decoded.frame.payload),
-            "payload_len": decoded.frame.payload.len()
-        })
-    );
+            .context("failed to decode GlyphNet image")?;
+        println!(
+            "{}",
+            serde_json::json!({
+                "stream_id": decoded.frame.header.stream_id,
+                "frame_index": decoded.frame.header.frame_index,
+                "frame_count": decoded.frame.header.frame_count,
+                "mode": decoded.frame.header.mode.to_string(),
+                "ecc": decoded.frame.header.ecc_level.to_string(),
+                "payload_utf8_lossy": String::from_utf8_lossy(&decoded.frame.payload),
+                "payload_len": decoded.frame.payload.len()
+            })
+        );
+    }
     Ok(())
 }
 
