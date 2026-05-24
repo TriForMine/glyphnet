@@ -3,7 +3,10 @@
 use std::collections::{BTreeMap, HashMap};
 
 use glyphnet_core::{Frame, TransmissionMode};
-use glyphnet_cv::{VisionProfile, adaptive_threshold, grayscale};
+use glyphnet_cv::{
+    VisionProfile, adaptive_threshold, estimate_quad, find_anchor_candidates, grayscale,
+    quad_dimensions, warp_perspective_gray,
+};
 use glyphnet_decode::{AutoDecodedSymbol, DecodeError, DecodeOptions, RasterDecoder};
 use image::{DynamicImage, GrayImage};
 use thiserror::Error;
@@ -86,12 +89,16 @@ pub struct ScanRegion {
 }
 
 /// Result of scanning a still image.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct StillScanResult {
     /// Auto-decoded symbol and inferred parameters.
     pub decoded: AutoDecodedSymbol,
     /// Crop region used for decoding, if any.
     pub crop: Option<ScanRegion>,
+    /// Perspective quad used for rectification, if any.
+    pub quad: Option<glyphnet_cv::Quad>,
+    /// Output warp size when rectification is applied.
+    pub warp_size: Option<(u32, u32)>,
 }
 
 /// Stateful real-time scanner.
@@ -166,12 +173,28 @@ pub fn scan_still(image: &DynamicImage, mode: TransmissionMode) -> Result<StillS
         return Ok(StillScanResult {
             decoded,
             crop: None,
+            quad: None,
+            warp_size: None,
         });
     }
 
     let profile = VisionProfile::for_mode(mode);
     let gray = grayscale(image)?;
     let binary = adaptive_threshold(&gray, profile.threshold_radius, profile.threshold_bias)?;
+    let candidates = find_anchor_candidates(&binary, profile)?;
+    if let Some(quad) = estimate_quad(&binary, &candidates) {
+        let (warp_width, warp_height) = quad_dimensions(quad);
+        let warped = warp_perspective_gray(&gray, quad, warp_width, warp_height)?;
+        let warped = DynamicImage::ImageLuma8(warped);
+        let decoded = decoder.decode_auto_with_info(&warped)?;
+        return Ok(StillScanResult {
+            decoded,
+            crop: None,
+            quad: Some(quad),
+            warp_size: Some((warp_width, warp_height)),
+        });
+    }
+
     let bounds = match dark_bounds(&binary) {
         Some(bounds) => bounds,
         None => return Err(DecodeError::AutoDetectFailed.into()),
@@ -192,6 +215,8 @@ pub fn scan_still(image: &DynamicImage, mode: TransmissionMode) -> Result<StillS
     Ok(StillScanResult {
         decoded,
         crop: Some(expanded),
+        quad: None,
+        warp_size: None,
     })
 }
 
@@ -335,6 +360,13 @@ mod tests {
         if let Some(crop) = result.crop {
             assert!(crop.width <= image.width());
             assert!(crop.height <= image.height());
+        }
+        if let Some(quad) = result.quad {
+            assert!(quad.area() > 0.0);
+        }
+        if let Some((width, height)) = result.warp_size {
+            assert!(width > 0);
+            assert!(height > 0);
         }
     }
 }

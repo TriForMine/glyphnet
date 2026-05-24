@@ -16,6 +16,9 @@ pub enum CvError {
     /// The requested sampling window is invalid.
     #[error("invalid sampling window")]
     InvalidWindow,
+    /// Failed to compute a perspective transform.
+    #[error("failed to compute perspective transform")]
+    WarpFailed,
 }
 
 /// 2D image-space point.
@@ -229,6 +232,260 @@ pub fn find_anchor_candidates(
     Ok(candidates)
 }
 
+/// Estimate a quadrilateral from anchor candidates or fallback image bounds.
+pub fn estimate_quad(binary: &GrayImage, candidates: &[AnchorCandidate]) -> Option<Quad> {
+    if candidates.len() >= 4 {
+        let mut min_sum = f32::INFINITY;
+        let mut max_sum = f32::NEG_INFINITY;
+        let mut min_diff = f32::INFINITY;
+        let mut max_diff = f32::NEG_INFINITY;
+        let mut top_left = candidates[0].center;
+        let mut top_right = candidates[0].center;
+        let mut bottom_left = candidates[0].center;
+        let mut bottom_right = candidates[0].center;
+        for candidate in candidates {
+            let point = candidate.center;
+            let sum = point.x + point.y;
+            let diff = point.x - point.y;
+            if sum < min_sum {
+                min_sum = sum;
+                top_left = point;
+            }
+            if sum > max_sum {
+                max_sum = sum;
+                bottom_right = point;
+            }
+            if diff < min_diff {
+                min_diff = diff;
+                bottom_left = point;
+            }
+            if diff > max_diff {
+                max_diff = diff;
+                top_right = point;
+            }
+        }
+        return Some(Quad {
+            top_left,
+            top_right,
+            bottom_right,
+            bottom_left,
+        });
+    }
+
+    bounds_quad(binary)
+}
+
+/// Compute target dimensions for a quadrilateral warp.
+pub fn quad_dimensions(quad: Quad) -> (u32, u32) {
+    let width_top = distance(quad.top_left, quad.top_right);
+    let width_bottom = distance(quad.bottom_left, quad.bottom_right);
+    let height_left = distance(quad.top_left, quad.bottom_left);
+    let height_right = distance(quad.top_right, quad.bottom_right);
+    let width = width_top.max(width_bottom).round().max(1.0) as u32;
+    let height = height_left.max(height_right).round().max(1.0) as u32;
+    (width, height)
+}
+
+/// Warp a grayscale image into a rectified rectangle based on the given quad.
+pub fn warp_perspective_gray(
+    image: &GrayImage,
+    quad: Quad,
+    width: u32,
+    height: u32,
+) -> Result<GrayImage> {
+    if image.width() == 0 || image.height() == 0 || width == 0 || height == 0 {
+        return Err(CvError::EmptyImage);
+    }
+    let src = [
+        Point { x: 0.0, y: 0.0 },
+        Point {
+            x: (width - 1) as f32,
+            y: 0.0,
+        },
+        Point {
+            x: (width - 1) as f32,
+            y: (height - 1) as f32,
+        },
+        Point {
+            x: 0.0,
+            y: (height - 1) as f32,
+        },
+    ];
+    let dst = [
+        quad.top_left,
+        quad.top_right,
+        quad.bottom_right,
+        quad.bottom_left,
+    ];
+    let homography = solve_homography(src, dst).ok_or(CvError::WarpFailed)?;
+
+    let mut out = GrayImage::new(width, height);
+    for y in 0..height {
+        for x in 0..width {
+            let (sx, sy) = apply_homography(&homography, x as f32, y as f32);
+            let value = sample_bilinear(image, sx, sy);
+            out.put_pixel(x, y, Luma([value]));
+        }
+    }
+    Ok(out)
+}
+
+fn bounds_quad(binary: &GrayImage) -> Option<Quad> {
+    if binary.width() == 0 || binary.height() == 0 {
+        return None;
+    }
+    let mut min_x = binary.width();
+    let mut min_y = binary.height();
+    let mut max_x = 0u32;
+    let mut max_y = 0u32;
+    let mut found = false;
+    for y in 0..binary.height() {
+        for x in 0..binary.width() {
+            if binary.get_pixel(x, y).0[0] == 0 {
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+                found = true;
+            }
+        }
+    }
+    if !found {
+        return None;
+    }
+    let tl = Point {
+        x: min_x as f32,
+        y: min_y as f32,
+    };
+    let tr = Point {
+        x: max_x as f32,
+        y: min_y as f32,
+    };
+    let br = Point {
+        x: max_x as f32,
+        y: max_y as f32,
+    };
+    let bl = Point {
+        x: min_x as f32,
+        y: max_y as f32,
+    };
+    Some(Quad {
+        top_left: tl,
+        top_right: tr,
+        bottom_right: br,
+        bottom_left: bl,
+    })
+}
+
+fn distance(a: Point, b: Point) -> f32 {
+    let dx = a.x - b.x;
+    let dy = a.y - b.y;
+    (dx * dx + dy * dy).sqrt()
+}
+
+fn solve_homography(src: [Point; 4], dst: [Point; 4]) -> Option<[f32; 9]> {
+    let mut a = [[0f32; 8]; 8];
+    let mut b = [0f32; 8];
+    for (i, (s, d)) in src.iter().zip(dst.iter()).enumerate() {
+        let row = i * 2;
+        a[row] = [s.x, s.y, 1.0, 0.0, 0.0, 0.0, -d.x * s.x, -d.x * s.y];
+        b[row] = d.x;
+        a[row + 1] = [0.0, 0.0, 0.0, s.x, s.y, 1.0, -d.y * s.x, -d.y * s.y];
+        b[row + 1] = d.y;
+    }
+    let solution = solve_linear_system(a, b)?;
+    Some([
+        solution[0],
+        solution[1],
+        solution[2],
+        solution[3],
+        solution[4],
+        solution[5],
+        solution[6],
+        solution[7],
+        1.0,
+    ])
+}
+
+#[allow(clippy::needless_range_loop)]
+fn solve_linear_system(mut a: [[f32; 8]; 8], mut b: [f32; 8]) -> Option<[f32; 8]> {
+    let size = 8;
+    for i in 0..size {
+        let mut pivot = i;
+        let mut pivot_value = a[i][i].abs();
+        for row in (i + 1)..size {
+            let value = a[row][i].abs();
+            if value > pivot_value {
+                pivot_value = value;
+                pivot = row;
+            }
+        }
+        if pivot_value < 1e-6 {
+            return None;
+        }
+        if pivot != i {
+            a.swap(i, pivot);
+            b.swap(i, pivot);
+        }
+        let inv = 1.0 / a[i][i];
+        for col in i..size {
+            a[i][col] *= inv;
+        }
+        b[i] *= inv;
+        for row in 0..size {
+            if row == i {
+                continue;
+            }
+            let factor = a[row][i];
+            if factor == 0.0 {
+                continue;
+            }
+            for col in i..size {
+                a[row][col] -= factor * a[i][col];
+            }
+            b[row] -= factor * b[i];
+        }
+    }
+    Some(b)
+}
+
+fn apply_homography(h: &[f32; 9], x: f32, y: f32) -> (f32, f32) {
+    let denom = h[6] * x + h[7] * y + h[8];
+    if denom.abs() < 1e-6 {
+        return (x, y);
+    }
+    let sx = (h[0] * x + h[1] * y + h[2]) / denom;
+    let sy = (h[3] * x + h[4] * y + h[5]) / denom;
+    (sx, sy)
+}
+
+fn sample_bilinear(image: &GrayImage, x: f32, y: f32) -> u8 {
+    if x.is_nan() || y.is_nan() {
+        return 255;
+    }
+    let x0 = x.floor();
+    let y0 = y.floor();
+    let x1 = x0 + 1.0;
+    let y1 = y0 + 1.0;
+    let width = image.width() as f32;
+    let height = image.height() as f32;
+    let clamp = |value: f32, max: f32| value.max(0.0).min(max - 1.0);
+    let sx0 = clamp(x0, width) as u32;
+    let sy0 = clamp(y0, height) as u32;
+    let sx1 = clamp(x1, width) as u32;
+    let sy1 = clamp(y1, height) as u32;
+    let tx = x - x0;
+    let ty = y - y0;
+    let p00 = image.get_pixel(sx0, sy0).0[0] as f32;
+    let p10 = image.get_pixel(sx1, sy0).0[0] as f32;
+    let p01 = image.get_pixel(sx0, sy1).0[0] as f32;
+    let p11 = image.get_pixel(sx1, sy1).0[0] as f32;
+    let top = p00 + (p10 - p00) * tx;
+    let bottom = p01 + (p11 - p01) * tx;
+    let value = top + (bottom - top) * ty;
+    value.round().clamp(0.0, 255.0) as u8
+}
+
 fn integral_image(image: &GrayImage) -> Vec<u32> {
     let width = image.width() as usize;
     let height = image.height() as usize;
@@ -295,5 +552,19 @@ mod tests {
         }
         let threshold = global_threshold(&image).unwrap();
         assert!((20..=240).contains(&threshold));
+    }
+
+    #[test]
+    fn warp_identity_preserves_center_pixel() {
+        let mut image = GrayImage::new(3, 3);
+        image.put_pixel(1, 1, Luma([200]));
+        let quad = Quad {
+            top_left: Point { x: 0.0, y: 0.0 },
+            top_right: Point { x: 2.0, y: 0.0 },
+            bottom_right: Point { x: 2.0, y: 2.0 },
+            bottom_left: Point { x: 0.0, y: 2.0 },
+        };
+        let warped = warp_perspective_gray(&image, quad, 3, 3).unwrap();
+        assert_eq!(warped.get_pixel(1, 1).0[0], 200);
     }
 }

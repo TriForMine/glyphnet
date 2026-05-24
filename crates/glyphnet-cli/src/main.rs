@@ -404,7 +404,7 @@ fn decode(input: PathBuf, auto: bool) -> Result<()> {
         let auto_decoded = RasterDecoder::default()
             .decode_auto_with_info(&image)
             .context("failed to auto-decode GlyphNet image")?;
-        println!("{}", decode_json(&auto_decoded, None));
+        println!("{}", decode_json(&auto_decoded, None, None, None));
     } else {
         let decoded = RasterDecoder::default()
             .decode(&image)
@@ -437,13 +437,29 @@ fn scan(input: PathBuf, mode: TransmissionMode) -> Result<()> {
             "height": region.height
         })
     });
-    println!("{}", decode_json(&scanned.decoded, crop));
+    let quad = scanned.quad.map(|quad| {
+        serde_json::json!({
+            "top_left": { "x": quad.top_left.x, "y": quad.top_left.y },
+            "top_right": { "x": quad.top_right.x, "y": quad.top_right.y },
+            "bottom_right": { "x": quad.bottom_right.x, "y": quad.bottom_right.y },
+            "bottom_left": { "x": quad.bottom_left.x, "y": quad.bottom_left.y }
+        })
+    });
+    let warp = scanned.warp_size.map(|(width, height)| {
+        serde_json::json!({
+            "width": width,
+            "height": height
+        })
+    });
+    println!("{}", decode_json(&scanned.decoded, crop, quad, warp));
     Ok(())
 }
 
 fn decode_json(
     auto_decoded: &glyphnet_decode::AutoDecodedSymbol,
     crop: Option<serde_json::Value>,
+    quad: Option<serde_json::Value>,
+    warp: Option<serde_json::Value>,
 ) -> serde_json::Value {
     let mut payload = serde_json::json!({
         "stream_id": auto_decoded.decoded.frame.header.stream_id,
@@ -462,6 +478,12 @@ fn decode_json(
     });
     if let Some(crop) = crop {
         payload["crop"] = crop;
+    }
+    if let Some(quad) = quad {
+        payload["quad"] = quad;
+    }
+    if let Some(warp) = warp {
+        payload["warp"] = warp;
     }
     payload
 }
