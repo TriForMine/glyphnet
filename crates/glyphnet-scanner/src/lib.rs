@@ -173,6 +173,8 @@ pub enum CandidateDetector {
     GeneratedContent,
     /// Layout-agnostic dark-component and band detector.
     GenericBinary,
+    /// Matrix finder-pattern detector.
+    Matrix,
     /// RibbonWeave rail, totem, and wide-symbol recovery detector.
     RibbonWeave,
 }
@@ -182,6 +184,7 @@ impl CandidateDetector {
         match self {
             Self::GeneratedContent => "generated-content",
             Self::GenericBinary => "generic-binary",
+            Self::Matrix => "matrix",
             Self::RibbonWeave => "ribbon-weave",
         }
     }
@@ -503,6 +506,7 @@ fn still_scan_candidates(
         ));
     }
 
+    candidates.extend(matrix_candidates(binary, image_width, image_height));
     candidates.extend(ribbon_weave_candidates(binary, image_width, image_height));
 
     if image_width.saturating_mul(image_height) <= 900_000 {
@@ -687,6 +691,325 @@ fn ribbon_dark_bounds_candidates(
         ));
     }
     candidates
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MatrixFinder {
+    x: u32,
+    y: u32,
+    module_px: u32,
+}
+
+fn matrix_candidates(
+    binary: &GrayImage,
+    image_width: u32,
+    image_height: u32,
+) -> Vec<ScanCandidate> {
+    if image_width < 80 || image_height < 80 {
+        return Vec::new();
+    }
+    let mut candidates = Vec::new();
+    let finders = matrix_finders(binary);
+    for top_left in &finders {
+        for top_right in &finders {
+            if top_right.y.abs_diff(top_left.y) > top_left.module_px * 2
+                || top_right.x <= top_left.x + top_left.module_px * 16
+            {
+                continue;
+            }
+            for bottom_left in &finders {
+                if bottom_left.x.abs_diff(top_left.x) > top_left.module_px * 2
+                    || bottom_left.y <= top_left.y + top_left.module_px * 16
+                {
+                    continue;
+                }
+                let module_px = median3(
+                    top_left.module_px,
+                    top_right.module_px,
+                    bottom_left.module_px,
+                );
+                if module_px == 0 {
+                    continue;
+                }
+                let content_width = top_right.x.saturating_sub(top_left.x) / module_px + 7;
+                let content_height = bottom_left.y.saturating_sub(top_left.y) / module_px + 7;
+                if !reference_generated_geometry(content_width, content_height) {
+                    continue;
+                }
+                let quiet_px = module_px.saturating_mul(4);
+                let region = ScanRegion {
+                    x: top_left.x.saturating_sub(quiet_px),
+                    y: top_left.y.saturating_sub(quiet_px),
+                    width: content_width.saturating_add(8).saturating_mul(module_px),
+                    height: content_height.saturating_add(8).saturating_mul(module_px),
+                };
+                if region_fits(region, image_width, image_height) {
+                    push_unique_candidate(
+                        &mut candidates,
+                        CandidateDetector::Matrix,
+                        Some(LayoutFamily::Matrix),
+                        "matrix-finders",
+                        region,
+                    );
+                }
+            }
+        }
+    }
+    candidates.truncate(16);
+    candidates
+}
+
+fn matrix_finders(binary: &GrayImage) -> Vec<MatrixFinder> {
+    let mut finders = Vec::new();
+    for y in (0..binary.height()).step_by(2) {
+        let mut runs = [0u32; 5];
+        let mut run_color_dark = pixel_is_dark(binary, 0, y);
+        let mut run_count = 0usize;
+        for x in 0..binary.width() {
+            let dark = pixel_is_dark(binary, x, y);
+            if dark == run_color_dark {
+                run_count += 1;
+                continue;
+            }
+            shift_finder_runs(&mut runs, run_count as u32);
+            if run_color_dark && matrix_finder_run_ratio(runs) {
+                let total_width = runs.iter().sum::<u32>();
+                let module_px = ((total_width as f32 / 7.0).round() as u32).clamp(2, 24);
+                let center_x = x.saturating_sub(runs[4] + runs[3] + runs[2] / 2);
+                let center_y = y;
+                let finder_x = center_x.saturating_sub((7 * module_px) / 2);
+                let finder_y = center_y.saturating_sub((7 * module_px) / 2);
+                verify_and_push_matrix_finder(binary, &mut finders, finder_x, finder_y, module_px);
+            }
+            run_color_dark = dark;
+            run_count = 1;
+        }
+    }
+
+    matrix_grid_template_finders(binary, &mut finders);
+
+    for component in dark_components(binary).into_iter().take(128) {
+        let width = component.bounds.width;
+        let height = component.bounds.height;
+        if width < 12 || height < 12 || width > 192 || height > 192 {
+            continue;
+        }
+        let aspect = width as f32 / height.max(1) as f32;
+        if !(0.75..=1.33).contains(&aspect) {
+            continue;
+        }
+        let module_px = ((width.max(height) as f32 / 7.0).round() as u32).clamp(2, 24);
+        let nudge = module_px.max(2) as i32;
+        for dy in -nudge..=nudge {
+            for dx in -nudge..=nudge {
+                let x = (component.bounds.x as i32 + dx).max(0) as u32;
+                let y = (component.bounds.y as i32 + dy).max(0) as u32;
+                if x.saturating_add(7 * module_px) > binary.width()
+                    || y.saturating_add(7 * module_px) > binary.height()
+                {
+                    continue;
+                }
+                if matrix_finder_matches(binary, x, y, module_px) {
+                    push_matrix_finder(&mut finders, MatrixFinder { x, y, module_px });
+                }
+            }
+        }
+    }
+    finders.truncate(96);
+    finders
+}
+
+fn matrix_grid_template_finders(binary: &GrayImage, finders: &mut Vec<MatrixFinder>) {
+    for module_px in 2..=12 {
+        let extent = 7 * module_px;
+        if extent > binary.width() || extent > binary.height() {
+            continue;
+        }
+        for y in 0..=binary.height() - extent {
+            for x in 0..=binary.width() - extent {
+                if !matrix_finder_fast_prefilter(binary, x, y, module_px) {
+                    continue;
+                }
+                if matrix_finder_center_template_matches(binary, x, y, module_px) {
+                    verify_and_push_matrix_finder(binary, finders, x, y, module_px);
+                    if finders.len() >= 96 {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn matrix_finder_fast_prefilter(binary: &GrayImage, x: u32, y: u32, module_px: u32) -> bool {
+    matrix_module_center_dark(binary, x, y, module_px, 0, 0)
+        && matrix_module_center_dark(binary, x, y, module_px, 6, 0)
+        && matrix_module_center_dark(binary, x, y, module_px, 0, 6)
+        && matrix_module_center_dark(binary, x, y, module_px, 6, 6)
+        && matrix_module_center_dark(binary, x, y, module_px, 3, 3)
+        && !matrix_module_center_dark(binary, x, y, module_px, 1, 1)
+        && !matrix_module_center_dark(binary, x, y, module_px, 5, 1)
+        && !matrix_module_center_dark(binary, x, y, module_px, 1, 5)
+        && !matrix_module_center_dark(binary, x, y, module_px, 5, 5)
+}
+
+fn matrix_finder_center_template_matches(
+    binary: &GrayImage,
+    x: u32,
+    y: u32,
+    module_px: u32,
+) -> bool {
+    let mut mismatches = 0u32;
+    for module_y in 0..7 {
+        for module_x in 0..7 {
+            let expected_dark = matrix_finder_module_dark(module_x, module_y);
+            let dark = matrix_module_center_dark(binary, x, y, module_px, module_x, module_y);
+            if dark != expected_dark {
+                mismatches += 1;
+            }
+        }
+    }
+    mismatches <= 6
+}
+
+fn matrix_module_center_dark(
+    binary: &GrayImage,
+    x: u32,
+    y: u32,
+    module_px: u32,
+    module_x: u32,
+    module_y: u32,
+) -> bool {
+    let center_x = x + module_x * module_px + module_px / 2;
+    let center_y = y + module_y * module_px + module_px / 2;
+    pixel_is_dark(
+        binary,
+        center_x.min(binary.width() - 1),
+        center_y.min(binary.height() - 1),
+    )
+}
+
+fn verify_and_push_matrix_finder(
+    binary: &GrayImage,
+    finders: &mut Vec<MatrixFinder>,
+    x: u32,
+    y: u32,
+    module_px: u32,
+) {
+    let nudge = (module_px / 2).max(1) as i32;
+    for dy in -nudge..=nudge {
+        for dx in -nudge..=nudge {
+            let x = (x as i32 + dx).max(0) as u32;
+            let y = (y as i32 + dy).max(0) as u32;
+            if x.saturating_add(7 * module_px) > binary.width()
+                || y.saturating_add(7 * module_px) > binary.height()
+            {
+                continue;
+            }
+            if matrix_finder_matches(binary, x, y, module_px) {
+                push_matrix_finder(finders, MatrixFinder { x, y, module_px });
+                return;
+            }
+        }
+    }
+}
+
+fn shift_finder_runs(runs: &mut [u32; 5], next: u32) {
+    runs[0] = runs[1];
+    runs[1] = runs[2];
+    runs[2] = runs[3];
+    runs[3] = runs[4];
+    runs[4] = next;
+}
+
+fn matrix_finder_run_ratio(runs: [u32; 5]) -> bool {
+    if runs.contains(&0) {
+        return false;
+    }
+    let total = runs.iter().sum::<u32>();
+    if total < 14 {
+        return false;
+    }
+    let module = total as f32 / 7.0;
+    let tolerance = module.max(1.0) * 0.8;
+    (runs[0] as f32 - module).abs() <= tolerance
+        && (runs[1] as f32 - module).abs() <= tolerance
+        && (runs[2] as f32 - module * 3.0).abs() <= tolerance * 1.5
+        && (runs[3] as f32 - module).abs() <= tolerance
+        && (runs[4] as f32 - module).abs() <= tolerance
+}
+
+fn pixel_is_dark(binary: &GrayImage, x: u32, y: u32) -> bool {
+    binary.get_pixel(x, y).0[0] == 0
+}
+
+fn push_matrix_finder(finders: &mut Vec<MatrixFinder>, finder: MatrixFinder) {
+    let duplicate_radius = finder.module_px.max(2);
+    if finders.iter().any(|existing| {
+        existing.x.abs_diff(finder.x) <= duplicate_radius
+            && existing.y.abs_diff(finder.y) <= duplicate_radius
+    }) {
+        return;
+    }
+    finders.push(finder);
+}
+
+fn matrix_finder_matches(binary: &GrayImage, x: u32, y: u32, module_px: u32) -> bool {
+    let mut total = 0u32;
+    let mut mismatches = 0u32;
+    for module_y in 0..7 {
+        for module_x in 0..7 {
+            let expected_dark = matrix_finder_module_dark(module_x, module_y);
+            let dark = module_dark_fraction(
+                binary,
+                x + module_x * module_px,
+                y + module_y * module_px,
+                module_px,
+            ) >= 0.62;
+            total += 1;
+            if dark != expected_dark {
+                mismatches += 1;
+            }
+        }
+    }
+    mismatches <= total / 8
+}
+
+const fn matrix_finder_module_dark(module_x: u32, module_y: u32) -> bool {
+    module_x == 0
+        || module_y == 0
+        || module_x == 6
+        || module_y == 6
+        || (module_x >= 2 && module_x <= 4 && module_y >= 2 && module_y <= 4)
+}
+
+fn module_dark_fraction(binary: &GrayImage, x: u32, y: u32, module_px: u32) -> f32 {
+    let mut dark = 0u32;
+    let mut total = 0u32;
+    let inset = (module_px / 4).max(1).min(module_px.saturating_sub(1));
+    let x_start = x.saturating_add(inset).min(binary.width());
+    let y_start = y.saturating_add(inset).min(binary.height());
+    let x_end = x
+        .saturating_add(module_px.saturating_sub(inset))
+        .min(binary.width());
+    let y_end = y
+        .saturating_add(module_px.saturating_sub(inset))
+        .min(binary.height());
+    for py in y_start..y_end {
+        for px in x_start..x_end {
+            total += 1;
+            if binary.get_pixel(px, py).0[0] == 0 {
+                dark += 1;
+            }
+        }
+    }
+    dark as f32 / total.max(1) as f32
+}
+
+fn median3(a: u32, b: u32, c: u32) -> u32 {
+    let mut values = [a, b, c];
+    values.sort_unstable();
+    values[1]
 }
 
 fn reference_ribbon_geometry(width: u32, height: u32) -> bool {
@@ -2223,6 +2546,26 @@ mod tests {
         }
     }
 
+    fn add_matrix_canvas_clutter(canvas: &mut RgbaImage) {
+        for y in [16, 48, 320] {
+            for x in 24..900 {
+                canvas.put_pixel(x, y, Rgba([36, 42, 40, 255]));
+            }
+        }
+        for x in [40, 760, 900] {
+            for y in 28..330 {
+                canvas.put_pixel(x, y, Rgba([212, 220, 216, 255]));
+            }
+        }
+        for y in 220..300 {
+            for x in 620..890 {
+                if (x + y * 3) % 13 < 4 {
+                    canvas.put_pixel(x, y, Rgba([48, 56, 52, 255]));
+                }
+            }
+        }
+    }
+
     #[test]
     fn burst_assembler_returns_payload_when_complete() {
         let mut assembler = BurstAssembler::new(2);
@@ -2344,6 +2687,24 @@ mod tests {
                 .attempts
                 .iter()
                 .any(|attempt| attempt.detector == CandidateDetector::GeneratedContent.as_str())
+        );
+    }
+
+    #[test]
+    fn scan_still_decodes_matrix_canvas_with_clutter() {
+        let payload = b"matrix clutter";
+        let symbol = rendered_sample_with_layout(payload, 4, LayoutFamily::Matrix);
+        let mut canvas = RgbaImage::from_pixel(960, 360, Rgba([255, 255, 255, 255]));
+        add_matrix_canvas_clutter(&mut canvas);
+        image::imageops::overlay(&mut canvas, &symbol, 128, 56);
+        let image = DynamicImage::ImageRgba8(canvas);
+        let result = assert_scan_payload(&image, payload);
+        assert_eq!(result.decoded.info.layout, LayoutFamily::Matrix);
+        assert!(
+            result
+                .attempts
+                .iter()
+                .any(|attempt| attempt.stage == "matrix-finders")
         );
     }
 
