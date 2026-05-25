@@ -1,9 +1,13 @@
 //! Real-time scanner orchestration for GlyphNet.
 
-use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
-    time::Instant,
-};
+use std::collections::{BTreeMap, HashMap, VecDeque};
+
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant as ScanInstant;
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Debug, Clone, Copy)]
+struct ScanInstant(f64);
 
 use glyphnet_core::LayoutFamily;
 use glyphnet_core::{
@@ -233,11 +237,11 @@ pub fn scan_still_with_diagnostics(
     image: &DynamicImage,
     mode: TransmissionMode,
 ) -> std::result::Result<StillScanResult, FailedStillScan> {
-    let started = Instant::now();
+    let started = scan_instant_now();
     let mut timings = ScanTimings::default();
     let decoder = RasterDecoder::default();
     if should_try_full_frame_decode(image) {
-        let stage = Instant::now();
+        let stage = scan_instant_now();
         if let Ok(decoded) = decoder.decode_auto_with_info(image) {
             timings.full_frame_micros = elapsed_micros(stage);
             timings.total_micros = elapsed_micros(started);
@@ -254,16 +258,16 @@ pub fn scan_still_with_diagnostics(
     }
 
     let profile = VisionProfile::for_mode(mode);
-    let stage = Instant::now();
+    let stage = scan_instant_now();
     let gray = grayscale(image).map_err(|error| failed_cv(error, timings, started))?;
     timings.grayscale_micros = elapsed_micros(stage);
 
-    let stage = Instant::now();
+    let stage = scan_instant_now();
     let binary = adaptive_threshold(&gray, profile.threshold_radius, profile.threshold_bias)
         .map_err(|error| failed_cv(error, timings, started))?;
     timings.threshold_micros = elapsed_micros(stage);
 
-    let stage = Instant::now();
+    let stage = scan_instant_now();
     let candidates = find_anchor_candidates(&binary, profile)
         .map_err(|error| failed_cv(error, timings, started))?;
     if let Some(quad) = estimate_quad(&binary, &candidates) {
@@ -288,7 +292,7 @@ pub fn scan_still_with_diagnostics(
 
     let padding = profile.min_anchor_px.max(8);
     let mut attempts = Vec::new();
-    let stage = Instant::now();
+    let stage = scan_instant_now();
     let mut regions = candidate_regions(&binary, padding, image.width(), image.height());
     if should_try_dark_bounds_fallback(image.width(), image.height(), regions.len())
         && let Some(bounds) = dark_bounds(&binary)
@@ -301,9 +305,9 @@ pub fn scan_still_with_diagnostics(
     }
     timings.candidate_micros = elapsed_micros(stage);
 
-    let decode_started = Instant::now();
+    let decode_started = scan_instant_now();
     for (stage, region) in regions {
-        let attempt_started = Instant::now();
+        let attempt_started = scan_instant_now();
         let cropped =
             image::imageops::crop_imm(image, region.x, region.y, region.width, region.height)
                 .to_image();
@@ -353,7 +357,7 @@ pub fn scan_still_with_diagnostics(
 fn failed_cv(
     error: glyphnet_cv::CvError,
     mut timings: ScanTimings,
-    started: Instant,
+    started: ScanInstant,
 ) -> FailedStillScan {
     timings.total_micros = elapsed_micros(started);
     FailedStillScan {
@@ -363,8 +367,24 @@ fn failed_cv(
     }
 }
 
-fn elapsed_micros(started: Instant) -> u64 {
+#[cfg(not(target_arch = "wasm32"))]
+fn scan_instant_now() -> ScanInstant {
+    ScanInstant::now()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn scan_instant_now() -> ScanInstant {
+    ScanInstant(js_sys::Date::now())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn elapsed_micros(started: ScanInstant) -> u64 {
     started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
+}
+
+#[cfg(target_arch = "wasm32")]
+fn elapsed_micros(started: ScanInstant) -> u64 {
+    ((js_sys::Date::now() - started.0).max(0.0) * 1000.0) as u64
 }
 
 fn should_try_dark_bounds_fallback(
@@ -459,23 +479,22 @@ fn decode_candidate(
         if let Ok(decoded) = decode_fractional_ribbon_candidate(image) {
             return Ok(decoded);
         }
-        for target_module_px in [4] {
-            let resized = image::imageops::resize(
-                image,
-                104 * target_module_px,
-                44 * target_module_px,
-                image::imageops::FilterType::Triangle,
-            );
-            let resized = DynamicImage::ImageRgba8(resized);
-            let normalized_region = ScanRegion {
-                x: 0,
-                y: 0,
-                width: 104 * target_module_px,
-                height: 44 * target_module_px,
-            };
-            if let Ok(decoded) = decode_exact_ribbon_candidate(&resized, normalized_region) {
-                return Ok(decoded);
-            }
+        let target_module_px = 4;
+        let resized = image::imageops::resize(
+            image,
+            104 * target_module_px,
+            44 * target_module_px,
+            image::imageops::FilterType::Triangle,
+        );
+        let resized = DynamicImage::ImageRgba8(resized);
+        let normalized_region = ScanRegion {
+            x: 0,
+            y: 0,
+            width: 104 * target_module_px,
+            height: 44 * target_module_px,
+        };
+        if let Ok(decoded) = decode_exact_ribbon_candidate(&resized, normalized_region) {
+            return Ok(decoded);
         }
         return Err(DecodeError::AutoDetectFailed);
     }
@@ -906,7 +925,7 @@ fn dark_components(binary: &GrayImage) -> Vec<DarkComponent> {
             });
         }
     }
-    components.sort_by(|a, b| b.pixels.cmp(&a.pixels));
+    components.sort_by_key(|component| std::cmp::Reverse(component.pixels));
     components
 }
 

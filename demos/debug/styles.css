@@ -71,8 +71,36 @@ input {
   font-size: 12px;
 }
 
+.generator {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) 90px 80px 130px auto auto;
+  gap: 10px;
+  align-items: end;
+  padding: 12px 16px;
+  background: #fff;
+  border-bottom: 1px solid var(--line);
+}
+
+.generator label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.payload-field textarea {
+  width: 100%;
+  min-height: 48px;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 10px;
+  color: var(--ink);
+}
+
 select,
 button,
+.generator input,
 .file-button {
   min-height: 36px;
   border: 1px solid var(--line);
@@ -80,6 +108,10 @@ button,
   background: #fff;
   color: var(--ink);
   padding: 0 12px;
+}
+
+.generator input {
+  width: 100%;
 }
 
 button,
@@ -306,6 +338,14 @@ pre {
 
   .workspace {
     grid-template-columns: 1fr;
+  }
+
+  .generator {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .payload-field {
+    grid-column: 1 / -1;
   }
 
   .panel,

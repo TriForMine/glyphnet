@@ -695,6 +695,7 @@ dependencies = [
  "glyphnet-render",
  "glyphnet-testkit",
  "image",
+ "js-sys",
  "rand 0.8.6",
  "thiserror",
  "tokio",

@@ -15,6 +15,12 @@ const nodes = {
   scanTarget: document.querySelector("#scanTarget"),
   loadSample: document.querySelector("#loadSample"),
   clearCrop: document.querySelector("#clearCrop"),
+  payloadInput: document.querySelector("#payloadInput"),
+  moduleInput: document.querySelector("#moduleInput"),
+  quietInput: document.querySelector("#quietInput"),
+  generatorCanvasSelect: document.querySelector("#generatorCanvasSelect"),
+  generateButton: document.querySelector("#generateButton"),
+  generatorStatus: document.querySelector("#generatorStatus"),
   dropZone: document.querySelector("#dropZone"),
   emptyState: document.querySelector("#emptyState"),
   imageCanvas: document.querySelector("#imageCanvas"),
@@ -49,15 +55,14 @@ for (const node of [nodes.modeSelect, nodes.overlaySelect, nodes.scanTarget]) {
 }
 
 nodes.loadSample.addEventListener("click", async () => {
-  const canvas = await sampleCanvas();
-  const image = new Image();
-  image.onload = () => {
-    state.source = image;
-    state.imageName = "rust-rendered-sample";
-    analyzeCurrent();
-  };
-  image.src = canvas.toDataURL("image/png");
+  nodes.payloadInput.value = "debug sample";
+  nodes.moduleInput.value = "4";
+  nodes.quietInput.value = "4";
+  nodes.generatorCanvasSelect.value = "debug";
+  await generateCurrent();
 });
+
+nodes.generateButton.addEventListener("click", () => generateCurrent());
 
 nodes.clearCrop.addEventListener("click", () => {
   state.manualCrop = null;
@@ -126,6 +131,9 @@ async function loadWasm() {
     nodes.wasmStatus.textContent = "Rust scanner ready";
     nodes.wasmStatus.classList.add("ready");
     nodes.wasmStatus.classList.remove("missing");
+    nodes.generatorStatus.textContent = "Generator ready";
+    nodes.generatorStatus.classList.add("ready");
+    nodes.generatorStatus.classList.remove("missing");
     analyzeCurrent();
   } catch (error) {
     state.wasmError = error;
@@ -133,6 +141,44 @@ async function loadWasm() {
     nodes.wasmStatus.classList.add("missing");
     nodes.wasmStatus.title =
       "Run: wasm-pack build crates/glyphnet-wasm --target web --out-dir ../../sdk/browser/pkg";
+    nodes.generatorStatus.textContent = "Build WASM first";
+    nodes.generatorStatus.classList.add("missing");
+  }
+}
+
+async function generateCurrent() {
+  if (!state.wasm) {
+    nodes.generatorStatus.textContent = "WASM unavailable";
+    nodes.generatorStatus.classList.add("missing");
+    return;
+  }
+  const payload = nodes.payloadInput.value;
+  const modulePx = clampInteger(nodes.moduleInput.value, 1, 24, 4);
+  const quiet = clampInteger(nodes.quietInput.value, 0, 24, 4);
+  nodes.moduleInput.value = String(modulePx);
+  nodes.quietInput.value = String(quiet);
+
+  try {
+    const canvas =
+      nodes.generatorCanvasSelect.value === "tight"
+        ? await generatedTightCanvas(payload, modulePx, quiet)
+        : await generatedDebugCanvas(payload, modulePx, quiet);
+    const image = new Image();
+    image.onload = () => {
+      state.source = image;
+      state.imageName = `generated-${modulePx}px-q${quiet}`;
+      state.manualCrop = null;
+      if (nodes.scanTarget.value === "manual") nodes.scanTarget.value = "full";
+      nodes.generatorStatus.textContent = `${payload.length} chars generated`;
+      nodes.generatorStatus.classList.add("ready");
+      nodes.generatorStatus.classList.remove("missing");
+      analyzeCurrent();
+    };
+    image.src = canvas.toDataURL("image/png");
+  } catch (error) {
+    nodes.generatorStatus.textContent = error.message;
+    nodes.generatorStatus.classList.add("missing");
+    nodes.generatorStatus.classList.remove("ready");
   }
 }
 
@@ -489,7 +535,7 @@ function formatRect(rect) {
   return `${Math.round(rect.x)}, ${Math.round(rect.y)}, ${Math.round(rect.width)}x${Math.round(rect.height)}`;
 }
 
-async function sampleCanvas() {
+async function generatedDebugCanvas(payload, modulePx, quiet) {
   const canvas = document.createElement("canvas");
   canvas.width = 960;
   canvas.height = 360;
@@ -497,8 +543,23 @@ async function sampleCanvas() {
   ctx.fillStyle = "#ffffff";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-  if (!state.wasm) return canvas;
-  const png = state.wasm.encodePngWithGeometry("debug sample", 4, 4);
+  const image = await generatedImage(payload, modulePx, quiet);
+  ctx.drawImage(image, 110, 84);
+  return canvas;
+}
+
+async function generatedTightCanvas(payload, modulePx, quiet) {
+  const image = await generatedImage(payload, modulePx, quiet);
+  const canvas = document.createElement("canvas");
+  canvas.width = image.naturalWidth;
+  canvas.height = image.naturalHeight;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(image, 0, 0);
+  return canvas;
+}
+
+async function generatedImage(payload, modulePx, quiet) {
+  const png = state.wasm.encodePngWithGeometry(payload, modulePx, quiet);
   const image = new Image();
   const blob = new Blob([png], { type: "image/png" });
   const url = URL.createObjectURL(blob);
@@ -508,9 +569,14 @@ async function sampleCanvas() {
     image.src = url;
   });
   try {
-    ctx.drawImage(image, 110, 84);
+    return image;
   } finally {
     URL.revokeObjectURL(url);
   }
-  return canvas;
+}
+
+function clampInteger(value, min, max, fallback) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, Math.min(max, parsed));
 }

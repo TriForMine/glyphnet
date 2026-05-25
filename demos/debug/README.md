@@ -1,6 +1,6 @@
-# GlyphNet Scan Debugger
+# GlyphNet Playground
 
-Build the WASM package, then serve the repository root and open the debugger:
+Build the WASM package, then serve the repository root and open the playground:
 
 ```powershell
 wasm-pack build crates/glyphnet-wasm --target web --out-dir ../../sdk/browser/pkg
@@ -15,6 +15,13 @@ http://127.0.0.1:8765/demos/debug/index.html
 
 The page uses the real Rust `glyphnet-scanner` pipeline through
 `glyphnet-wasm`. It does not reimplement scanner heuristics in JavaScript.
+
+Playground workflow:
+
+- enter a payload, module size, and quiet-zone size;
+- generate either a tight PNG or a larger debug canvas with the symbol embedded;
+- scan the generated symbol through the same Rust path used for imported images;
+- import screenshots or camera-style captures and compare the Rust diagnostics.
 
 Current diagnostics:
 

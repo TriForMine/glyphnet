@@ -3,15 +3,15 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>GlyphNet Scan Debugger</title>
+    <title>GlyphNet Playground</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
     <main class="app">
       <section class="toolbar" aria-label="Scan debugger controls">
         <div class="brand">
-          <h1>GlyphNet Scan Debugger</h1>
-          <p>Image import, crop diagnostics, threshold view, and anchor overlays.</p>
+          <h1>GlyphNet Playground</h1>
+          <p>Generate symbols, scan imports, inspect crops, and compare Rust diagnostics.</p>
         </div>
 
         <div class="controls">
@@ -50,6 +50,34 @@
           <button id="clearCrop" type="button">Clear crop</button>
           <span id="wasmStatus" class="status">Rust scanner loading</span>
         </div>
+      </section>
+
+      <section class="generator" aria-label="Generator controls">
+        <label class="payload-field">
+          Payload
+          <textarea id="payloadInput" rows="2" spellcheck="false">debug sample</textarea>
+        </label>
+
+        <label>
+          Module
+          <input id="moduleInput" type="number" min="1" max="24" step="1" value="4" />
+        </label>
+
+        <label>
+          Quiet
+          <input id="quietInput" type="number" min="0" max="24" step="1" value="4" />
+        </label>
+
+        <label>
+          Canvas
+          <select id="generatorCanvasSelect">
+            <option value="debug">Debug canvas</option>
+            <option value="tight">Tight PNG</option>
+          </select>
+        </label>
+
+        <button id="generateButton" type="button">Generate</button>
+        <span id="generatorStatus" class="status">Generator ready</span>
       </section>
 
       <section class="workspace">
@@ -96,7 +124,7 @@
                 <dd id="metricTimings">-</dd>
               </div>
               <div>
-                <dt>JS crop</dt>
+                <dt>Rust attempts</dt>
                 <dd id="metricCrop">-</dd>
               </div>
               <div>
