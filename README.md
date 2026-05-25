@@ -160,6 +160,7 @@ The CI setup is designed to keep the project maintainable:
 - [Roadmap](docs/roadmap.md)
 - [Browser SDK notes](docs/sdk/browser.md)
 - [Mobile SDK notes](docs/sdk/mobile.md)
+- [Scan debugger demo](demos/debug/README.md)
 
 ## License
 

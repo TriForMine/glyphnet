@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>GlyphNet Scan Debugger</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <section class="toolbar" aria-label="Scan debugger controls">
+        <div class="brand">
+          <h1>GlyphNet Scan Debugger</h1>
+          <p>Image import, crop diagnostics, threshold view, and anchor overlays.</p>
+        </div>
+
+        <div class="controls">
+          <label class="file-button">
+            <input id="fileInput" type="file" accept="image/*" />
+            Import image
+          </label>
+
+          <label>
+            Mode
+            <select id="modeSelect">
+              <option value="print">Print</option>
+              <option value="screen">Screen</option>
+              <option value="burst">Burst</option>
+            </select>
+          </label>
+
+          <label>
+            Overlay
+            <select id="overlaySelect">
+              <option value="all">All</option>
+              <option value="crop">Crop only</option>
+              <option value="none">None</option>
+            </select>
+          </label>
+
+          <label>
+            Rust input
+            <select id="scanTarget">
+              <option value="full">Full image</option>
+              <option value="manual">Manual crop</option>
+            </select>
+          </label>
+
+          <button id="loadSample" type="button">Sample</button>
+          <button id="clearCrop" type="button">Clear crop</button>
+          <span id="wasmStatus" class="status">Rust scanner loading</span>
+        </div>
+      </section>
+
+      <section class="workspace">
+        <div id="dropZone" class="drop-zone">
+          <canvas id="imageCanvas" width="960" height="420"></canvas>
+          <canvas id="overlayCanvas" width="960" height="420"></canvas>
+          <div id="emptyState" class="empty-state">
+            <strong>Drop a PNG or JPG here</strong>
+            <span>Use a rendered GlyphNet symbol, a screenshot, or a camera frame.</span>
+          </div>
+        </div>
+
+        <aside class="panel">
+          <nav class="tabs" aria-label="Debug views">
+            <button class="active" data-view="diagnostics" type="button">Diagnostics</button>
+            <button data-view="threshold" type="button">Threshold</button>
+            <button data-view="json" type="button">JSON</button>
+          </nav>
+
+          <div class="view active" id="diagnosticsView">
+            <dl class="metrics">
+              <div>
+                <dt>Image</dt>
+                <dd id="metricImage">-</dd>
+              </div>
+              <div>
+                <dt>Otsu</dt>
+                <dd id="metricThreshold">-</dd>
+              </div>
+              <div>
+                <dt>Rust result</dt>
+                <dd id="metricRust">-</dd>
+              </div>
+              <div>
+                <dt>Rust input</dt>
+                <dd id="metricRustInput">-</dd>
+              </div>
+              <div>
+                <dt>Rust crop</dt>
+                <dd id="metricRustCrop">-</dd>
+              </div>
+              <div>
+                <dt>JS crop</dt>
+                <dd id="metricCrop">-</dd>
+              </div>
+              <div>
+                <dt>Components</dt>
+                <dd id="metricComponents">-</dd>
+              </div>
+              <div>
+                <dt>Anchors</dt>
+                <dd id="metricAnchors">-</dd>
+              </div>
+              <div>
+                <dt>Quad</dt>
+                <dd id="metricQuad">-</dd>
+              </div>
+            </dl>
+          </div>
+
+          <div class="view" id="thresholdView">
+            <canvas id="thresholdCanvas" width="420" height="220"></canvas>
+          </div>
+
+          <div class="view" id="jsonView">
+            <pre id="jsonOutput">{}</pre>
+          </div>
+        </aside>
+      </section>
+    </main>
+
+    <script src="./main.js" defer></script>
+  </body>
+</html>

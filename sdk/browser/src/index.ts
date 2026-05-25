@@ -17,6 +17,7 @@ export interface GlyphNetWasm {
   encodeSvg(input: string): string;
   descriptorJson(input: string): string;
   encodeSvgWithGeometry(input: string, modulePx: number, quietZoneModules: number): string;
+  scanRgbaJson(rgba: Uint8Array, width: number, height: number, mode: string): string;
 }
 
 export class GlyphNetBrowser {
@@ -38,5 +39,9 @@ export class GlyphNetBrowser {
       throw new Error("GlyphNet WASM returned non-SVG output");
     }
     return node;
+  }
+
+  scanRgba(rgba: Uint8Array, width: number, height: number, mode = "print"): unknown {
+    return JSON.parse(this.wasm.scanRgbaJson(rgba, width, height, mode));
   }
 }

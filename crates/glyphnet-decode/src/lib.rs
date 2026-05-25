@@ -263,11 +263,7 @@ impl RasterDecoder {
             .height()
             .checked_div(options.module_px)
             .ok_or(DecodeError::InvalidImageDimensions)?;
-        if luma.width() % options.module_px != 0
-            || luma.height() % options.module_px != 0
-            || width_modules <= quiet_zone_x_modules * 2
-            || height_modules <= quiet_zone_y_modules * 2
-        {
+        if width_modules <= quiet_zone_x_modules * 2 || height_modules <= quiet_zone_y_modules * 2 {
             return Err(DecodeError::InvalidImageDimensions);
         }
 
@@ -305,7 +301,7 @@ impl Default for RasterDecoder {
     }
 }
 
-const AUTO_QUIET_ZONE_MAX: u32 = 12;
+const AUTO_QUIET_ZONE_MAX: u32 = 32;
 const AUTO_MIN_SYMBOL_MODULES: u32 = 20;
 const AUTO_MAX_SYMBOL_WIDTH_MODULES: u32 = 512;
 const AUTO_MAX_SYMBOL_HEIGHT_MODULES: u32 = 256;

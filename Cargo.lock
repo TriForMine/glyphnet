@@ -722,6 +722,8 @@ dependencies = [
  "glyphnet-decode",
  "glyphnet-encode",
  "glyphnet-render",
+ "glyphnet-scanner",
+ "image",
  "serde",
  "serde_json",
  "wasm-bindgen",
