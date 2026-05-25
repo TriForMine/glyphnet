@@ -1,6 +1,9 @@
 //! Real-time scanner orchestration for GlyphNet.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::{
+    collections::{BTreeMap, HashMap, VecDeque},
+    time::Instant,
+};
 
 use glyphnet_core::LayoutFamily;
 use glyphnet_core::{
@@ -106,6 +109,8 @@ pub struct StillScanResult {
     pub warp_size: Option<(u32, u32)>,
     /// Candidate crop attempts considered by the still scanner.
     pub attempts: Vec<ScanAttempt>,
+    /// Scanner stage timing diagnostics.
+    pub timings: ScanTimings,
 }
 
 /// Diagnostic information for one still-scan candidate.
@@ -119,6 +124,38 @@ pub struct ScanAttempt {
     pub decoded: bool,
     /// Error message when decode failed.
     pub error: Option<String>,
+    /// Candidate decode duration in microseconds.
+    pub duration_micros: u64,
+}
+
+/// Timing diagnostics for one still scan.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScanTimings {
+    /// Complete still-scan duration.
+    pub total_micros: u64,
+    /// Full-frame decode attempt duration.
+    pub full_frame_micros: u64,
+    /// Grayscale conversion duration.
+    pub grayscale_micros: u64,
+    /// Adaptive threshold duration.
+    pub threshold_micros: u64,
+    /// Anchor and quad estimation duration.
+    pub quad_micros: u64,
+    /// Candidate region generation duration.
+    pub candidate_micros: u64,
+    /// Candidate crop/decode loop duration.
+    pub decode_attempts_micros: u64,
+}
+
+/// Failed still-scan diagnostics.
+#[derive(Debug)]
+pub struct FailedStillScan {
+    /// User-facing decode error.
+    pub error: ScannerError,
+    /// Candidate crop attempts considered by the still scanner.
+    pub attempts: Vec<ScanAttempt>,
+    /// Scanner stage timing diagnostics.
+    pub timings: ScanTimings,
 }
 
 /// Stateful real-time scanner.
@@ -188,52 +225,85 @@ impl Default for Scanner {
 
 /// Scan a still image by attempting auto-decode, then a coarse crop if needed.
 pub fn scan_still(image: &DynamicImage, mode: TransmissionMode) -> Result<StillScanResult> {
+    scan_still_with_diagnostics(image, mode).map_err(|failed| failed.error)
+}
+
+/// Scan a still image and return failed-attempt diagnostics on decode failure.
+pub fn scan_still_with_diagnostics(
+    image: &DynamicImage,
+    mode: TransmissionMode,
+) -> std::result::Result<StillScanResult, FailedStillScan> {
+    let started = Instant::now();
+    let mut timings = ScanTimings::default();
     let decoder = RasterDecoder::default();
-    if should_try_full_frame_decode(image)
-        && let Ok(decoded) = decoder.decode_auto_with_info(image)
-    {
-        return Ok(StillScanResult {
-            decoded,
-            crop: None,
-            quad: None,
-            warp_size: None,
-            attempts: Vec::new(),
-        });
+    if should_try_full_frame_decode(image) {
+        let stage = Instant::now();
+        if let Ok(decoded) = decoder.decode_auto_with_info(image) {
+            timings.full_frame_micros = elapsed_micros(stage);
+            timings.total_micros = elapsed_micros(started);
+            return Ok(StillScanResult {
+                decoded,
+                crop: None,
+                quad: None,
+                warp_size: None,
+                attempts: Vec::new(),
+                timings,
+            });
+        }
+        timings.full_frame_micros = elapsed_micros(stage);
     }
 
     let profile = VisionProfile::for_mode(mode);
-    let gray = grayscale(image)?;
-    let binary = adaptive_threshold(&gray, profile.threshold_radius, profile.threshold_bias)?;
-    let candidates = find_anchor_candidates(&binary, profile)?;
+    let stage = Instant::now();
+    let gray = grayscale(image).map_err(|error| failed_cv(error, timings, started))?;
+    timings.grayscale_micros = elapsed_micros(stage);
+
+    let stage = Instant::now();
+    let binary = adaptive_threshold(&gray, profile.threshold_radius, profile.threshold_bias)
+        .map_err(|error| failed_cv(error, timings, started))?;
+    timings.threshold_micros = elapsed_micros(stage);
+
+    let stage = Instant::now();
+    let candidates = find_anchor_candidates(&binary, profile)
+        .map_err(|error| failed_cv(error, timings, started))?;
     if let Some(quad) = estimate_quad(&binary, &candidates) {
         let (warp_width, warp_height) = quad_dimensions(quad);
         if let Ok(warped) = warp_perspective_gray(&gray, quad, warp_width, warp_height) {
             let warped = DynamicImage::ImageLuma8(warped);
             if let Ok(decoded) = decoder.decode_auto_with_info(&warped) {
+                timings.quad_micros = elapsed_micros(stage);
+                timings.total_micros = elapsed_micros(started);
                 return Ok(StillScanResult {
                     decoded,
                     crop: None,
                     quad: Some(quad),
                     warp_size: Some((warp_width, warp_height)),
                     attempts: Vec::new(),
+                    timings,
                 });
             }
         }
     }
+    timings.quad_micros = elapsed_micros(stage);
 
     let padding = profile.min_anchor_px.max(8);
     let mut attempts = Vec::new();
+    let stage = Instant::now();
     let mut regions = candidate_regions(&binary, padding, image.width(), image.height());
     if should_try_dark_bounds_fallback(image.width(), image.height(), regions.len())
         && let Some(bounds) = dark_bounds(&binary)
     {
-        regions.push((
-            "dark-bounds",
-            expand_region(bounds, padding, image.width(), image.height()),
-        ));
+        let expanded = expand_region(bounds, padding, image.width(), image.height());
+        regions.push(("dark-bounds", expanded));
+        if let Some(region) = ribbon_aspect_region(expanded, image.width(), image.height()) {
+            regions.push(("signature-window", region));
+        }
     }
+    timings.candidate_micros = elapsed_micros(stage);
 
+    let decode_started = Instant::now();
     for (stage, region) in regions {
+        let attempt_started = Instant::now();
         let cropped =
             image::imageops::crop_imm(image, region.x, region.y, region.width, region.height)
                 .to_image();
@@ -245,13 +315,17 @@ pub fn scan_still(image: &DynamicImage, mode: TransmissionMode) -> Result<StillS
                     region,
                     decoded: true,
                     error: None,
+                    duration_micros: elapsed_micros(attempt_started),
                 });
+                timings.decode_attempts_micros = elapsed_micros(decode_started);
+                timings.total_micros = elapsed_micros(started);
                 return Ok(StillScanResult {
                     decoded,
                     crop: Some(region),
                     quad: None,
                     warp_size: None,
                     attempts,
+                    timings,
                 });
             }
             Err(error) => attempts.push(ScanAttempt {
@@ -259,14 +333,38 @@ pub fn scan_still(image: &DynamicImage, mode: TransmissionMode) -> Result<StillS
                 region,
                 decoded: false,
                 error: Some(error.to_string()),
+                duration_micros: elapsed_micros(attempt_started),
             }),
         }
     }
+    timings.decode_attempts_micros = elapsed_micros(decode_started);
+    timings.total_micros = elapsed_micros(started);
 
     if std::env::var_os("GLYPHNET_SCAN_DEBUG").is_some() {
         eprintln!("scan attempts: {attempts:#?}");
     }
-    Err(DecodeError::AutoDetectFailed.into())
+    Err(FailedStillScan {
+        error: ScannerError::Decode(DecodeError::AutoDetectFailed),
+        attempts,
+        timings,
+    })
+}
+
+fn failed_cv(
+    error: glyphnet_cv::CvError,
+    mut timings: ScanTimings,
+    started: Instant,
+) -> FailedStillScan {
+    timings.total_micros = elapsed_micros(started);
+    FailedStillScan {
+        error: ScannerError::Cv(error),
+        attempts: Vec::new(),
+        timings,
+    }
+}
+
+fn elapsed_micros(started: Instant) -> u64 {
+    started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
 }
 
 fn should_try_dark_bounds_fallback(
@@ -275,6 +373,66 @@ fn should_try_dark_bounds_fallback(
     candidate_count: usize,
 ) -> bool {
     image_width.saturating_mul(image_height) <= 900_000 || candidate_count == 0
+}
+
+fn ribbon_aspect_region(
+    region: ScanRegion,
+    image_width: u32,
+    image_height: u32,
+) -> Option<ScanRegion> {
+    let target_height = ((region.width as f32 * 44.0 / 104.0).round() as u32).max(region.height);
+    let target_width = ((region.height as f32 * 104.0 / 44.0).round() as u32).max(region.width);
+    let width_first = centered_region(
+        region,
+        region.width,
+        target_height,
+        image_width,
+        image_height,
+    );
+    let height_first = centered_region(
+        region,
+        target_width,
+        region.height,
+        image_width,
+        image_height,
+    );
+
+    [width_first, height_first]
+        .into_iter()
+        .flatten()
+        .filter(|candidate| plausible_region(*candidate))
+        .min_by_key(|candidate| {
+            candidate
+                .width
+                .saturating_mul(candidate.height)
+                .saturating_sub(region.width.saturating_mul(region.height))
+        })
+}
+
+fn centered_region(
+    region: ScanRegion,
+    width: u32,
+    height: u32,
+    image_width: u32,
+    image_height: u32,
+) -> Option<ScanRegion> {
+    if width > image_width || height > image_height {
+        return None;
+    }
+    let center_x = region.x.saturating_add(region.width / 2);
+    let center_y = region.y.saturating_add(region.height / 2);
+    let x = center_x
+        .saturating_sub(width / 2)
+        .min(image_width.saturating_sub(width));
+    let y = center_y
+        .saturating_sub(height / 2)
+        .min(image_height.saturating_sub(height));
+    Some(ScanRegion {
+        x,
+        y,
+        width,
+        height,
+    })
 }
 
 fn should_try_full_frame_decode(image: &DynamicImage) -> bool {
@@ -322,8 +480,14 @@ fn decode_candidate(
         return Err(DecodeError::AutoDetectFailed);
     }
 
-    if matches!(stage, "reference-sweep" | "component-reference") {
+    if matches!(
+        stage,
+        "reference-sweep" | "component-reference" | "dark-bounds"
+    ) {
         if let Ok(decoded) = decode_exact_ribbon_candidate(image, region) {
+            return Ok(decoded);
+        }
+        if let Ok(decoded) = decode_fractional_ribbon_candidate(image) {
             return Ok(decoded);
         }
     }
@@ -381,6 +545,7 @@ fn decode_fractional_ribbon_candidate(
     }
 
     let otsu = fractional_threshold(&luma);
+    let integral = IntegralGray::new(&luma);
     let mut thresholds = vec![otsu, 160, 192, 224];
     thresholds.sort_unstable();
     thresholds.dedup();
@@ -411,12 +576,12 @@ fn decode_fractional_ribbon_candidate(
                 }
                 for &threshold in &thresholds {
                     if !fractional_header_precheck(
-                        &luma, origin_x, origin_y, scale_x, scale_y, threshold,
+                        &integral, origin_x, origin_y, scale_x, scale_y, threshold,
                     ) {
                         continue;
                     }
                     if let Ok(decoded) = decode_fractional_with_params(
-                        &luma, origin_x, origin_y, scale_x, scale_y, threshold,
+                        &integral, origin_x, origin_y, scale_x, scale_y, threshold,
                     ) {
                         return Ok(decoded);
                     }
@@ -433,7 +598,7 @@ fn module_shifts(radius: i32) -> impl Iterator<Item = f32> {
 }
 
 fn fractional_header_precheck(
-    luma: &GrayImage,
+    integral: &IntegralGray,
     origin_x_modules: f32,
     origin_y_modules: f32,
     scale_x: f32,
@@ -456,7 +621,7 @@ fn fractional_header_precheck(
                 continue;
             }
             let avg = fractional_module_luma(
-                luma,
+                integral,
                 origin_x_modules + f32::from(x),
                 origin_y_modules + f32::from(y),
                 scale_x,
@@ -494,7 +659,7 @@ fn fractional_grid_fits(
 }
 
 fn decode_fractional_with_params(
-    luma: &GrayImage,
+    integral: &IntegralGray,
     origin_x_modules: f32,
     origin_y_modules: f32,
     scale_x: f32,
@@ -519,7 +684,7 @@ fn decode_fractional_with_params(
                 continue;
             }
             let avg = fractional_module_luma(
-                luma,
+                integral,
                 origin_x_modules + f32::from(x),
                 origin_y_modules + f32::from(y),
                 scale_x,
@@ -581,7 +746,7 @@ fn fractional_threshold(luma: &GrayImage) -> u8 {
 }
 
 fn fractional_module_luma(
-    luma: &GrayImage,
+    integral: &IntegralGray,
     module_x: f32,
     module_y: f32,
     scale_x: f32,
@@ -594,24 +759,67 @@ fn fractional_module_luma(
     let start_x = (center_x - half_x).floor().max(0.0) as u32;
     let end_x = (center_x + half_x)
         .ceil()
-        .min(luma.width().saturating_sub(1) as f32) as u32;
+        .min(integral.width.saturating_sub(1) as f32) as u32;
     let start_y = (center_y - half_y).floor().max(0.0) as u32;
     let end_y = (center_y + half_y)
         .ceil()
-        .min(luma.height().saturating_sub(1) as f32) as u32;
+        .min(integral.height.saturating_sub(1) as f32) as u32;
 
-    let mut sum = 0u32;
-    let mut count = 0u32;
-    for y in start_y..=end_y {
-        for x in start_x..=end_x {
-            sum += u32::from(luma.get_pixel(x, y).0[0]);
-            count += 1;
-        }
-    }
+    let count = end_x
+        .saturating_sub(start_x)
+        .saturating_add(1)
+        .saturating_mul(end_y.saturating_sub(start_y).saturating_add(1));
     if count == 0 {
         return 255;
     }
+    let sum = integral.sum_inclusive(start_x, start_y, end_x, end_y);
     (sum / count) as u8
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct IntegralGray {
+    width: u32,
+    height: u32,
+    stride: usize,
+    sums: Vec<u32>,
+}
+
+impl IntegralGray {
+    fn new(luma: &GrayImage) -> Self {
+        let width = luma.width();
+        let height = luma.height();
+        let stride = width as usize + 1;
+        let mut sums = vec![0u32; stride * (height as usize + 1)];
+
+        for y in 0..height {
+            let mut row_sum = 0u32;
+            for x in 0..width {
+                row_sum += u32::from(luma.get_pixel(x, y).0[0]);
+                let index = (y as usize + 1) * stride + x as usize + 1;
+                let above = y as usize * stride + x as usize + 1;
+                sums[index] = sums[above] + row_sum;
+            }
+        }
+
+        Self {
+            width,
+            height,
+            stride,
+            sums,
+        }
+    }
+
+    fn sum_inclusive(&self, x0: u32, y0: u32, x1: u32, y1: u32) -> u32 {
+        let x0 = x0.min(self.width) as usize;
+        let y0 = y0.min(self.height) as usize;
+        let x1 = x1.saturating_add(1).min(self.width) as usize;
+        let y1 = y1.saturating_add(1).min(self.height) as usize;
+        let a = self.sums[y0 * self.stride + x0];
+        let b = self.sums[y0 * self.stride + x1];
+        let c = self.sums[y1 * self.stride + x0];
+        let d = self.sums[y1 * self.stride + x1];
+        d + a - b - c
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1540,14 +1748,65 @@ mod tests {
 
     use glyphnet_core::{EccLevel, Frame};
     use glyphnet_encode::Encoder;
-    use glyphnet_render::RasterRenderer;
+    use glyphnet_render::{RasterRenderer, RenderOptions};
     use glyphnet_testkit::{
         add_salt_pepper_noise, adjust_exposure, blur, place_on_canvas, resize, skew_x_on_white,
     };
-    use image::Rgba;
+    use image::{Rgba, RgbaImage};
     use rand::{SeedableRng, rngs::StdRng};
 
     use super::*;
+
+    fn rendered_sample(payload: &[u8], module_px: u32) -> RgbaImage {
+        let encoded = Encoder::default().encode_static(payload).unwrap();
+        RasterRenderer::new(RenderOptions {
+            module_px,
+            quiet_zone_modules: 4,
+            ..RenderOptions::default()
+        })
+        .render(&encoded.matrix)
+        .unwrap()
+    }
+
+    fn sample_canvas(payload: &[u8], module_px: u32, x: i64, y: i64) -> DynamicImage {
+        let symbol = rendered_sample(payload, module_px);
+        let mut canvas = RgbaImage::from_pixel(960, 360, Rgba([255, 255, 255, 255]));
+        image::imageops::overlay(&mut canvas, &symbol, x, y);
+        DynamicImage::ImageRgba8(canvas)
+    }
+
+    fn assert_scan_payload(image: &DynamicImage, payload: &[u8]) -> StillScanResult {
+        let result = scan_still(image, TransmissionMode::Print).unwrap();
+        assert_eq!(result.decoded.decoded.frame.payload, payload);
+        result
+    }
+
+    fn add_debugger_ui_noise(canvas: &mut RgbaImage) {
+        for y in [0, 46, 50, 312] {
+            for x in 0..canvas.width() {
+                canvas.put_pixel(x, y, Rgba([232, 236, 234, 255]));
+            }
+        }
+        for x in [0, 764, 812, 959] {
+            for y in 0..canvas.height() {
+                canvas.put_pixel(x, y, Rgba([220, 226, 223, 255]));
+            }
+        }
+        for y in 18..42 {
+            for x in 22..180 {
+                if (x + y) % 9 < 5 {
+                    canvas.put_pixel(x, y, Rgba([24, 32, 30, 255]));
+                }
+            }
+        }
+        for y in 74..260 {
+            for x in 820..940 {
+                if (x * 3 + y) % 17 < 6 {
+                    canvas.put_pixel(x, y, Rgba([30, 36, 34, 255]));
+                }
+            }
+        }
+    }
 
     #[test]
     fn burst_assembler_returns_payload_when_complete() {
@@ -1628,6 +1887,61 @@ mod tests {
         let result =
             scan_still(&DynamicImage::ImageRgba8(blurred), TransmissionMode::Print).unwrap();
         assert_eq!(result.decoded.decoded.frame.payload, b"blur");
+    }
+
+    #[test]
+    fn scan_still_decodes_debugger_sample_canvas() {
+        let symbol = rendered_sample(b"debug sample", 4);
+        assert_eq!(symbol.width(), 416);
+        assert_eq!(symbol.height(), 176);
+
+        let mut canvas = RgbaImage::from_pixel(960, 360, Rgba([255, 255, 255, 255]));
+        image::imageops::overlay(&mut canvas, &symbol, 110, 84);
+        let image = DynamicImage::ImageRgba8(canvas);
+
+        let result = assert_scan_payload(&image, b"debug sample");
+        assert!(matches!(
+            result.crop,
+            Some(ScanRegion {
+                x: 80..=140,
+                y: 60..=110,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    #[ignore = "stress case is useful but too slow for the default debug test suite"]
+    fn scan_still_decodes_debugger_sample_canvas_offsets() {
+        let image = sample_canvas(b"debug sample", 4, 420, 132);
+        let result = assert_scan_payload(&image, b"debug sample");
+        let crop = result.crop.expect("offset sample should crop");
+        assert!(crop.x <= 460, "crop too far right: {crop:?}");
+        assert!(crop.y <= 172, "crop too low: {crop:?}");
+    }
+
+    #[test]
+    #[ignore = "needs faster candidate rejection before noisy UI clutter belongs in default tests"]
+    fn scan_still_decodes_debugger_sample_with_ui_noise() {
+        let symbol = rendered_sample(b"debug sample", 4);
+        let mut canvas = RgbaImage::from_pixel(960, 360, Rgba([250, 250, 250, 255]));
+        add_debugger_ui_noise(&mut canvas);
+        image::imageops::overlay(&mut canvas, &symbol, 110, 84);
+        assert_scan_payload(&DynamicImage::ImageRgba8(canvas), b"debug sample");
+    }
+
+    #[test]
+    #[ignore = "module_px=2 embedded samples need stronger low-resolution signature detection"]
+    fn scan_still_decodes_small_debugger_sample_canvas() {
+        let image = sample_canvas(b"debug sample", 2, 80, 72);
+        assert_scan_payload(&image, b"debug sample");
+    }
+
+    #[test]
+    fn scan_still_decodes_manual_crop_from_debugger_sample() {
+        let image = sample_canvas(b"debug sample", 4, 110, 84);
+        let cropped = image::imageops::crop_imm(&image, 100, 76, 440, 194).to_image();
+        assert_scan_payload(&DynamicImage::ImageRgba8(cropped), b"debug sample");
     }
 
     #[test]

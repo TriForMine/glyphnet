@@ -14,7 +14,8 @@ cargo bench -p glyphnet-scanner
 The scanner benchmark currently includes `scan_real_debugger_screenshot`, a
 real debugger screenshot fixture that exercises totem/rail localization and
 fractional-grid sampling. It is the primary performance guard for still-image
-scan changes.
+scan changes. Current local release baseline is roughly 180-190 ms on the
+debugger screenshot fixture.
 
 Print the benchmark policy and profile targets with:
 

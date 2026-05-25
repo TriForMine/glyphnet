@@ -3,7 +3,7 @@
 use glyphnet_core::TransmissionMode;
 use glyphnet_encode::{Encoder, EncoderConfig};
 use glyphnet_render::{RasterRenderer, RenderOptions, SvgRenderer};
-use glyphnet_scanner::scan_still;
+use glyphnet_scanner::{FailedStillScan, ScanAttempt, ScanTimings, scan_still_with_diagnostics};
 use image::{DynamicImage, ImageEncoder, RgbaImage};
 
 /// Encode bytes and return the symbol descriptor as JSON.
@@ -92,7 +92,7 @@ pub fn scan_rgba_json(
     let image = RgbaImage::from_raw(width, height, rgba.to_vec())
         .ok_or_else(|| "failed to construct RGBA image".to_string())?;
     let image = DynamicImage::ImageRgba8(image);
-    match scan_still(&image, mode) {
+    match scan_still_with_diagnostics(&image, mode) {
         Ok(scanned) => {
             let crop = scanned.crop.map(|region| {
                 serde_json::json!({
@@ -116,23 +116,7 @@ pub fn scan_rgba_json(
                     "height": height
                 })
             });
-            let attempts: Vec<_> = scanned
-                .attempts
-                .iter()
-                .map(|attempt| {
-                    serde_json::json!({
-                        "stage": attempt.stage,
-                        "region": {
-                            "x": attempt.region.x,
-                            "y": attempt.region.y,
-                            "width": attempt.region.width,
-                            "height": attempt.region.height
-                        },
-                        "decoded": attempt.decoded,
-                        "error": attempt.error
-                    })
-                })
-                .collect();
+            let attempts = attempts_json(&scanned.attempts);
             serde_json::to_string_pretty(&serde_json::json!({
                 "ok": true,
                 "payload_utf8_lossy": String::from_utf8_lossy(&scanned.decoded.decoded.frame.payload),
@@ -151,17 +135,59 @@ pub fn scan_rgba_json(
                 "crop": crop,
                 "quad": quad,
                 "warp": warp,
+                "timings": timings_json(scanned.timings),
                 "candidate_count": attempts.len(),
                 "attempts": attempts
             }))
             .map_err(|error| error.to_string())
         }
-        Err(error) => serde_json::to_string_pretty(&serde_json::json!({
-            "ok": false,
-            "error": error.to_string()
-        }))
-        .map_err(|error| error.to_string()),
+        Err(failed) => failed_scan_json(failed).map_err(|error| error.to_string()),
     }
+}
+
+fn failed_scan_json(failed: FailedStillScan) -> serde_json::Result<String> {
+    let attempts = attempts_json(&failed.attempts);
+    serde_json::to_string_pretty(&serde_json::json!({
+            "ok": false,
+            "error": failed.error.to_string(),
+            "timings": timings_json(failed.timings),
+            "candidate_count": attempts.len(),
+            "attempts": attempts
+    }))
+}
+
+fn attempts_json(attempts: &[ScanAttempt]) -> Vec<serde_json::Value> {
+    attempts
+        .iter()
+        .map(|attempt| {
+            serde_json::json!({
+                "stage": attempt.stage,
+                "region": {
+                    "x": attempt.region.x,
+                    "y": attempt.region.y,
+                    "width": attempt.region.width,
+                    "height": attempt.region.height
+                },
+                "decoded": attempt.decoded,
+                "duration_micros": attempt.duration_micros,
+                "duration_ms": attempt.duration_micros as f64 / 1000.0,
+                "error": attempt.error
+            })
+        })
+        .collect()
+}
+
+fn timings_json(timings: ScanTimings) -> serde_json::Value {
+    serde_json::json!({
+        "total_micros": timings.total_micros,
+        "total_ms": timings.total_micros as f64 / 1000.0,
+        "full_frame_ms": timings.full_frame_micros as f64 / 1000.0,
+        "grayscale_ms": timings.grayscale_micros as f64 / 1000.0,
+        "threshold_ms": timings.threshold_micros as f64 / 1000.0,
+        "quad_ms": timings.quad_micros as f64 / 1000.0,
+        "candidate_ms": timings.candidate_micros as f64 / 1000.0,
+        "decode_attempts_ms": timings.decode_attempts_micros as f64 / 1000.0
+    })
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]

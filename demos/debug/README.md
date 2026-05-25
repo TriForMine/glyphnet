@@ -23,6 +23,7 @@ Current diagnostics:
 - Rust input selection: full image or manual drag crop;
 - source image dimensions and displayed canvas bounds;
 - Rust candidate crop attempts;
+- Rust stage timings and per-attempt decode durations;
 - Rust-estimated quadrilateral overlay;
 - JSON export of the active diagnostics.
 

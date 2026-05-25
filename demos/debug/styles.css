@@ -237,6 +237,52 @@ button,
   overflow-wrap: anywhere;
 }
 
+.attempts {
+  margin-top: 16px;
+}
+
+.attempts h2 {
+  margin: 0 0 8px;
+  font-size: 14px;
+  letter-spacing: 0;
+}
+
+.attempts-table {
+  display: grid;
+  gap: 6px;
+}
+
+.attempt-row {
+  display: grid;
+  grid-template-columns: 34px 1fr auto;
+  gap: 8px;
+  align-items: center;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fbfcfb;
+  font-size: 12px;
+}
+
+.attempt-row.decoded {
+  border-color: rgba(0, 135, 90, 0.45);
+  background: rgba(0, 135, 90, 0.08);
+}
+
+.attempt-index {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.attempt-stage {
+  overflow-wrap: anywhere;
+}
+
+.attempt-time {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
 #thresholdCanvas {
   width: 100%;
   height: auto;

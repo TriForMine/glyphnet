@@ -29,10 +29,12 @@ const nodes = {
   metricRust: document.querySelector("#metricRust"),
   metricRustInput: document.querySelector("#metricRustInput"),
   metricRustCrop: document.querySelector("#metricRustCrop"),
+  metricTimings: document.querySelector("#metricTimings"),
   metricCrop: document.querySelector("#metricCrop"),
   metricComponents: document.querySelector("#metricComponents"),
   metricAnchors: document.querySelector("#metricAnchors"),
   metricQuad: document.querySelector("#metricQuad"),
+  attemptsTable: document.querySelector("#attemptsTable"),
 };
 
 loadWasm();
@@ -350,12 +352,14 @@ function updateMetrics() {
     ? `${rust.input.target}: ${formatRect(rust.input.sourceRect)} -> ${rust.input.width}x${rust.input.height}`
     : "not available";
   nodes.metricRustCrop.textContent = rust?.crop ? formatRect(rust.crop) : "none";
+  nodes.metricTimings.textContent = formatTimings(rust?.timings);
   nodes.metricCrop.textContent = rust?.attempts?.length
     ? `${rust.attempts.length} Rust candidate regions`
     : "none";
   nodes.metricComponents.textContent = rust?.candidate_count ?? "-";
   nodes.metricAnchors.textContent = rust?.anchor_count ?? "-";
   nodes.metricQuad.textContent = rust?.quad ? "estimated by Rust" : "none";
+  renderAttempts(rust?.attempts ?? []);
   nodes.jsonOutput.textContent = JSON.stringify(
     {
       source: diagnostics.source,
@@ -365,6 +369,52 @@ function updateMetrics() {
     null,
     2,
   );
+}
+
+function renderAttempts(attempts) {
+  nodes.attemptsTable.replaceChildren();
+  const top = [...attempts].slice(0, 24);
+  if (!top.length) {
+    nodes.attemptsTable.textContent = "No Rust candidate attempts.";
+    return;
+  }
+  for (const [index, attempt] of top.entries()) {
+    const row = document.createElement("div");
+    row.className = `attempt-row${attempt.decoded ? " decoded" : ""}`;
+    row.title = attempt.error || "decoded";
+
+    const order = document.createElement("span");
+    order.className = "attempt-index";
+    order.textContent = `#${index + 1}`;
+
+    const stage = document.createElement("span");
+    stage.className = "attempt-stage";
+    stage.textContent = `${attempt.stage} ${formatRect(attempt.region)}`;
+
+    const time = document.createElement("span");
+    time.className = "attempt-time";
+    time.textContent = formatMs(attempt.duration_ms);
+
+    row.append(order, stage, time);
+    nodes.attemptsTable.append(row);
+  }
+}
+
+function formatTimings(timings) {
+  if (!timings) return "-";
+  return [
+    `total ${formatMs(timings.total_ms)}`,
+    `threshold ${formatMs(timings.threshold_ms)}`,
+    `candidates ${formatMs(timings.candidate_ms)}`,
+    `decode ${formatMs(timings.decode_attempts_ms)}`,
+  ].join(" / ");
+}
+
+function formatMs(value) {
+  if (typeof value !== "number" || Number.isNaN(value)) return "-";
+  if (value >= 100) return `${Math.round(value)} ms`;
+  if (value >= 10) return `${value.toFixed(1)} ms`;
+  return `${value.toFixed(2)} ms`;
 }
 
 function canvasPoint(event) {
