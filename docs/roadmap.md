@@ -1,5 +1,9 @@
 # Roadmap
 
+The product strategy and benchmark contract are defined in
+[`docs/strategy.md`](strategy.md). This roadmap is the implementation sequence
+for that strategy.
+
 ## Phase 0: Reference Protocol
 
 - Deterministic frame wire format.
