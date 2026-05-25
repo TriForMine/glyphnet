@@ -19,6 +19,7 @@ The page uses the real Rust `glyphnet-scanner` pipeline through
 Playground workflow:
 
 - enter a payload, module size, and quiet-zone size;
+- choose the generated layout, currently `RibbonWeave` or `Matrix`;
 - generate either a tight PNG or a larger debug canvas with the symbol embedded;
 - scan the generated symbol through the same Rust path used for imported images;
 - import screenshots or camera-style captures and compare the Rust diagnostics.

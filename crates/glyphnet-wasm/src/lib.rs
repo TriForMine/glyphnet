@@ -1,6 +1,6 @@
 //! WebAssembly-facing API for GlyphNet.
 
-use glyphnet_core::TransmissionMode;
+use glyphnet_core::{LayoutFamily, TransmissionMode};
 use glyphnet_encode::{Encoder, EncoderConfig};
 use glyphnet_render::{RasterRenderer, RenderOptions, SvgRenderer};
 use glyphnet_scanner::{FailedStillScan, ScanAttempt, ScanTimings, scan_still_with_diagnostics};
@@ -49,9 +49,27 @@ pub fn encode_png_with_geometry(
     module_px: u32,
     quiet_zone_modules: u32,
 ) -> Result<Vec<u8>, String> {
-    let encoded = Encoder::new(EncoderConfig::default())
-        .encode_static(payload)
-        .map_err(|error| error.to_string())?;
+    encode_png_with_layout_geometry(
+        payload,
+        LayoutFamily::RibbonWeave,
+        module_px,
+        quiet_zone_modules,
+    )
+}
+
+/// Encode bytes using an explicit layout, module size, and quiet zone, returning PNG bytes.
+pub fn encode_png_with_layout_geometry(
+    payload: &[u8],
+    layout: LayoutFamily,
+    module_px: u32,
+    quiet_zone_modules: u32,
+) -> Result<Vec<u8>, String> {
+    let encoded = Encoder::new(EncoderConfig {
+        layout,
+        ..EncoderConfig::default()
+    })
+    .encode_static(payload)
+    .map_err(|error| error.to_string())?;
     let renderer = RasterRenderer::new(RenderOptions {
         module_px,
         quiet_zone_modules,
@@ -202,6 +220,21 @@ fn mode_from_str(mode: &str) -> Result<TransmissionMode, String> {
     }
 }
 
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn layout_from_str(layout: &str) -> Result<LayoutFamily, String> {
+    match layout {
+        "ribbon" | "ribbon-weave" | "RibbonWeave" => Ok(LayoutFamily::RibbonWeave),
+        "matrix" | "Matrix" => Ok(LayoutFamily::Matrix),
+        "spectral" | "spectral-mesh" | "SpectralMesh" => Ok(LayoutFamily::SpectralMesh),
+        "pulse" | "pulse-stream" | "PulseStream" => Ok(LayoutFamily::PulseStream),
+        "constellation" | "Constellation" => Ok(LayoutFamily::Constellation),
+        "frame-grid" | "FrameGrid" => Ok(LayoutFamily::FrameGrid),
+        "hexagonal" | "Hexagonal" => Ok(LayoutFamily::Hexagonal),
+        "radial" | "Radial" => Ok(LayoutFamily::Radial),
+        _ => Err(format!("unknown layout: {layout}")),
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 mod wasm {
     #![allow(unreachable_pub)]
@@ -240,6 +273,24 @@ mod wasm {
     ) -> Result<Vec<u8>, JsValue> {
         crate::encode_png_with_geometry(input.as_bytes(), module_px, quiet_zone_modules)
             .map_err(|error| JsValue::from_str(&error))
+    }
+
+    /// Encode a UTF-8 string into PNG bytes using explicit layout and geometry.
+    #[wasm_bindgen(js_name = encodePngWithLayoutGeometry)]
+    pub fn encode_png_with_layout_geometry(
+        input: &str,
+        layout: &str,
+        module_px: u32,
+        quiet_zone_modules: u32,
+    ) -> Result<Vec<u8>, JsValue> {
+        let layout = crate::layout_from_str(layout).map_err(|error| JsValue::from_str(&error))?;
+        crate::encode_png_with_layout_geometry(
+            input.as_bytes(),
+            layout,
+            module_px,
+            quiet_zone_modules,
+        )
+        .map_err(|error| JsValue::from_str(&error))
     }
 
     /// Scan browser ImageData RGBA bytes and return scanner diagnostics JSON.
@@ -302,5 +353,22 @@ mod tests {
         .unwrap();
         assert!(json.contains(r#""ok": true"#));
         assert!(json.contains("debug sample"));
+    }
+
+    #[test]
+    fn native_png_api_returns_decodable_matrix_symbol() {
+        let png =
+            encode_png_with_layout_geometry(b"matrix sample", LayoutFamily::Matrix, 4, 4).unwrap();
+        let image = image::load_from_memory(&png).unwrap().into_rgba8();
+        let json = scan_rgba_json(
+            image.as_raw(),
+            image.width(),
+            image.height(),
+            TransmissionMode::Print,
+        )
+        .unwrap();
+        assert!(json.contains(r#""ok": true"#));
+        assert!(json.contains("matrix sample"));
+        assert!(json.contains("Matrix"));
     }
 }

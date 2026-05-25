@@ -18,6 +18,7 @@ const nodes = {
   payloadInput: document.querySelector("#payloadInput"),
   moduleInput: document.querySelector("#moduleInput"),
   quietInput: document.querySelector("#quietInput"),
+  generatorLayoutSelect: document.querySelector("#generatorLayoutSelect"),
   generatorCanvasSelect: document.querySelector("#generatorCanvasSelect"),
   generateButton: document.querySelector("#generateButton"),
   generatorStatus: document.querySelector("#generatorStatus"),
@@ -58,6 +59,7 @@ nodes.loadSample.addEventListener("click", async () => {
   nodes.payloadInput.value = "debug sample";
   nodes.moduleInput.value = "4";
   nodes.quietInput.value = "4";
+  nodes.generatorLayoutSelect.value = "ribbon-weave";
   nodes.generatorCanvasSelect.value = "debug";
   await generateCurrent();
 });
@@ -155,6 +157,7 @@ async function generateCurrent() {
   const payload = nodes.payloadInput.value;
   const modulePx = clampInteger(nodes.moduleInput.value, 1, 24, 4);
   const quiet = clampInteger(nodes.quietInput.value, 0, 24, 4);
+  const layout = nodes.generatorLayoutSelect.value;
   nodes.moduleInput.value = String(modulePx);
   nodes.quietInput.value = String(quiet);
 
@@ -162,7 +165,7 @@ async function generateCurrent() {
     const canvas =
       nodes.generatorCanvasSelect.value === "tight"
         ? await generatedTightCanvas(payload, modulePx, quiet)
-        : await generatedDebugCanvas(payload, modulePx, quiet);
+        : await generatedDebugCanvas(payload, modulePx, quiet, layout);
     const image = new Image();
     image.onload = () => {
       state.source = image;
@@ -538,7 +541,7 @@ function formatRect(rect) {
   return `${Math.round(rect.x)}, ${Math.round(rect.y)}, ${Math.round(rect.width)}x${Math.round(rect.height)}`;
 }
 
-async function generatedDebugCanvas(payload, modulePx, quiet) {
+async function generatedDebugCanvas(payload, modulePx, quiet, layout) {
   const canvas = document.createElement("canvas");
   canvas.width = 960;
   canvas.height = 360;
@@ -546,13 +549,18 @@ async function generatedDebugCanvas(payload, modulePx, quiet) {
   ctx.fillStyle = "#ffffff";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-  const image = await generatedImage(payload, modulePx, quiet);
+  const image = await generatedImage(payload, modulePx, quiet, layout);
   ctx.drawImage(image, 110, 84);
   return canvas;
 }
 
 async function generatedTightCanvas(payload, modulePx, quiet) {
-  const image = await generatedImage(payload, modulePx, quiet);
+  const image = await generatedImage(
+    payload,
+    modulePx,
+    quiet,
+    nodes.generatorLayoutSelect.value,
+  );
   const canvas = document.createElement("canvas");
   canvas.width = image.naturalWidth;
   canvas.height = image.naturalHeight;
@@ -561,8 +569,8 @@ async function generatedTightCanvas(payload, modulePx, quiet) {
   return canvas;
 }
 
-async function generatedImage(payload, modulePx, quiet) {
-  const png = state.wasm.encodePngWithGeometry(payload, modulePx, quiet);
+async function generatedImage(payload, modulePx, quiet, layout) {
+  const png = state.wasm.encodePngWithLayoutGeometry(payload, layout, modulePx, quiet);
   const image = new Image();
   const blob = new Blob([png], { type: "image/png" });
   const url = URL.createObjectURL(blob);

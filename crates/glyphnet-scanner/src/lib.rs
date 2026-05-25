@@ -567,6 +567,32 @@ fn content_symbol_regions(
         if module_px < (min_module_px / 8).max(1) {
             continue;
         }
+        if bounds.width % module_px != 0 || bounds.height % module_px != 0 {
+            continue;
+        }
+        let symbol_width = bounds.width / module_px;
+        let symbol_height = bounds.height / module_px;
+        if !reference_generated_geometry(symbol_width, symbol_height) {
+            continue;
+        }
+        let quiet_px = module_px.saturating_mul(4);
+        let region = ScanRegion {
+            x: bounds.x.saturating_sub(quiet_px),
+            y: bounds.y.saturating_sub(quiet_px),
+            width: bounds.width.saturating_add(quiet_px.saturating_mul(2)),
+            height: bounds.height.saturating_add(quiet_px.saturating_mul(2)),
+        };
+        regions.push(ScanCandidate::new(
+            CandidateDetector::GeneratedContent,
+            None,
+            "content-bounds",
+            clamp_region(region, image_width, image_height),
+        ));
+    }
+    for module_px in 1..=16 {
+        if module_px < (min_module_px / 8).max(1) {
+            continue;
+        }
         let expected_content_width = 96 * module_px;
         if bounds.width.abs_diff(expected_content_width) > module_px {
             continue;
@@ -616,6 +642,18 @@ fn content_symbol_regions(
         ));
     }
     regions
+}
+
+fn reference_generated_geometry(width: u32, height: u32) -> bool {
+    if width == height && width >= 29 {
+        return true;
+    }
+    let aspect = width as f32 / height.max(1) as f32;
+    width >= 48
+        && height >= 28
+        && width % 2 == 0
+        && height % 2 == 0
+        && (1.0..=8.0).contains(&aspect)
 }
 
 fn ribbon_dark_bounds_candidates(
@@ -2118,7 +2156,20 @@ mod tests {
     use super::*;
 
     fn rendered_sample(payload: &[u8], module_px: u32) -> RgbaImage {
-        let encoded = Encoder::default().encode_static(payload).unwrap();
+        rendered_sample_with_layout(payload, module_px, LayoutFamily::RibbonWeave)
+    }
+
+    fn rendered_sample_with_layout(
+        payload: &[u8],
+        module_px: u32,
+        layout: LayoutFamily,
+    ) -> RgbaImage {
+        let encoded = Encoder::new(glyphnet_encode::EncoderConfig {
+            layout,
+            ..Default::default()
+        })
+        .encode_static(payload)
+        .unwrap();
         RasterRenderer::new(RenderOptions {
             module_px,
             quiet_zone_modules: 4,
@@ -2130,8 +2181,12 @@ mod tests {
 
     fn sample_canvas(payload: &[u8], module_px: u32, x: i64, y: i64) -> DynamicImage {
         let symbol = rendered_sample(payload, module_px);
+        sample_canvas_with_symbol(&symbol, x, y)
+    }
+
+    fn sample_canvas_with_symbol(symbol: &RgbaImage, x: i64, y: i64) -> DynamicImage {
         let mut canvas = RgbaImage::from_pixel(960, 360, Rgba([255, 255, 255, 255]));
-        image::imageops::overlay(&mut canvas, &symbol, x, y);
+        image::imageops::overlay(&mut canvas, symbol, x, y);
         DynamicImage::ImageRgba8(canvas)
     }
 
@@ -2275,6 +2330,21 @@ mod tests {
         let payload = b"sdfdsfdfsfdsqdfsfdsdfsdsffdssdfsdffsdfdsfdsfsd";
         let image = sample_canvas(payload, 4, 110, 84);
         assert_scan_payload(&image, payload);
+    }
+
+    #[test]
+    fn scan_still_decodes_generated_matrix_canvas() {
+        let payload = b"matrix baseline";
+        let symbol = rendered_sample_with_layout(payload, 4, LayoutFamily::Matrix);
+        let image = sample_canvas_with_symbol(&symbol, 128, 56);
+        let result = assert_scan_payload(&image, payload);
+        assert_eq!(result.decoded.info.layout, LayoutFamily::Matrix);
+        assert!(
+            result
+                .attempts
+                .iter()
+                .any(|attempt| attempt.detector == CandidateDetector::GeneratedContent.as_str())
+        );
     }
 
     #[test]
