@@ -254,6 +254,18 @@ pub fn scan_still_with_diagnostics(
                 timings,
             });
         }
+        if let Ok(decoded) = decode_resampled_full_frame(&decoder, image) {
+            timings.full_frame_micros = elapsed_micros(stage);
+            timings.total_micros = elapsed_micros(started);
+            return Ok(StillScanResult {
+                decoded,
+                crop: None,
+                quad: None,
+                warp_size: None,
+                attempts: Vec::new(),
+                timings,
+            });
+        }
         timings.full_frame_micros = elapsed_micros(stage);
     }
 
@@ -352,6 +364,38 @@ pub fn scan_still_with_diagnostics(
         attempts,
         timings,
     })
+}
+
+fn decode_resampled_full_frame(
+    decoder: &RasterDecoder,
+    image: &DynamicImage,
+) -> std::result::Result<AutoDecodedSymbol, DecodeError> {
+    let width = image.width();
+    let height = image.height();
+    if width == 0 || height == 0 {
+        return Err(DecodeError::InvalidImageDimensions);
+    }
+    for module_px in [2u32, 3, 4, 5, 6, 8, 10, 12] {
+        let target_width = (width as f32 / module_px as f32).round() as u32 * module_px;
+        let target_height = (height as f32 / module_px as f32).round() as u32 * module_px;
+        if target_width == 0 || target_height == 0 {
+            continue;
+        }
+        if target_width == width && target_height == height {
+            continue;
+        }
+        let resized = image::imageops::resize(
+            image,
+            target_width,
+            target_height,
+            image::imageops::FilterType::Triangle,
+        );
+        let resized = DynamicImage::ImageRgba8(resized);
+        if let Ok(decoded) = decoder.decode_auto_with_info(&resized) {
+            return Ok(decoded);
+        }
+    }
+    Err(DecodeError::AutoDetectFailed)
 }
 
 fn failed_cv(
