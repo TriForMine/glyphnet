@@ -1526,6 +1526,8 @@ impl BurstAssembler {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
     use glyphnet_core::{EccLevel, Frame};
     use glyphnet_encode::Encoder;
     use glyphnet_render::RasterRenderer;
@@ -1675,6 +1677,36 @@ mod tests {
             })
         ));
         assert!(result.attempts.iter().any(|attempt| attempt.decoded));
+    }
+
+    #[test]
+    fn scan_still_decodes_real_debugger_screenshot_fixture() {
+        let image =
+            image::load_from_memory(include_bytes!("../fixtures/screenshot-debug-sample.png"))
+                .unwrap();
+
+        let started = Instant::now();
+        let result = scan_still(&image, TransmissionMode::Print).unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(result.decoded.decoded.frame.payload, b"debug sample");
+        let crop = result
+            .crop
+            .expect("real screenshot should use scanner crop");
+        assert!((330..=400).contains(&crop.x), "unexpected crop.x: {crop:?}");
+        assert!((350..=420).contains(&crop.y), "unexpected crop.y: {crop:?}");
+        assert!(
+            (1250..=1380).contains(&crop.width),
+            "unexpected crop.width: {crop:?}"
+        );
+        assert!(
+            (520..=590).contains(&crop.height),
+            "unexpected crop.height: {crop:?}"
+        );
+        assert!(
+            elapsed.as_secs_f32() < 20.0,
+            "real screenshot scan took {elapsed:?}"
+        );
     }
 
     #[test]
