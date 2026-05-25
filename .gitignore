@@ -7,6 +7,7 @@
 *.profdata
 *.wasm
 *.dSYM/
+.playwright-mcp/
 .DS_Store
 Thumbs.db
 node_modules/
