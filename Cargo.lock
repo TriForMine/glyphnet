@@ -687,6 +687,7 @@ dependencies = [
 name = "glyphnet-scanner"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "glyphnet-core",
  "glyphnet-cv",
  "glyphnet-decode",

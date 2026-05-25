@@ -31,6 +31,7 @@ Optional:
 
 ```powershell
 cargo install cargo-llvm-cov cargo-deny cargo-audit cargo-fuzz
+cargo bench -p glyphnet-scanner
 cargo llvm-cov --workspace --all-features
 cargo deny check
 cargo audit

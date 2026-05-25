@@ -224,7 +224,9 @@ pub fn scan_still(image: &DynamicImage, mode: TransmissionMode) -> Result<StillS
     let padding = profile.min_anchor_px.max(8);
     let mut attempts = Vec::new();
     let mut regions = candidate_regions(&binary, padding, image.width(), image.height());
-    if let Some(bounds) = dark_bounds(&binary) {
+    if should_try_dark_bounds_fallback(image.width(), image.height(), regions.len())
+        && let Some(bounds) = dark_bounds(&binary)
+    {
         regions.push((
             "dark-bounds",
             expand_region(bounds, padding, image.width(), image.height()),
@@ -265,6 +267,14 @@ pub fn scan_still(image: &DynamicImage, mode: TransmissionMode) -> Result<StillS
         eprintln!("scan attempts: {attempts:#?}");
     }
     Err(DecodeError::AutoDetectFailed.into())
+}
+
+fn should_try_dark_bounds_fallback(
+    image_width: u32,
+    image_height: u32,
+    candidate_count: usize,
+) -> bool {
+    image_width.saturating_mul(image_height) <= 900_000 || candidate_count == 0
 }
 
 fn should_try_full_frame_decode(image: &DynamicImage) -> bool {

@@ -8,7 +8,13 @@ Run the current encode benchmark suite with:
 
 ```powershell
 cargo bench -p glyphnet-encode
+cargo bench -p glyphnet-scanner
 ```
+
+The scanner benchmark currently includes `scan_real_debugger_screenshot`, a
+real debugger screenshot fixture that exercises totem/rail localization and
+fractional-grid sampling. It is the primary performance guard for still-image
+scan changes.
 
 Print the benchmark policy and profile targets with:
 
@@ -41,6 +47,8 @@ current reference scanner already reaches every target.
 ## Regression Policy
 
 - Profile encode benchmarks live in `crates/glyphnet-encode/benches`.
+- Still scanner benchmarks live in `crates/glyphnet-scanner/benches` and use
+  deterministic image fixtures.
 - Decode and CV benchmarks should use deterministic fixture seeds.
 - Any new renderer primitive must include a fixture that decodes through the
   conservative grayscale path unless explicitly marked color-only.
