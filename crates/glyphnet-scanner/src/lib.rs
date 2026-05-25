@@ -305,10 +305,30 @@ pub fn scan_still_with_diagnostics(
     let padding = profile.min_anchor_px.max(8);
     let mut attempts = Vec::new();
     let stage = scan_instant_now();
-    let mut regions = candidate_regions(&binary, padding, image.width(), image.height());
+    let mut regions = Vec::new();
+    if should_try_dark_bounds_fallback(image.width(), image.height(), regions.len())
+        && let Some(bounds) = content_bounds(image)
+    {
+        regions.extend(content_symbol_regions(
+            bounds,
+            image.width(),
+            image.height(),
+            profile.min_anchor_px,
+        ));
+    }
+    regions.extend(candidate_regions(
+        &binary,
+        padding,
+        image.width(),
+        image.height(),
+    ));
     if should_try_dark_bounds_fallback(image.width(), image.height(), regions.len())
         && let Some(bounds) = dark_bounds(&binary)
     {
+        if let Some(region) = ribbon_region_from_dark_bounds(bounds, image.width(), image.height())
+        {
+            regions.push(("dark-ribbon", region));
+        }
         let expanded = expand_region(bounds, padding, image.width(), image.height());
         regions.push(("dark-bounds", expanded));
         if let Some(region) = ribbon_aspect_region(expanded, image.width(), image.height()) {
@@ -439,6 +459,112 @@ fn should_try_dark_bounds_fallback(
     image_width.saturating_mul(image_height) <= 900_000 || candidate_count == 0
 }
 
+fn content_bounds(image: &DynamicImage) -> Option<ScanRegion> {
+    let rgba = image.to_rgba8();
+    let mut min_x = image.width();
+    let mut min_y = image.height();
+    let mut max_x = 0;
+    let mut max_y = 0;
+    let mut found = false;
+
+    for (x, y, pixel) in rgba.enumerate_pixels() {
+        let [red, green, blue, alpha] = pixel.0;
+        if alpha > 0 && (red < 245 || green < 245 || blue < 245) {
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+            found = true;
+        }
+    }
+
+    found.then_some(ScanRegion {
+        x: min_x,
+        y: min_y,
+        width: max_x.saturating_sub(min_x).saturating_add(1),
+        height: max_y.saturating_sub(min_y).saturating_add(1),
+    })
+}
+
+fn content_symbol_regions(
+    bounds: ScanRegion,
+    image_width: u32,
+    image_height: u32,
+    min_module_px: u32,
+) -> Vec<(&'static str, ScanRegion)> {
+    let mut regions = Vec::new();
+    for module_px in 1..=16 {
+        if module_px < (min_module_px / 8).max(1) {
+            continue;
+        }
+        let expected_content_width = 96 * module_px;
+        if bounds.width.abs_diff(expected_content_width) > module_px {
+            continue;
+        }
+        let quiet_px = module_px.saturating_mul(4);
+        for extra_top_px in [0, 1, module_px / 2, module_px] {
+            let region = ScanRegion {
+                x: bounds.x.saturating_sub(quiet_px),
+                y: bounds
+                    .y
+                    .saturating_sub(quiet_px.saturating_add(extra_top_px)),
+                width: 104 * module_px,
+                height: 44 * module_px,
+            };
+            regions.push((
+                "content-reference",
+                clamp_region(region, image_width, image_height),
+            ));
+        }
+    }
+    for module_px in 1..=16 {
+        if module_px < (min_module_px / 8).max(1) {
+            continue;
+        }
+        if bounds.width % module_px != 0 || bounds.height % module_px != 0 {
+            continue;
+        }
+        let symbol_width = bounds.width / module_px;
+        let symbol_height = bounds.height / module_px;
+        if !reference_ribbon_geometry(symbol_width, symbol_height) {
+            continue;
+        }
+        let quiet_px = module_px.saturating_mul(4);
+        let region = ScanRegion {
+            x: bounds.x.saturating_sub(quiet_px),
+            y: bounds.y.saturating_sub(quiet_px),
+            width: bounds.width.saturating_add(quiet_px.saturating_mul(2)),
+            height: bounds.height.saturating_add(quiet_px.saturating_mul(2)),
+        };
+        regions.push((
+            "content-bounds",
+            clamp_region(region, image_width, image_height),
+        ));
+    }
+    regions
+}
+
+fn reference_ribbon_geometry(width: u32, height: u32) -> bool {
+    width >= 96
+        && height >= 28
+        && width % 4 == 0
+        && height % 4 == 0
+        && (2.0..=8.0).contains(&(width as f32 / height.max(1) as f32))
+}
+
+fn clamp_region(region: ScanRegion, image_width: u32, image_height: u32) -> ScanRegion {
+    let x = region.x.min(image_width.saturating_sub(1));
+    let y = region.y.min(image_height.saturating_sub(1));
+    let max_x = region.x.saturating_add(region.width).min(image_width);
+    let max_y = region.y.saturating_add(region.height).min(image_height);
+    ScanRegion {
+        x,
+        y,
+        width: max_x.saturating_sub(x).max(1),
+        height: max_y.saturating_sub(y).max(1),
+    }
+}
+
 fn ribbon_aspect_region(
     region: ScanRegion,
     image_width: u32,
@@ -473,6 +599,20 @@ fn ribbon_aspect_region(
         })
 }
 
+fn ribbon_region_from_dark_bounds(
+    bounds: ScanRegion,
+    image_width: u32,
+    image_height: u32,
+) -> Option<ScanRegion> {
+    if bounds.width < 48 || bounds.height < 24 {
+        return None;
+    }
+    let total_width = ((bounds.width as f32 * 104.0 / 96.0).round() as u32).max(bounds.width);
+    let total_height = ((total_width as f32 * 44.0 / 104.0).round() as u32).max(bounds.height);
+    centered_region(bounds, total_width, total_height, image_width, image_height)
+        .filter(|candidate| plausible_region(*candidate))
+}
+
 fn centered_region(
     region: ScanRegion,
     width: u32,
@@ -503,7 +643,7 @@ fn should_try_full_frame_decode(image: &DynamicImage) -> bool {
     let width = image.width();
     let height = image.height();
     let area = width.saturating_mul(height);
-    if area > 700_000 {
+    if area > 300_000 {
         return false;
     }
     let aspect = width as f32 / height.max(1) as f32;
@@ -1971,6 +2111,13 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn scan_still_decodes_debugger_canvas_with_long_payload() {
+        let payload = b"sdfdsfdfsfdsqdfsfdsdfsdsffdssdfsdffsdfdsfdsfsd";
+        let image = sample_canvas(payload, 4, 110, 84);
+        assert_scan_payload(&image, payload);
     }
 
     #[test]
