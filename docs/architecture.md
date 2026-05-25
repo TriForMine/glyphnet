@@ -111,24 +111,43 @@ Future renderers can add:
 
 ## Decoding Pipeline
 
-The current decoder supports rendered reference images. The scanner roadmap is:
+The decoder has two paths:
 
-1. Convert to grayscale or calibrated color channels.
-2. Adaptive threshold and denoise.
-3. Detect anchor candidates.
-4. Estimate perspective transform.
-5. (Optional) auto-infer module size, quiet zone, layout family, and threshold from rendered images.
-6. (Optional) coarse crop + perspective rectification for still scans.
-7. Sample modules using timing and alignment markers.
-8. Decode matrix bits.
-9. Validate header, payload CRC, and ECC.
-10. Assemble burst streams and surface telemetry.
+1. `glyphnet-decode` decodes already-isolated rendered reference images. It can
+   infer integer module size, quiet zone, layout family, and threshold.
+2. `glyphnet-scanner` handles still images, screenshots, and camera-like inputs
+   where the symbol may be embedded in UI chrome and modules may land on
+   fractional pixels.
+
+The still scanner follows the same broad structure used by modern QR scanners:
+cheap signature localization first, then grid sampling and ECC validation.
+
+Current still-image flow:
+
+1. Convert to grayscale and adaptive threshold.
+2. Try CV anchor/quad estimation when anchors are available.
+3. Locate RibbonWeave candidates from layout-specific signatures:
+   - dashed side totems;
+   - horizontal chevron rails;
+   - dark-bounds fallback for small/simple images.
+4. Estimate a candidate symbol box from detected signature geometry.
+5. Try exact integer-grid decoding for clean reference crops.
+6. For screenshot/camera-style crops, run fractional-grid sampling:
+   - try small phase offsets;
+   - try small scale corrections;
+   - run a frame-header precheck before full matrix decode;
+   - accept only when full ECC/header validation passes.
+7. Return the decoded payload plus crop/quad/attempt diagnostics.
+
+Large still images avoid the old generic crop crawl after signature detection,
+so failures stay bounded instead of scanning arbitrary UI regions.
 
 ## Performance Plan
 
 - Keep core encoding allocation patterns visible and benchmarked.
 - Use Criterion for encode/render/decode regression tracking.
-- Add SIMD thresholding and module sampling behind feature flags.
+- Add SIMD thresholding and fractional module sampling behind feature flags.
+- Keep candidate generation signature-driven; avoid brute-force crop search.
 - Add GPU sampling/rendering through optional crates, never in core.
 - Use rayon only where deterministic outputs and measurable wins are proven.
 - Preserve no-unsafe defaults; unsafe optimizations require isolated review.

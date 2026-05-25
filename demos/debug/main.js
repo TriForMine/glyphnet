@@ -448,9 +448,9 @@ async function sampleCanvas() {
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
   if (!state.wasm) return canvas;
-  const svg = state.wasm.encodeSvgWithGeometry("debug sample", 4, 4);
+  const png = state.wasm.encodePngWithGeometry("debug sample", 4, 4);
   const image = new Image();
-  const blob = new Blob([svg], { type: "image/svg+xml" });
+  const blob = new Blob([png], { type: "image/png" });
   const url = URL.createObjectURL(blob);
   await new Promise((resolve, reject) => {
     image.onload = resolve;

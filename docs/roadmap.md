@@ -13,10 +13,12 @@
 
 ## Phase 1: Robust Static Scanning
 
-- Totem and chevron detection with perspective rectification.
+- Totem and chevron detection for screenshot-style still images.
 - Signature rail validation before expensive payload decode.
 - Adaptive threshold tuned against print degradation fixtures.
-- Module pitch estimation from timing markers.
+- Module pitch estimation from timing markers and detected signature geometry.
+- Fractional-grid phase/scale search for non-integer screenshot and camera
+  sampling.
 - Blur, exposure, and perspective synthetic test suite.
 - Snapshot conformance vectors.
 

@@ -12,6 +12,9 @@ change, and then updating conformance fixtures.
 - Fuzz tests: frame parser and rendered-matrix decode boundaries.
 - Benchmarks: encode and render throughput for representative payloads.
 - Snapshot fixtures: protocol bytes and descriptor JSON once v0 stabilizes.
+- Scanner regressions: clean render, embedded screenshot-style images, and
+  imported real screenshots that exercise totem/rail localization plus
+  fractional-grid sampling.
 
 ## Required Local Checks
 
@@ -38,7 +41,9 @@ cargo fuzz run frame_decode
 
 - Every bug fix should add a focused regression test.
 - Protocol changes must include compatibility notes in `docs/protocol`.
-- CV improvements should include synthetic degradation tests where practical.
+- CV/scanner improvements should include synthetic degradation tests where
+  practical and a real-image fixture when the fix came from an imported
+  screenshot or camera frame.
 - Performance-sensitive changes should update or add a Criterion benchmark.
 - Profile-sensitive changes should update `docs/profiles.md` and
   `docs/benchmarks.md`.

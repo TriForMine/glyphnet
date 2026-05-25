@@ -20,11 +20,24 @@ Current diagnostics:
 
 - Rust scan result, payload, decode error, inferred layout, and module size;
 - Rust crop, quad, and warp diagnostics;
-- Rust input selection: full image, JS crop, or manual drag crop;
+- Rust input selection: full image or manual drag crop;
 - source image dimensions and displayed canvas bounds;
 - Rust candidate crop attempts;
 - Rust-estimated quadrilateral overlay;
 - JSON export of the active diagnostics.
+
+The built-in sample is generated as PNG bytes by Rust/WASM
+`encodePngWithGeometry`, then scanned by the same Rust `scanRgbaJson` path used
+for imported images. This avoids browser SVG rasterization differences hiding
+scanner regressions.
+
+Scanner behavior to inspect here:
+
+- fast RibbonWeave signature localization from side totems and chevron rails;
+- fractional-grid sampling for screenshot/camera resampling where modules are
+  not an integer number of pixels;
+- phase and scale search with a header precheck before full ECC validation;
+- large-image fast failure that avoids expensive generic crop crawling.
 
 Drag on the image to set a manual crop. The Rust scanner will receive the
 corresponding source-image pixels, which is useful when testing screenshots that

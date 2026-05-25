@@ -3,12 +3,16 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use glyphnet_core::LayoutFamily;
-use glyphnet_core::{Frame, TransmissionMode};
+use glyphnet_core::{
+    Cell, Frame, FrameHeader, HEADER_LEN, SymbolMatrix, TransmissionMode, bitstream, layout,
+};
 use glyphnet_cv::{
     VisionProfile, adaptive_threshold, estimate_quad, find_anchor_candidates, grayscale,
     quad_dimensions, warp_perspective_gray,
 };
-use glyphnet_decode::{AutoDecodedSymbol, DecodeError, DecodeOptions, RasterDecoder};
+use glyphnet_decode::{
+    AutoDecodedSymbol, DecodeError, DecodeOptions, RasterDecoder, decode_matrix,
+};
 use image::{DynamicImage, GrayImage};
 use thiserror::Error;
 
@@ -257,6 +261,9 @@ pub fn scan_still(image: &DynamicImage, mode: TransmissionMode) -> Result<StillS
         }
     }
 
+    if std::env::var_os("GLYPHNET_SCAN_DEBUG").is_some() {
+        eprintln!("scan attempts: {attempts:#?}");
+    }
     Err(DecodeError::AutoDetectFailed.into())
 }
 
@@ -277,31 +284,324 @@ fn decode_candidate(
     stage: &'static str,
     region: ScanRegion,
 ) -> std::result::Result<AutoDecodedSymbol, DecodeError> {
-    if matches!(
-        stage,
-        "reference-sweep" | "component-reference" | "signature-window"
-    ) {
-        let module_px = (region.width / 104).max(1);
-        if region.width == 104 * module_px && region.height == 44 * module_px {
-            let exact = RasterDecoder::new(DecodeOptions {
-                module_px,
-                quiet_zone_modules: 4,
-                threshold: 192,
-                layout: LayoutFamily::RibbonWeave,
-            });
-            let decoded = exact.decode(image)?;
-            return Ok(AutoDecodedSymbol {
-                decoded,
-                info: glyphnet_decode::AutoDecodeInfo {
-                    module_px,
-                    quiet_zone_modules: 4,
-                    threshold: 192,
-                    layout: LayoutFamily::RibbonWeave,
-                },
-            });
+    if stage == "signature-window" {
+        if let Ok(decoded) = decode_exact_ribbon_candidate(image, region) {
+            return Ok(decoded);
+        }
+        if let Ok(decoded) = decode_fractional_ribbon_candidate(image) {
+            return Ok(decoded);
+        }
+        for target_module_px in [4] {
+            let resized = image::imageops::resize(
+                image,
+                104 * target_module_px,
+                44 * target_module_px,
+                image::imageops::FilterType::Triangle,
+            );
+            let resized = DynamicImage::ImageRgba8(resized);
+            let normalized_region = ScanRegion {
+                x: 0,
+                y: 0,
+                width: 104 * target_module_px,
+                height: 44 * target_module_px,
+            };
+            if let Ok(decoded) = decode_exact_ribbon_candidate(&resized, normalized_region) {
+                return Ok(decoded);
+            }
+        }
+        return Err(DecodeError::AutoDetectFailed);
+    }
+
+    if matches!(stage, "reference-sweep" | "component-reference") {
+        if let Ok(decoded) = decode_exact_ribbon_candidate(image, region) {
+            return Ok(decoded);
         }
     }
     decoder.decode_auto_with_info(image)
+}
+
+fn decode_exact_ribbon_candidate(
+    image: &DynamicImage,
+    region: ScanRegion,
+) -> std::result::Result<AutoDecodedSymbol, DecodeError> {
+    if region.width >= 104 && region.height >= 44 {
+        let module_px = (region.width / 104).max(1);
+        if region.width == 104 * module_px && region.height == 44 * module_px {
+            for threshold in [160, 192, 224] {
+                let exact = RasterDecoder::new(DecodeOptions {
+                    module_px,
+                    quiet_zone_modules: 4,
+                    threshold,
+                    layout: LayoutFamily::RibbonWeave,
+                });
+                if let Ok(decoded) = exact.decode(image) {
+                    return Ok(AutoDecodedSymbol {
+                        decoded,
+                        info: glyphnet_decode::AutoDecodeInfo {
+                            module_px,
+                            quiet_zone_modules: 4,
+                            threshold,
+                            layout: LayoutFamily::RibbonWeave,
+                        },
+                    });
+                }
+            }
+        }
+    }
+    Err(DecodeError::AutoDetectFailed)
+}
+
+fn decode_fractional_ribbon_candidate(
+    image: &DynamicImage,
+) -> std::result::Result<AutoDecodedSymbol, DecodeError> {
+    const SYMBOL_WIDTH: u16 = 96;
+    const SYMBOL_HEIGHT: u16 = 36;
+    const TOTAL_WIDTH_MODULES: f32 = 104.0;
+    const TOTAL_HEIGHT_MODULES: f32 = 44.0;
+    const QUIET_MODULES: f32 = 4.0;
+
+    let luma = image.to_luma8();
+    if luma.width() < 104 || luma.height() < 44 {
+        return Err(DecodeError::AutoDetectFailed);
+    }
+    let base_scale_x = luma.width() as f32 / TOTAL_WIDTH_MODULES;
+    let base_scale_y = luma.height() as f32 / TOTAL_HEIGHT_MODULES;
+    if base_scale_x < 1.0 || base_scale_y < 1.0 {
+        return Err(DecodeError::AutoDetectFailed);
+    }
+
+    let otsu = fractional_threshold(&luma);
+    let mut thresholds = vec![otsu, 160, 192, 224];
+    thresholds.sort_unstable();
+    thresholds.dedup();
+
+    for scale_adjust in [1.0_f32, 0.985, 1.015, 0.97, 1.03] {
+        let scale_x = base_scale_x * scale_adjust;
+        let scale_y = base_scale_y * scale_adjust;
+        if scale_x < 1.0 || scale_y < 1.0 {
+            continue;
+        }
+        for y_shift in module_shifts(3) {
+            for x_shift in module_shifts(2) {
+                let origin_x = QUIET_MODULES + x_shift;
+                let origin_y = QUIET_MODULES + y_shift;
+                if origin_x < -2.0 || origin_y < -8.0 {
+                    continue;
+                }
+                if !fractional_grid_fits(
+                    &luma,
+                    origin_x,
+                    origin_y,
+                    scale_x,
+                    scale_y,
+                    SYMBOL_WIDTH,
+                    SYMBOL_HEIGHT,
+                ) {
+                    continue;
+                }
+                for &threshold in &thresholds {
+                    if !fractional_header_precheck(
+                        &luma, origin_x, origin_y, scale_x, scale_y, threshold,
+                    ) {
+                        continue;
+                    }
+                    if let Ok(decoded) = decode_fractional_with_params(
+                        &luma, origin_x, origin_y, scale_x, scale_y, threshold,
+                    ) {
+                        return Ok(decoded);
+                    }
+                }
+            }
+        }
+    }
+
+    Err(DecodeError::AutoDetectFailed)
+}
+
+fn module_shifts(radius: i32) -> impl Iterator<Item = f32> {
+    (-radius * 2..=radius * 2).map(|value| value as f32 * 0.5)
+}
+
+fn fractional_header_precheck(
+    luma: &GrayImage,
+    origin_x_modules: f32,
+    origin_y_modules: f32,
+    scale_x: f32,
+    scale_y: f32,
+    threshold: u8,
+) -> bool {
+    const SYMBOL_WIDTH: u16 = 96;
+    const SYMBOL_HEIGHT: u16 = 36;
+
+    let mut bits = Vec::with_capacity(HEADER_LEN * 8);
+    'rows: for y in 0..SYMBOL_HEIGHT {
+        for x in 0..SYMBOL_WIDTH {
+            if !layout::is_data_module_for(
+                LayoutFamily::RibbonWeave,
+                SYMBOL_WIDTH,
+                SYMBOL_HEIGHT,
+                x,
+                y,
+            ) {
+                continue;
+            }
+            let avg = fractional_module_luma(
+                luma,
+                origin_x_modules + f32::from(x),
+                origin_y_modules + f32::from(y),
+                scale_x,
+                scale_y,
+            );
+            bits.push(avg < threshold);
+            if bits.len() == HEADER_LEN * 8 {
+                break 'rows;
+            }
+        }
+    }
+    if bits.len() < HEADER_LEN * 8 {
+        return false;
+    }
+    FrameHeader::decode(&bitstream::bits_to_bytes(&bits)).is_ok()
+}
+
+fn fractional_grid_fits(
+    luma: &GrayImage,
+    origin_x_modules: f32,
+    origin_y_modules: f32,
+    scale_x: f32,
+    scale_y: f32,
+    symbol_width: u16,
+    symbol_height: u16,
+) -> bool {
+    let min_x = origin_x_modules * scale_x;
+    let min_y = origin_y_modules * scale_y;
+    let max_x = (origin_x_modules + f32::from(symbol_width)) * scale_x;
+    let max_y = (origin_y_modules + f32::from(symbol_height)) * scale_y;
+    min_x >= -scale_x
+        && min_y >= -scale_y
+        && max_x < luma.width() as f32 + scale_x
+        && max_y < luma.height() as f32 + scale_y
+}
+
+fn decode_fractional_with_params(
+    luma: &GrayImage,
+    origin_x_modules: f32,
+    origin_y_modules: f32,
+    scale_x: f32,
+    scale_y: f32,
+    threshold: u8,
+) -> std::result::Result<AutoDecodedSymbol, DecodeError> {
+    const SYMBOL_WIDTH: u16 = 96;
+    const SYMBOL_HEIGHT: u16 = 36;
+
+    let mut matrix =
+        SymbolMatrix::with_layout(SYMBOL_WIDTH, SYMBOL_HEIGHT, LayoutFamily::RibbonWeave);
+    for y in 0..SYMBOL_HEIGHT {
+        for x in 0..SYMBOL_WIDTH {
+            if let Some(cell) = layout::function_cell_for(
+                LayoutFamily::RibbonWeave,
+                SYMBOL_WIDTH,
+                SYMBOL_HEIGHT,
+                x,
+                y,
+            ) {
+                matrix.set(x, y, cell)?;
+                continue;
+            }
+            let avg = fractional_module_luma(
+                luma,
+                origin_x_modules + f32::from(x),
+                origin_y_modules + f32::from(y),
+                scale_x,
+                scale_y,
+            );
+            matrix.set(x, y, Cell::Data(avg < threshold))?;
+        }
+    }
+
+    let decoded = decode_matrix(&matrix)?;
+    Ok(AutoDecodedSymbol {
+        decoded,
+        info: glyphnet_decode::AutoDecodeInfo {
+            module_px: scale_x.round().max(1.0) as u32,
+            quiet_zone_modules: 4,
+            threshold,
+            layout: LayoutFamily::RibbonWeave,
+        },
+    })
+}
+
+fn fractional_threshold(luma: &GrayImage) -> u8 {
+    let mut histogram = [0u32; 256];
+    for pixel in luma.pixels() {
+        histogram[pixel[0] as usize] += 1;
+    }
+    let total = u64::from(luma.width()).saturating_mul(u64::from(luma.height()));
+    if total == 0 {
+        return 128;
+    }
+    let mut sum_total = 0u64;
+    for (value, count) in histogram.iter().enumerate() {
+        sum_total += value as u64 * u64::from(*count);
+    }
+    let mut sum_background = 0u64;
+    let mut weight_background = 0u64;
+    let mut best_variance = -1.0f64;
+    let mut threshold = 128u8;
+    for (value, count) in histogram.iter().enumerate() {
+        weight_background += u64::from(*count);
+        if weight_background == 0 {
+            continue;
+        }
+        let weight_foreground = total - weight_background;
+        if weight_foreground == 0 {
+            break;
+        }
+        sum_background += value as u64 * u64::from(*count);
+        let mean_background = sum_background as f64 / weight_background as f64;
+        let mean_foreground = (sum_total - sum_background) as f64 / weight_foreground as f64;
+        let diff = mean_background - mean_foreground;
+        let variance = weight_background as f64 * weight_foreground as f64 * diff * diff;
+        if variance > best_variance {
+            best_variance = variance;
+            threshold = value as u8;
+        }
+    }
+    threshold
+}
+
+fn fractional_module_luma(
+    luma: &GrayImage,
+    module_x: f32,
+    module_y: f32,
+    scale_x: f32,
+    scale_y: f32,
+) -> u8 {
+    let center_x = (module_x + 0.5) * scale_x;
+    let center_y = (module_y + 0.5) * scale_y;
+    let half_x = (scale_x * 0.28).max(0.75);
+    let half_y = (scale_y * 0.28).max(0.75);
+    let start_x = (center_x - half_x).floor().max(0.0) as u32;
+    let end_x = (center_x + half_x)
+        .ceil()
+        .min(luma.width().saturating_sub(1) as f32) as u32;
+    let start_y = (center_y - half_y).floor().max(0.0) as u32;
+    let end_y = (center_y + half_y)
+        .ceil()
+        .min(luma.height().saturating_sub(1) as f32) as u32;
+
+    let mut sum = 0u32;
+    let mut count = 0u32;
+    for y in start_y..=end_y {
+        for x in start_x..=end_x {
+            sum += u32::from(luma.get_pixel(x, y).0[0]);
+            count += 1;
+        }
+    }
+    if count == 0 {
+        return 255;
+    }
+    (sum / count) as u8
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -406,6 +706,12 @@ fn candidate_regions(
     image_height: u32,
 ) -> Vec<(&'static str, ScanRegion)> {
     let mut regions = Vec::new();
+    regions.extend(ribbon_totem_regions(binary, image_width, image_height));
+    regions.extend(ribbon_rail_regions(binary, image_width, image_height));
+    if image_width.saturating_mul(image_height) > 900_000 {
+        regions.truncate(MAX_CANDIDATE_REGIONS);
+        return regions;
+    }
     regions.extend(horizontal_band_regions(
         binary,
         padding,
@@ -425,6 +731,544 @@ fn candidate_regions(
 
     regions.truncate(MAX_CANDIDATE_REGIONS);
     regions
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RailRow {
+    y: u32,
+    min_x: u32,
+    max_x: u32,
+    transitions: u32,
+    dark: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RailGroup {
+    y: u32,
+    min_x: u32,
+    max_x: u32,
+    transitions: u32,
+    dark: u32,
+    rows: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TotemGroup {
+    x: u32,
+    min_y: u32,
+    max_y: u32,
+    dark: u32,
+    columns: u32,
+}
+
+fn ribbon_totem_regions(
+    binary: &GrayImage,
+    image_width: u32,
+    image_height: u32,
+) -> Vec<(&'static str, ScanRegion)> {
+    if image_width < 160 || image_height < 80 {
+        return Vec::new();
+    }
+
+    let groups = totem_groups(binary, image_width, image_height);
+    let mut regions = Vec::new();
+
+    for left in &groups {
+        for right in &groups {
+            if right.x <= left.x + 120 {
+                continue;
+            }
+            let overlap_y = left
+                .max_y
+                .min(right.max_y)
+                .saturating_sub(left.min_y.max(right.min_y));
+            if overlap_y < 120 {
+                continue;
+            }
+            let dx = right.x.saturating_sub(left.x) as f32;
+            for module_span in [83.0_f32, 85.0] {
+                let scale = dx / module_span;
+                if !(2.0..=32.0).contains(&scale) {
+                    continue;
+                }
+                let left_x = left.x as f32;
+                let top_y = left.min_y.min(right.min_y) as f32;
+                for left_module_x in [9.0_f32, 11.0] {
+                    for totem_top_module_y in [7.0_f32, 9.0] {
+                        push_fractional_region(
+                            &mut regions,
+                            left_x - left_module_x * scale,
+                            top_y - totem_top_module_y * scale,
+                            104.0 * scale,
+                            44.0 * scale,
+                            image_width,
+                            image_height,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    regions.truncate(12);
+    regions
+}
+
+fn totem_groups(binary: &GrayImage, image_width: u32, image_height: u32) -> Vec<TotemGroup> {
+    let mut columns = Vec::new();
+    for x in 0..image_width {
+        let mut runs = Vec::new();
+        let mut run_start = None;
+        for y in 0..image_height {
+            let is_dark = binary.get_pixel(x, y).0[0] == 0;
+            match (run_start, is_dark) {
+                (None, true) => run_start = Some(y),
+                (Some(start), false) => {
+                    if y.saturating_sub(start) >= 2 {
+                        runs.push((start, y - 1));
+                    }
+                    run_start = None;
+                }
+                _ => {}
+            }
+        }
+        if let Some(start) = run_start
+            && image_height.saturating_sub(start) >= 2
+        {
+            runs.push((start, image_height - 1));
+        }
+
+        let Some((min_y, max_y, dark, transitions)) = best_totem_column_cluster(&runs) else {
+            continue;
+        };
+        let span = max_y.saturating_sub(min_y).saturating_add(1);
+        let density = dark as f32 / span as f32;
+        if span >= 160 && transitions >= 12 && (0.08..=0.55).contains(&density) {
+            columns.push(TotemGroup {
+                x,
+                min_y,
+                max_y,
+                dark,
+                columns: 1,
+            });
+        }
+    }
+
+    let mut groups = Vec::new();
+    let mut current: Option<TotemGroup> = None;
+    for column in columns {
+        match current {
+            Some(mut group) if column.x <= group.x + 4 => {
+                let total = group.columns + 1;
+                group.x = (group.x * group.columns + column.x) / total;
+                group.min_y = group.min_y.min(column.min_y);
+                group.max_y = group.max_y.max(column.max_y);
+                group.dark += column.dark;
+                group.columns = total;
+                current = Some(group);
+            }
+            Some(group) => {
+                groups.push(group);
+                current = Some(column);
+            }
+            None => current = Some(column),
+        }
+    }
+    if let Some(group) = current {
+        groups.push(group);
+    }
+
+    groups.sort_by(|a, b| {
+        let a_span = a.max_y.saturating_sub(a.min_y);
+        let b_span = b.max_y.saturating_sub(b.min_y);
+        b_span.cmp(&a_span).then_with(|| b.dark.cmp(&a.dark))
+    });
+    groups.truncate(48);
+    groups
+}
+
+fn best_totem_column_cluster(runs: &[(u32, u32)]) -> Option<(u32, u32, u32, u32)> {
+    let mut best: Option<(u32, u32, u32, u32)> = None;
+    let mut index = 0usize;
+    while index < runs.len() {
+        let min_y = runs[index].0;
+        let mut max_y = runs[index].1;
+        let mut dark = runs[index]
+            .1
+            .saturating_sub(runs[index].0)
+            .saturating_add(1);
+        let mut transitions = 2u32;
+        index += 1;
+        while index < runs.len() && runs[index].0 <= max_y + 64 {
+            max_y = runs[index].1;
+            dark += runs[index]
+                .1
+                .saturating_sub(runs[index].0)
+                .saturating_add(1);
+            transitions += 2;
+            index += 1;
+        }
+
+        let span = max_y.saturating_sub(min_y).saturating_add(1);
+        let score = span.saturating_mul(transitions).saturating_mul(dark);
+        let best_score = best
+            .map(|(best_min, best_max, best_dark, best_transitions)| {
+                best_max
+                    .saturating_sub(best_min)
+                    .saturating_add(1)
+                    .saturating_mul(best_transitions)
+                    .saturating_mul(best_dark)
+            })
+            .unwrap_or(0);
+        if score > best_score {
+            best = Some((min_y, max_y, dark, transitions));
+        }
+    }
+    best
+}
+
+fn ribbon_rail_regions(
+    binary: &GrayImage,
+    image_width: u32,
+    image_height: u32,
+) -> Vec<(&'static str, ScanRegion)> {
+    if image_width < 160 || image_height < 80 {
+        return Vec::new();
+    }
+
+    let groups = rail_groups(binary, image_width, image_height);
+    let mut regions = Vec::new();
+
+    for group in &groups {
+        let span = group.max_x.saturating_sub(group.min_x).saturating_add(1);
+        if span < 120 {
+            continue;
+        }
+
+        let estimated_module = (span as f32 / 68.0).round() as i32;
+        for module_px in (estimated_module - 1)..=(estimated_module + 1) {
+            if !(2..=24).contains(&module_px) {
+                continue;
+            }
+            let module_px = module_px as u32;
+            for rail_module_y in [7_u32, 9] {
+                let base_x = group.min_x.saturating_sub(20 * module_px).saturating_add(2);
+                let base_y = group
+                    .y
+                    .saturating_sub(rail_module_y * module_px + module_px / 2 + 2);
+                for x_nudge in [0, 2] {
+                    for y_nudge in [0, module_px / 2 + 1] {
+                        let region = ScanRegion {
+                            x: base_x.saturating_add(x_nudge),
+                            y: base_y.saturating_add(y_nudge),
+                            width: 104 * module_px,
+                            height: 44 * module_px,
+                        };
+                        if region_fits(region, image_width, image_height) {
+                            push_unique_region(&mut regions, "signature-window", region);
+                        }
+                    }
+                }
+            }
+        }
+
+        push_scaled_signature_regions(
+            &mut regions,
+            group.min_x,
+            group.y,
+            span,
+            image_width,
+            image_height,
+        );
+    }
+
+    for upper in &groups {
+        for lower in &groups {
+            if lower.y <= upper.y + 48 {
+                continue;
+            }
+
+            let upper_span = upper.max_x.saturating_sub(upper.min_x).saturating_add(1);
+            let lower_span = lower.max_x.saturating_sub(lower.min_x).saturating_add(1);
+            let overlap = upper
+                .max_x
+                .min(lower.max_x)
+                .saturating_sub(upper.min_x.max(lower.min_x));
+            if overlap < upper_span.min(lower_span) / 2 {
+                continue;
+            }
+
+            let span = upper_span.max(lower_span);
+            let estimated_module = (span as f32 / 68.0).round() as i32;
+            for module_px in (estimated_module - 1)..=(estimated_module + 1) {
+                if !(2..=24).contains(&module_px) {
+                    continue;
+                }
+                let module_px = module_px as u32;
+                let expected_symbol_height = 44 * module_px;
+                let vertical_distance = lower.y.saturating_sub(upper.y);
+                if vertical_distance + 10 * module_px < 20 * module_px
+                    || vertical_distance > expected_symbol_height
+                {
+                    continue;
+                }
+                for rail_module_y in [7_u32, 9] {
+                    let min_x = upper.min_x.min(lower.min_x);
+                    let base_x = min_x.saturating_sub(20 * module_px).saturating_add(2);
+                    let base_y = upper
+                        .y
+                        .saturating_sub(rail_module_y * module_px + module_px / 2 + 2);
+                    for x_nudge in [0, 2] {
+                        for y_nudge in [0, module_px / 2 + 1] {
+                            let region = ScanRegion {
+                                x: base_x.saturating_add(x_nudge),
+                                y: base_y.saturating_add(y_nudge),
+                                width: 104 * module_px,
+                                height: expected_symbol_height,
+                            };
+                            if region_fits(region, image_width, image_height) {
+                                push_unique_region(&mut regions, "signature-window", region);
+                            }
+                        }
+                    }
+                }
+            }
+
+            push_scaled_signature_regions(
+                &mut regions,
+                upper.min_x.min(lower.min_x),
+                upper.y,
+                span,
+                image_width,
+                image_height,
+            );
+        }
+    }
+
+    regions.truncate(32);
+    regions
+}
+
+fn push_scaled_signature_regions(
+    regions: &mut Vec<(&'static str, ScanRegion)>,
+    rail_min_x: u32,
+    rail_y: u32,
+    rail_span: u32,
+    image_width: u32,
+    image_height: u32,
+) {
+    let scale = rail_span as f32 / 68.0;
+    if scale < 1.5 {
+        return;
+    }
+    let width = (104.0 * scale).round().max(104.0) as u32;
+    let height = (44.0 * scale).round().max(44.0) as u32;
+    let x_base = rail_min_x as i64 - (18.0 * scale).round() as i64;
+    for rail_module_y in [7.0_f32, 9.0] {
+        let y_base = rail_y as i64 - (rail_module_y * scale).round() as i64;
+        for x_nudge in [-2_i64, 0, 2] {
+            for y_nudge in [-2_i64, 0, 2] {
+                let x = (x_base + x_nudge).max(0) as u32;
+                let y = (y_base + y_nudge).max(0) as u32;
+                let region = ScanRegion {
+                    x,
+                    y,
+                    width,
+                    height,
+                };
+                if region_fits(region, image_width, image_height) {
+                    push_unique_region(regions, "signature-window", region);
+                }
+            }
+        }
+    }
+}
+
+fn push_fractional_region(
+    regions: &mut Vec<(&'static str, ScanRegion)>,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    image_width: u32,
+    image_height: u32,
+) {
+    let region = ScanRegion {
+        x: x.round().max(0.0) as u32,
+        y: y.round().max(0.0) as u32,
+        width: width.round().max(104.0) as u32,
+        height: height.round().max(44.0) as u32,
+    };
+    if region_fits(region, image_width, image_height) {
+        push_unique_region(regions, "signature-window", region);
+    }
+}
+
+fn rail_groups(binary: &GrayImage, image_width: u32, image_height: u32) -> Vec<RailGroup> {
+    let mut rows = Vec::new();
+    for y in 0..image_height {
+        if let Some(row) = rail_row(binary, image_width, y) {
+            rows.push(row);
+        }
+    }
+
+    let mut groups = Vec::new();
+    let mut current: Option<RailGroup> = None;
+    for row in rows {
+        match current {
+            Some(mut group) if row.y <= group.y + 4 => {
+                let total_rows = group.rows + 1;
+                group.y = (group.y * group.rows + row.y) / total_rows;
+                group.min_x = group.min_x.min(row.min_x);
+                group.max_x = group.max_x.max(row.max_x);
+                group.transitions += row.transitions;
+                group.dark += row.dark;
+                group.rows = total_rows;
+                current = Some(group);
+            }
+            Some(group) => {
+                if group.rows >= 2 {
+                    groups.push(group);
+                }
+                current = Some(RailGroup {
+                    y: row.y,
+                    min_x: row.min_x,
+                    max_x: row.max_x,
+                    transitions: row.transitions,
+                    dark: row.dark,
+                    rows: 1,
+                });
+            }
+            None => {
+                current = Some(RailGroup {
+                    y: row.y,
+                    min_x: row.min_x,
+                    max_x: row.max_x,
+                    transitions: row.transitions,
+                    dark: row.dark,
+                    rows: 1,
+                });
+            }
+        }
+    }
+    if let Some(group) = current
+        && group.rows >= 2
+    {
+        groups.push(group);
+    }
+
+    groups.sort_by(|a, b| rail_group_score(*a).total_cmp(&rail_group_score(*b)));
+    groups.truncate(32);
+    groups
+}
+
+fn rail_group_score(group: RailGroup) -> f32 {
+    let span = group.max_x.saturating_sub(group.min_x).saturating_add(1);
+    let module_px = (span as f32 / 68.0).round().max(1.0);
+    let residual = (span as f32 - 68.0 * module_px).abs() / module_px;
+    let density = group.dark as f32 / (span.saturating_mul(group.rows).max(1)) as f32;
+    let density_error = (density - 0.25).abs() * 24.0;
+    density_error + residual
+}
+
+fn rail_row(binary: &GrayImage, image_width: u32, y: u32) -> Option<RailRow> {
+    let mut dark = 0u32;
+    let mut transition_positions = Vec::new();
+    let mut last_dark = false;
+    let mut seen = false;
+
+    for x in 0..image_width {
+        let is_dark = binary.get_pixel(x, y).0[0] == 0;
+        if is_dark {
+            dark += 1;
+        }
+        if seen && is_dark != last_dark {
+            transition_positions.push(x);
+        }
+        seen = true;
+        last_dark = is_dark;
+    }
+
+    if dark == 0 || transition_positions.len() < 14 {
+        return None;
+    }
+
+    let mut best: Option<(usize, usize)> = None;
+    let mut start = 0usize;
+    for index in 1..transition_positions.len() {
+        if transition_positions[index].saturating_sub(transition_positions[index - 1]) > 64 {
+            best = choose_transition_cluster(best, start, index - 1);
+            start = index;
+        }
+    }
+    best = choose_transition_cluster(best, start, transition_positions.len() - 1);
+
+    let (start, end) = best?;
+    let transitions = (end - start + 1) as u32;
+    if transitions < 14 {
+        return None;
+    }
+
+    let min_x = transition_positions[start].saturating_sub(12);
+    let max_x = transition_positions[end]
+        .saturating_add(12)
+        .min(image_width.saturating_sub(1));
+    let span = max_x.saturating_sub(min_x).saturating_add(1);
+    if span < 120 {
+        return None;
+    }
+
+    let mut cluster_dark = 0u32;
+    for x in min_x..=max_x {
+        if binary.get_pixel(x, y).0[0] == 0 {
+            cluster_dark += 1;
+        }
+    }
+    let density = cluster_dark as f32 / span as f32;
+    if !(0.18..=0.78).contains(&density) {
+        return None;
+    }
+
+    Some(RailRow {
+        y,
+        min_x,
+        max_x,
+        transitions,
+        dark: cluster_dark,
+    })
+}
+
+fn choose_transition_cluster(
+    best: Option<(usize, usize)>,
+    start: usize,
+    end: usize,
+) -> Option<(usize, usize)> {
+    if end < start {
+        return best;
+    }
+    match best {
+        Some((best_start, best_end)) if best_end - best_start >= end - start => {
+            Some((best_start, best_end))
+        }
+        _ => Some((start, end)),
+    }
+}
+
+fn region_fits(region: ScanRegion, image_width: u32, image_height: u32) -> bool {
+    region.width >= 104
+        && region.height >= 44
+        && region.x.saturating_add(region.width) <= image_width
+        && region.y.saturating_add(region.height) <= image_height
+}
+
+fn push_unique_region(
+    regions: &mut Vec<(&'static str, ScanRegion)>,
+    stage: &'static str,
+    region: ScanRegion,
+) {
+    if !regions.iter().any(|(_, existing)| *existing == region) {
+        regions.push((stage, region));
+    }
 }
 
 fn horizontal_band_regions(
@@ -775,7 +1619,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs a true run-pattern detector instead of crop search"]
     fn scan_still_finds_symbol_embedded_in_screenshot_like_image() {
         let encoded = Encoder::default().encode_static(b"embedded").unwrap();
         let symbol = RasterRenderer::default().render(&encoded.matrix).unwrap();
@@ -820,25 +1663,6 @@ mod tests {
             })
             .decode(&DynamicImage::ImageRgba8(exact2))
             .is_ok()
-        );
-        let profile = VisionProfile::for_mode(TransmissionMode::Print);
-        let gray = grayscale(&image).unwrap();
-        let binary =
-            adaptive_threshold(&gray, profile.threshold_radius, profile.threshold_bias).unwrap();
-        let regions = candidate_regions(
-            &binary,
-            profile.min_anchor_px.max(8),
-            image.width(),
-            image.height(),
-        );
-        eprintln!(
-            "count {} exact {} first {:?}",
-            regions.len(),
-            regions.iter().any(|(_, r)| r.x == 110
-                && r.y == 520
-                && r.width == symbol.width()
-                && r.height == symbol.height()),
-            regions.iter().take(12).collect::<Vec<_>>()
         );
         let result = scan_still(&image, TransmissionMode::Print).unwrap();
         assert_eq!(result.decoded.decoded.frame.payload, b"embedded");

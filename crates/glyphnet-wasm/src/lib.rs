@@ -2,9 +2,9 @@
 
 use glyphnet_core::TransmissionMode;
 use glyphnet_encode::{Encoder, EncoderConfig};
-use glyphnet_render::{RenderOptions, SvgRenderer};
+use glyphnet_render::{RasterRenderer, RenderOptions, SvgRenderer};
 use glyphnet_scanner::scan_still;
-use image::{DynamicImage, RgbaImage};
+use image::{DynamicImage, ImageEncoder, RgbaImage};
 
 /// Encode bytes and return the symbol descriptor as JSON.
 pub fn descriptor_json(payload: &[u8]) -> Result<String, String> {
@@ -41,6 +41,35 @@ pub fn encode_svg_with_geometry(
     renderer
         .render(&encoded.matrix)
         .map_err(|error| error.to_string())
+}
+
+/// Encode bytes using explicit module size and quiet zone, returning PNG bytes.
+pub fn encode_png_with_geometry(
+    payload: &[u8],
+    module_px: u32,
+    quiet_zone_modules: u32,
+) -> Result<Vec<u8>, String> {
+    let encoded = Encoder::new(EncoderConfig::default())
+        .encode_static(payload)
+        .map_err(|error| error.to_string())?;
+    let renderer = RasterRenderer::new(RenderOptions {
+        module_px,
+        quiet_zone_modules,
+        ..RenderOptions::default()
+    });
+    let image = renderer
+        .render(&encoded.matrix)
+        .map_err(|error| error.to_string())?;
+    let mut bytes = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut bytes)
+        .write_image(
+            image.as_raw(),
+            image.width(),
+            image.height(),
+            image::ColorType::Rgba8.into(),
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(bytes)
 }
 
 /// Scan RGBA pixels and return scanner diagnostics as JSON.
@@ -174,6 +203,17 @@ mod wasm {
             .map_err(|error| JsValue::from_str(&error))
     }
 
+    /// Encode a UTF-8 string into PNG bytes using explicit geometry.
+    #[wasm_bindgen(js_name = encodePngWithGeometry)]
+    pub fn encode_png_with_geometry(
+        input: &str,
+        module_px: u32,
+        quiet_zone_modules: u32,
+    ) -> Result<Vec<u8>, JsValue> {
+        crate::encode_png_with_geometry(input.as_bytes(), module_px, quiet_zone_modules)
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
     /// Scan browser ImageData RGBA bytes and return scanner diagnostics JSON.
     #[wasm_bindgen(js_name = scanRgbaJson)]
     pub fn scan_rgba_json(
@@ -219,5 +259,20 @@ mod tests {
         .unwrap();
         assert!(json.contains(r#""ok": true"#));
         assert!(json.contains("wasm scan"));
+    }
+
+    #[test]
+    fn native_png_api_returns_decodable_symbol() {
+        let png = encode_png_with_geometry(b"debug sample", 4, 4).unwrap();
+        let image = image::load_from_memory(&png).unwrap().into_rgba8();
+        let json = scan_rgba_json(
+            image.as_raw(),
+            image.width(),
+            image.height(),
+            TransmissionMode::Print,
+        )
+        .unwrap();
+        assert!(json.contains(r#""ok": true"#));
+        assert!(json.contains("debug sample"));
     }
 }
