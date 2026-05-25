@@ -120,6 +120,10 @@ pub struct StillScanResult {
 /// Diagnostic information for one still-scan candidate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanAttempt {
+    /// Detector family that produced this attempt.
+    pub detector: &'static str,
+    /// Layout expected by the detector, when known.
+    pub layout_hint: Option<LayoutFamily>,
     /// Scanner stage that produced this attempt.
     pub stage: &'static str,
     /// Candidate region in source-image pixels.
@@ -160,6 +164,51 @@ pub struct FailedStillScan {
     pub attempts: Vec<ScanAttempt>,
     /// Scanner stage timing diagnostics.
     pub timings: ScanTimings,
+}
+
+/// Candidate detector family.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CandidateDetector {
+    /// Clean rendered symbol on a simple background.
+    GeneratedContent,
+    /// Layout-agnostic dark-component and band detector.
+    GenericBinary,
+    /// RibbonWeave rail, totem, and wide-symbol recovery detector.
+    RibbonWeave,
+}
+
+impl CandidateDetector {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::GeneratedContent => "generated-content",
+            Self::GenericBinary => "generic-binary",
+            Self::RibbonWeave => "ribbon-weave",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ScanCandidate {
+    detector: CandidateDetector,
+    layout_hint: Option<LayoutFamily>,
+    stage: &'static str,
+    region: ScanRegion,
+}
+
+impl ScanCandidate {
+    const fn new(
+        detector: CandidateDetector,
+        layout_hint: Option<LayoutFamily>,
+        stage: &'static str,
+        region: ScanRegion,
+    ) -> Self {
+        Self {
+            detector,
+            layout_hint,
+            stage,
+            region,
+        }
+    }
 }
 
 /// Stateful real-time scanner.
@@ -305,49 +354,23 @@ pub fn scan_still_with_diagnostics(
     let padding = profile.min_anchor_px.max(8);
     let mut attempts = Vec::new();
     let stage = scan_instant_now();
-    let mut regions = Vec::new();
-    if should_try_dark_bounds_fallback(image.width(), image.height(), regions.len())
-        && let Some(bounds) = content_bounds(image)
-    {
-        regions.extend(content_symbol_regions(
-            bounds,
-            image.width(),
-            image.height(),
-            profile.min_anchor_px,
-        ));
-    }
-    regions.extend(candidate_regions(
-        &binary,
-        padding,
-        image.width(),
-        image.height(),
-    ));
-    if should_try_dark_bounds_fallback(image.width(), image.height(), regions.len())
-        && let Some(bounds) = dark_bounds(&binary)
-    {
-        if let Some(region) = ribbon_region_from_dark_bounds(bounds, image.width(), image.height())
-        {
-            regions.push(("dark-ribbon", region));
-        }
-        let expanded = expand_region(bounds, padding, image.width(), image.height());
-        regions.push(("dark-bounds", expanded));
-        if let Some(region) = ribbon_aspect_region(expanded, image.width(), image.height()) {
-            regions.push(("signature-window", region));
-        }
-    }
+    let regions = still_scan_candidates(image, &binary, profile, padding);
     timings.candidate_micros = elapsed_micros(stage);
 
     let decode_started = scan_instant_now();
-    for (stage, region) in regions {
+    for candidate in regions {
         let attempt_started = scan_instant_now();
+        let region = candidate.region;
         let cropped =
             image::imageops::crop_imm(image, region.x, region.y, region.width, region.height)
                 .to_image();
         let cropped = DynamicImage::ImageRgba8(cropped);
-        match decode_candidate(&decoder, &cropped, stage, region) {
+        match decode_candidate(&decoder, &cropped, candidate) {
             Ok(decoded) => {
                 attempts.push(ScanAttempt {
-                    stage,
+                    detector: candidate.detector.as_str(),
+                    layout_hint: candidate.layout_hint,
+                    stage: candidate.stage,
                     region,
                     decoded: true,
                     error: None,
@@ -365,7 +388,9 @@ pub fn scan_still_with_diagnostics(
                 });
             }
             Err(error) => attempts.push(ScanAttempt {
-                stage,
+                detector: candidate.detector.as_str(),
+                layout_hint: candidate.layout_hint,
+                stage: candidate.stage,
                 region,
                 decoded: false,
                 error: Some(error.to_string()),
@@ -459,6 +484,51 @@ fn should_try_dark_bounds_fallback(
     image_width.saturating_mul(image_height) <= 900_000 || candidate_count == 0
 }
 
+fn still_scan_candidates(
+    image: &DynamicImage,
+    binary: &GrayImage,
+    profile: VisionProfile,
+    padding: u32,
+) -> Vec<ScanCandidate> {
+    let image_width = image.width();
+    let image_height = image.height();
+    let mut candidates = Vec::new();
+
+    if let Some(bounds) = content_bounds(image) {
+        candidates.extend(content_symbol_regions(
+            bounds,
+            image_width,
+            image_height,
+            profile.min_anchor_px,
+        ));
+    }
+
+    candidates.extend(ribbon_weave_candidates(binary, image_width, image_height));
+
+    if image_width.saturating_mul(image_height) <= 900_000 {
+        candidates.extend(generic_binary_candidates(
+            binary,
+            padding,
+            image_width,
+            image_height,
+        ));
+    }
+
+    if should_try_dark_bounds_fallback(image_width, image_height, candidates.len())
+        && let Some(bounds) = dark_bounds(binary)
+    {
+        candidates.extend(ribbon_dark_bounds_candidates(
+            bounds,
+            padding,
+            image_width,
+            image_height,
+        ));
+    }
+
+    candidates.truncate(MAX_CANDIDATE_REGIONS);
+    candidates
+}
+
 fn content_bounds(image: &DynamicImage) -> Option<ScanRegion> {
     let rgba = image.to_rgba8();
     let mut min_x = image.width();
@@ -491,7 +561,7 @@ fn content_symbol_regions(
     image_width: u32,
     image_height: u32,
     min_module_px: u32,
-) -> Vec<(&'static str, ScanRegion)> {
+) -> Vec<ScanCandidate> {
     let mut regions = Vec::new();
     for module_px in 1..=16 {
         if module_px < (min_module_px / 8).max(1) {
@@ -511,7 +581,9 @@ fn content_symbol_regions(
                 width: 104 * module_px,
                 height: 44 * module_px,
             };
-            regions.push((
+            regions.push(ScanCandidate::new(
+                CandidateDetector::GeneratedContent,
+                Some(LayoutFamily::RibbonWeave),
                 "content-reference",
                 clamp_region(region, image_width, image_height),
             ));
@@ -536,12 +608,47 @@ fn content_symbol_regions(
             width: bounds.width.saturating_add(quiet_px.saturating_mul(2)),
             height: bounds.height.saturating_add(quiet_px.saturating_mul(2)),
         };
-        regions.push((
+        regions.push(ScanCandidate::new(
+            CandidateDetector::GeneratedContent,
+            Some(LayoutFamily::RibbonWeave),
             "content-bounds",
             clamp_region(region, image_width, image_height),
         ));
     }
     regions
+}
+
+fn ribbon_dark_bounds_candidates(
+    bounds: ScanRegion,
+    padding: u32,
+    image_width: u32,
+    image_height: u32,
+) -> Vec<ScanCandidate> {
+    let mut candidates = Vec::new();
+    if let Some(region) = ribbon_region_from_dark_bounds(bounds, image_width, image_height) {
+        candidates.push(ScanCandidate::new(
+            CandidateDetector::RibbonWeave,
+            Some(LayoutFamily::RibbonWeave),
+            "dark-ribbon",
+            region,
+        ));
+    }
+    let expanded = expand_region(bounds, padding, image_width, image_height);
+    candidates.push(ScanCandidate::new(
+        CandidateDetector::RibbonWeave,
+        Some(LayoutFamily::RibbonWeave),
+        "dark-bounds",
+        expanded,
+    ));
+    if let Some(region) = ribbon_aspect_region(expanded, image_width, image_height) {
+        candidates.push(ScanCandidate::new(
+            CandidateDetector::RibbonWeave,
+            Some(LayoutFamily::RibbonWeave),
+            "signature-window",
+            region,
+        ));
+    }
+    candidates
 }
 
 fn reference_ribbon_geometry(width: u32, height: u32) -> bool {
@@ -653,10 +760,10 @@ fn should_try_full_frame_decode(image: &DynamicImage) -> bool {
 fn decode_candidate(
     decoder: &RasterDecoder,
     image: &DynamicImage,
-    stage: &'static str,
-    region: ScanRegion,
+    candidate: ScanCandidate,
 ) -> std::result::Result<AutoDecodedSymbol, DecodeError> {
-    if stage == "signature-window" {
+    let region = candidate.region;
+    if candidate.stage == "signature-window" {
         if let Ok(decoded) = decode_exact_ribbon_candidate(image, region) {
             return Ok(decoded);
         }
@@ -684,8 +791,8 @@ fn decode_candidate(
     }
 
     if matches!(
-        stage,
-        "reference-sweep" | "component-reference" | "dark-bounds"
+        candidate.stage,
+        "reference-sweep" | "component-reference" | "dark-bounds" | "dark-ribbon"
     ) {
         if let Ok(decoded) = decode_exact_ribbon_candidate(image, region) {
             return Ok(decoded);
@@ -1120,19 +1227,25 @@ fn pixel_index(width: u32, x: u32, y: u32) -> usize {
 const MIN_COMPONENT_PIXELS: u32 = 16;
 const MAX_CANDIDATE_REGIONS: usize = 96;
 
-fn candidate_regions(
+fn ribbon_weave_candidates(
+    binary: &GrayImage,
+    image_width: u32,
+    image_height: u32,
+) -> Vec<ScanCandidate> {
+    let mut regions = Vec::new();
+    regions.extend(ribbon_totem_regions(binary, image_width, image_height));
+    regions.extend(ribbon_rail_regions(binary, image_width, image_height));
+    regions.truncate(MAX_CANDIDATE_REGIONS);
+    regions
+}
+
+fn generic_binary_candidates(
     binary: &GrayImage,
     padding: u32,
     image_width: u32,
     image_height: u32,
-) -> Vec<(&'static str, ScanRegion)> {
+) -> Vec<ScanCandidate> {
     let mut regions = Vec::new();
-    regions.extend(ribbon_totem_regions(binary, image_width, image_height));
-    regions.extend(ribbon_rail_regions(binary, image_width, image_height));
-    if image_width.saturating_mul(image_height) > 900_000 {
-        regions.truncate(MAX_CANDIDATE_REGIONS);
-        return regions;
-    }
     regions.extend(horizontal_band_regions(
         binary,
         padding,
@@ -1146,7 +1259,13 @@ fn candidate_regions(
         }
         let expanded = expand_region(component.bounds, padding * 2, image_width, image_height);
         if plausible_region(expanded) {
-            regions.push(("component", expanded));
+            push_unique_candidate(
+                &mut regions,
+                CandidateDetector::GenericBinary,
+                None,
+                "component",
+                expanded,
+            );
         }
     }
 
@@ -1186,7 +1305,7 @@ fn ribbon_totem_regions(
     binary: &GrayImage,
     image_width: u32,
     image_height: u32,
-) -> Vec<(&'static str, ScanRegion)> {
+) -> Vec<ScanCandidate> {
     if image_width < 160 || image_height < 80 {
         return Vec::new();
     }
@@ -1352,7 +1471,7 @@ fn ribbon_rail_regions(
     binary: &GrayImage,
     image_width: u32,
     image_height: u32,
-) -> Vec<(&'static str, ScanRegion)> {
+) -> Vec<ScanCandidate> {
     if image_width < 160 || image_height < 80 {
         return Vec::new();
     }
@@ -1386,7 +1505,13 @@ fn ribbon_rail_regions(
                             height: 44 * module_px,
                         };
                         if region_fits(region, image_width, image_height) {
-                            push_unique_region(&mut regions, "signature-window", region);
+                            push_unique_candidate(
+                                &mut regions,
+                                CandidateDetector::RibbonWeave,
+                                Some(LayoutFamily::RibbonWeave),
+                                "signature-window",
+                                region,
+                            );
                         }
                     }
                 }
@@ -1448,7 +1573,13 @@ fn ribbon_rail_regions(
                                 height: expected_symbol_height,
                             };
                             if region_fits(region, image_width, image_height) {
-                                push_unique_region(&mut regions, "signature-window", region);
+                                push_unique_candidate(
+                                    &mut regions,
+                                    CandidateDetector::RibbonWeave,
+                                    Some(LayoutFamily::RibbonWeave),
+                                    "signature-window",
+                                    region,
+                                );
                             }
                         }
                     }
@@ -1471,7 +1602,7 @@ fn ribbon_rail_regions(
 }
 
 fn push_scaled_signature_regions(
-    regions: &mut Vec<(&'static str, ScanRegion)>,
+    regions: &mut Vec<ScanCandidate>,
     rail_min_x: u32,
     rail_y: u32,
     rail_span: u32,
@@ -1498,7 +1629,13 @@ fn push_scaled_signature_regions(
                     height,
                 };
                 if region_fits(region, image_width, image_height) {
-                    push_unique_region(regions, "signature-window", region);
+                    push_unique_candidate(
+                        regions,
+                        CandidateDetector::RibbonWeave,
+                        Some(LayoutFamily::RibbonWeave),
+                        "signature-window",
+                        region,
+                    );
                 }
             }
         }
@@ -1506,7 +1643,7 @@ fn push_scaled_signature_regions(
 }
 
 fn push_fractional_region(
-    regions: &mut Vec<(&'static str, ScanRegion)>,
+    regions: &mut Vec<ScanCandidate>,
     x: f32,
     y: f32,
     width: f32,
@@ -1521,7 +1658,13 @@ fn push_fractional_region(
         height: height.round().max(44.0) as u32,
     };
     if region_fits(region, image_width, image_height) {
-        push_unique_region(regions, "signature-window", region);
+        push_unique_candidate(
+            regions,
+            CandidateDetector::RibbonWeave,
+            Some(LayoutFamily::RibbonWeave),
+            "signature-window",
+            region,
+        );
     }
 }
 
@@ -1682,13 +1825,15 @@ fn region_fits(region: ScanRegion, image_width: u32, image_height: u32) -> bool 
         && region.y.saturating_add(region.height) <= image_height
 }
 
-fn push_unique_region(
-    regions: &mut Vec<(&'static str, ScanRegion)>,
+fn push_unique_candidate(
+    regions: &mut Vec<ScanCandidate>,
+    detector: CandidateDetector,
+    layout_hint: Option<LayoutFamily>,
     stage: &'static str,
     region: ScanRegion,
 ) {
-    if !regions.iter().any(|(_, existing)| *existing == region) {
-        regions.push((stage, region));
+    if !regions.iter().any(|candidate| candidate.region == region) {
+        regions.push(ScanCandidate::new(detector, layout_hint, stage, region));
     }
 }
 
@@ -1697,7 +1842,7 @@ fn horizontal_band_regions(
     padding: u32,
     image_width: u32,
     image_height: u32,
-) -> Vec<(&'static str, ScanRegion)> {
+) -> Vec<ScanCandidate> {
     if image_width == 0 || image_height == 0 {
         return Vec::new();
     }
@@ -1764,7 +1909,13 @@ fn horizontal_band_regions(
             image_height,
         );
         if plausible_region(expanded) {
-            regions.push(("horizontal-band", expanded));
+            push_unique_candidate(
+                &mut regions,
+                CandidateDetector::GenericBinary,
+                None,
+                "horizontal-band",
+                expanded,
+            );
         }
         for aspect in [2.35_f32, 2.7, 3.2] {
             let target_height = ((width as f32 / aspect).round() as u32).max(height);
@@ -1789,13 +1940,19 @@ fn horizontal_band_regions(
                     image_height,
                 );
                 if plausible_region(region) {
-                    regions.push(("horizontal-aspect", region));
+                    push_unique_candidate(
+                        &mut regions,
+                        CandidateDetector::GenericBinary,
+                        None,
+                        "horizontal-aspect",
+                        region,
+                    );
                 }
             }
         }
     }
 
-    regions.sort_by(|(_, a), (_, b)| region_score(*b).total_cmp(&region_score(*a)));
+    regions.sort_by(|a, b| region_score(b.region).total_cmp(&region_score(a.region)));
     regions.truncate(48);
     regions
 }

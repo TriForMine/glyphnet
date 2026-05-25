@@ -29,7 +29,7 @@ Current diagnostics:
 - Rust crop, quad, and warp diagnostics;
 - Rust input selection: full image or manual drag crop;
 - source image dimensions and displayed canvas bounds;
-- Rust candidate crop attempts;
+- Rust candidate crop attempts, detector family, and layout hints;
 - Rust stage timings and per-attempt decode durations;
 - Rust-estimated quadrilateral overlay;
 - JSON export of the active diagnostics.
@@ -41,6 +41,8 @@ scanner regressions.
 
 Scanner behavior to inspect here:
 
+- modular candidate families: generated-content, generic-binary, and
+  RibbonWeave-specific detection;
 - fast RibbonWeave signature localization from side totems and chevron rails;
 - fractional-grid sampling for screenshot/camera resampling where modules are
   not an integer number of pixels;

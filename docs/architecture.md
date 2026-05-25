@@ -126,21 +126,33 @@ Current still-image flow:
 
 1. Convert to grayscale and adaptive threshold.
 2. Try CV anchor/quad estimation when anchors are available.
-3. Locate RibbonWeave candidates from layout-specific signatures:
+3. Collect candidate regions from detector families:
+   - `generated-content` for clean rendered symbols on simple backgrounds;
+   - `generic-binary` for layout-agnostic dark bands and components;
+   - `ribbon-weave` for RibbonWeave-specific signatures.
+4. Attach detector family and layout hints to each candidate, then route it to
+   the appropriate sampler/decoder.
+5. Locate RibbonWeave candidates from layout-specific signatures:
    - dashed side totems;
    - horizontal chevron rails;
    - dark-bounds fallback for small/simple images.
-4. Estimate a candidate symbol box from detected signature geometry.
-5. Try exact integer-grid decoding for clean reference crops.
-6. For screenshot/camera-style crops, run fractional-grid sampling:
+6. Estimate a candidate symbol box from detected signature geometry.
+7. Try exact integer-grid decoding for clean reference crops.
+8. For screenshot/camera-style crops, run fractional-grid sampling:
    - try small phase offsets;
    - try small scale corrections;
    - run a frame-header precheck before full matrix decode;
    - accept only when full ECC/header validation passes.
-7. Return the decoded payload plus crop/quad/attempt diagnostics.
+9. Return the decoded payload plus crop/quad/attempt diagnostics.
 
 Large still images avoid the old generic crop crawl after signature detection,
 so failures stay bounded instead of scanning arbitrary UI regions.
+
+The detector split is intentional. RibbonWeave is the most complete detector
+today, but it is not the scanner architecture. Matrix-like, constellation, and
+future camera-specific formats should be added as their own detector families
+with their own geometry inference and sampling strategy, then share the same
+candidate diagnostics and decode validation path.
 
 ## Performance Plan
 

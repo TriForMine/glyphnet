@@ -435,7 +435,10 @@ function renderAttempts(attempts) {
 
     const stage = document.createElement("span");
     stage.className = "attempt-stage";
-    stage.textContent = `${attempt.stage} ${formatRect(attempt.region)}`;
+    const detector = attempt.layout_hint
+      ? `${attempt.detector} / ${attempt.layout_hint}`
+      : attempt.detector;
+    stage.textContent = `${detector} / ${attempt.stage} ${formatRect(attempt.region)}`;
 
     const time = document.createElement("span");
     time.className = "attempt-time";

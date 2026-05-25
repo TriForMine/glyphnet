@@ -161,6 +161,8 @@ fn attempts_json(attempts: &[ScanAttempt]) -> Vec<serde_json::Value> {
         .iter()
         .map(|attempt| {
             serde_json::json!({
+                "detector": attempt.detector,
+                "layout_hint": attempt.layout_hint.map(|layout| format!("{layout:?}")),
                 "stage": attempt.stage,
                 "region": {
                     "x": attempt.region.x,
