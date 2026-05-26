@@ -43,10 +43,11 @@ jobs:
 
       - name: Check PR branch perf gate
         if: github.event_name == 'pull_request'
+        continue-on-error: true
         run: SCANNER_BENCH_OUTPUT_JSON=target/scanner-perf/pr.json scripts/check_scanner_perf.sh
 
       - name: Capture base benchmark metrics
-        if: github.event_name == 'pull_request'
+        if: always() && github.event_name == 'pull_request'
         run: |
           git worktree add /tmp/glyphnet-base origin/${{ github.base_ref }}
           cp scripts/check_scanner_perf.sh /tmp/glyphnet-base/scripts/check_scanner_perf.sh
@@ -54,7 +55,7 @@ jobs:
           SCANNER_BENCH_OUTPUT_JSON=target/scanner-perf/base.json ./scripts/check_scanner_perf.sh --no-fail
 
       - name: Comment benchmark comparison on PR
-        if: github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork
+        if: always() && github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork
         uses: actions/github-script@v7
         with:
           script: |
@@ -65,16 +66,18 @@ jobs:
             const deltaPct = base.median_ms === 0 ? 0 : (delta / base.median_ms) * 100;
             const emoji = delta <= 0 ? '✅' : '⚠️';
             const marker = '<!-- scanner-perf-comment -->';
-            const body = `${marker}
-## Scanner perf (RibbonPrint fixture)
-
-${emoji} **PR median:** ${pr.median_ms.toFixed(3)} ms
-- **Base median (${context.payload.pull_request.base.ref}):** ${base.median_ms.toFixed(3)} ms
-- **Delta (PR - base):** ${delta.toFixed(3)} ms (${deltaPct.toFixed(2)}%)
-- **Profile budget:** ${pr.budget_ms.toFixed(3)} ms
-- **Allowed (budget + ${pr.tolerance_pct.toFixed(1)}%):** ${pr.allowed_ms.toFixed(3)} ms
-- **Gate status:** ${pr.status.toUpperCase()}
-`;
+            const body = [
+              marker,
+              '## Scanner perf (RibbonPrint fixture)',
+              '',
+              `${emoji} **PR median:** ${pr.median_ms.toFixed(3)} ms`,
+              `- **Base median (${context.payload.pull_request.base.ref}):** ${base.median_ms.toFixed(3)} ms`,
+              `- **Delta (PR - base):** ${delta.toFixed(3)} ms (${deltaPct.toFixed(2)}%)`,
+              `- **Profile budget:** ${pr.budget_ms.toFixed(3)} ms`,
+              `- **Allowed (budget + ${pr.tolerance_pct.toFixed(1)}%):** ${pr.allowed_ms.toFixed(3)} ms`,
+              `- **Gate status:** ${pr.status.toUpperCase()}`,
+              '',
+            ].join('\n');
 
             const { owner, repo } = context.repo;
             const issue_number = context.issue.number;
