@@ -6,7 +6,7 @@ use glyphnet_core::{
     ProtocolVersion, SymbolDescriptor, SymbolGeometry, SymbolMatrix, TransmissionMode, bitstream,
     choose_symbol_geometry, profile_spec,
 };
-use glyphnet_ecc::{BlockCode, ParityCode};
+use glyphnet_ecc::encode_for_mode;
 use thiserror::Error;
 
 /// Result type for encoder operations.
@@ -118,8 +118,7 @@ impl Encoder {
             payload.to_vec(),
         )?;
         let wire = frame.encode();
-        let ecc = ParityCode::from_level(self.config.ecc_level, wire.len());
-        let codewords = ecc.encode(&wire);
+        let codewords = encode_for_mode(mode, self.config.ecc_level, &wire);
         let bits = bitstream::bytes_to_bits(&codewords);
         let geometry = if let Some(geometry) = self.config.geometry {
             geometry

@@ -5,7 +5,8 @@
 //! The crate boundary is designed to host LDPC, fountain, and RaptorQ-like
 //! implementations without changing encoder/decoder APIs.
 
-use glyphnet_core::{EccLevel, GlyphError};
+use glyphnet_core::{EccLevel, GlyphError, TransmissionMode};
+use reed_solomon_erasure::galois_8::ReedSolomon;
 use thiserror::Error;
 
 /// Result type for ECC operations.
@@ -32,6 +33,15 @@ pub trait BlockCode {
 
     /// Validate a data block that already includes parity bytes.
     fn verify(&self, encoded: &[u8], data_len: usize) -> bool;
+}
+
+/// Concrete ECC scheme used for a frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EccScheme {
+    /// Deterministic parity reference implementation.
+    Parity,
+    /// Reed-Solomon shard parity for print-mode robustness.
+    ReedSolomon,
 }
 
 /// Deterministic parity bytes used by the reference encoder.
@@ -89,6 +99,95 @@ impl BlockCode for ParityCode {
         }
         let expected = self.parity_bytes(&encoded[..data_len]);
         encoded[data_len..data_len + self.parity_len] == expected
+    }
+}
+
+/// Reed-Solomon parity bytes over one-byte shards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReedSolomonCode {
+    parity_shards: usize,
+}
+
+impl ReedSolomonCode {
+    /// Create a Reed-Solomon code with explicit parity shard count.
+    pub const fn new(parity_shards: usize) -> Self {
+        Self { parity_shards }
+    }
+
+    /// Select a parity shard count from ECC level and payload length.
+    pub fn from_level(level: EccLevel, data_len: usize) -> Self {
+        let (num, den) = level.parity_ratio();
+        let parity_shards = ((data_len * num).div_ceil(den)).max(8);
+        Self::new(parity_shards)
+    }
+
+    fn parity_bytes(self, data: &[u8]) -> Option<Vec<u8>> {
+        if data.is_empty() || self.parity_shards == 0 {
+            return Some(Vec::new());
+        }
+        let data_shards = data.len();
+        let rs = ReedSolomon::new(data_shards, self.parity_shards).ok()?;
+        let mut shards: Vec<Vec<u8>> = data.iter().map(|byte| vec![*byte]).collect();
+        shards.extend((0..self.parity_shards).map(|_| vec![0u8]));
+        let mut refs: Vec<_> = shards.iter_mut().map(Vec::as_mut_slice).collect();
+        rs.encode(&mut refs).ok()?;
+        Some(
+            refs[data_shards..]
+                .iter()
+                .map(|shard| shard[0])
+                .collect::<Vec<u8>>(),
+        )
+    }
+}
+
+impl BlockCode for ReedSolomonCode {
+    fn encode(&self, data: &[u8]) -> Vec<u8> {
+        let parity = self.parity_bytes(data).unwrap_or_default();
+        let mut encoded = Vec::with_capacity(data.len() + parity.len());
+        encoded.extend_from_slice(data);
+        encoded.extend_from_slice(&parity);
+        encoded
+    }
+
+    fn verify(&self, encoded: &[u8], data_len: usize) -> bool {
+        if encoded.len() < data_len + self.parity_shards {
+            return false;
+        }
+        let Some(expected) = self.parity_bytes(&encoded[..data_len]) else {
+            return false;
+        };
+        encoded[data_len..data_len + self.parity_shards] == expected
+    }
+}
+
+/// Select the ECC scheme for a frame mode and level.
+pub const fn scheme_for_mode(mode: TransmissionMode, _level: EccLevel) -> EccScheme {
+    match mode {
+        TransmissionMode::Print => EccScheme::ReedSolomon,
+        TransmissionMode::Screen | TransmissionMode::Burst => EccScheme::Parity,
+    }
+}
+
+/// Encode wire bytes with the selected ECC scheme.
+pub fn encode_for_mode(mode: TransmissionMode, level: EccLevel, wire: &[u8]) -> Vec<u8> {
+    match scheme_for_mode(mode, level) {
+        EccScheme::Parity => ParityCode::from_level(level, wire.len()).encode(wire),
+        EccScheme::ReedSolomon => ReedSolomonCode::from_level(level, wire.len()).encode(wire),
+    }
+}
+
+/// Verify wire bytes with the selected ECC scheme.
+pub fn verify_for_mode(
+    mode: TransmissionMode,
+    level: EccLevel,
+    encoded: &[u8],
+    data_len: usize,
+) -> bool {
+    match scheme_for_mode(mode, level) {
+        EccScheme::Parity => ParityCode::from_level(level, data_len).verify(encoded, data_len),
+        EccScheme::ReedSolomon => {
+            ReedSolomonCode::from_level(level, data_len).verify(encoded, data_len)
+        }
     }
 }
 
@@ -230,6 +329,21 @@ mod tests {
         let code = ParityCode::new(8);
         let mut encoded = code.encode(b"glyphnet");
         encoded[2] ^= 0x44;
+        assert!(!code.verify(&encoded, b"glyphnet".len()));
+    }
+
+    #[test]
+    fn reed_solomon_code_verifies_clean_blocks() {
+        let code = ReedSolomonCode::from_level(EccLevel::High, b"glyphnet".len());
+        let encoded = code.encode(b"glyphnet");
+        assert!(code.verify(&encoded, b"glyphnet".len()));
+    }
+
+    #[test]
+    fn reed_solomon_code_detects_corruption() {
+        let code = ReedSolomonCode::from_level(EccLevel::High, b"glyphnet".len());
+        let mut encoded = code.encode(b"glyphnet");
+        encoded[1] ^= 0x55;
         assert!(!code.verify(&encoded, b"glyphnet".len()));
     }
 
