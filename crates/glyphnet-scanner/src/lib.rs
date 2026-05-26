@@ -21,6 +21,8 @@ use glyphnet_decode::{
     AutoDecodedSymbol, DecodeError, DecodeOptions, RasterDecoder, decode_matrix,
 };
 use image::{DynamicImage, GrayImage};
+#[cfg(not(target_arch = "wasm32"))]
+use rayon::prelude::*;
 use thiserror::Error;
 
 /// Result type for scanner operations.
@@ -402,6 +404,144 @@ fn scan_still_with_diagnostics_inner(
     timings.candidate_micros = elapsed_micros(stage);
 
     let decode_started = scan_instant_now();
+    #[cfg(not(target_arch = "wasm32"))]
+    if !robust && regions.len() >= PARALLEL_DECODE_CANDIDATE_THRESHOLD {
+        let mut results: Vec<(usize, ScanAttempt, Option<AutoDecodedSymbol>)> = regions
+            .into_par_iter()
+            .enumerate()
+            .map(|(index, candidate)| {
+                let attempt_started = scan_instant_now();
+                let region = candidate.region;
+                let cropped = image::imageops::crop_imm(
+                    image,
+                    region.x,
+                    region.y,
+                    region.width,
+                    region.height,
+                )
+                .to_image();
+                let cropped = DynamicImage::ImageRgba8(cropped);
+                let local_decoder = RasterDecoder::default();
+                match decode_candidate(&local_decoder, &cropped, candidate) {
+                    Ok(decoded) => (
+                        index,
+                        ScanAttempt {
+                            detector: candidate.detector.as_str(),
+                            layout_hint: candidate.layout_hint,
+                            stage: candidate.stage,
+                            region,
+                            decoded: true,
+                            error: None,
+                            duration_micros: elapsed_micros(attempt_started),
+                        },
+                        Some(decoded),
+                    ),
+                    Err(error) => (
+                        index,
+                        ScanAttempt {
+                            detector: candidate.detector.as_str(),
+                            layout_hint: candidate.layout_hint,
+                            stage: candidate.stage,
+                            region,
+                            decoded: false,
+                            error: Some(error.to_string()),
+                            duration_micros: elapsed_micros(attempt_started),
+                        },
+                        None,
+                    ),
+                }
+            })
+            .collect();
+        results.sort_by_key(|(index, _, _)| *index);
+
+        if let Some(hit_index) = results
+            .iter()
+            .position(|(_, attempt, decoded)| attempt.decoded && decoded.is_some())
+        {
+            let mut decoded_hit = None;
+            for (index, (_, attempt, decoded)) in results.into_iter().enumerate() {
+                if index > hit_index {
+                    break;
+                }
+                if decoded_hit.is_none() {
+                    decoded_hit = decoded;
+                }
+                attempts.push(attempt);
+            }
+            let region = attempts
+                .last()
+                .map(|attempt| attempt.region)
+                .unwrap_or(ScanRegion {
+                    x: 0,
+                    y: 0,
+                    width: image.width().max(1),
+                    height: image.height().max(1),
+                });
+            if let Some(decoded) = decoded_hit {
+                timings.decode_attempts_micros = elapsed_micros(decode_started);
+                timings.total_micros = elapsed_micros(started);
+                return Ok(StillScanResult {
+                    decoded,
+                    crop: Some(region),
+                    quad: None,
+                    warp_size: None,
+                    attempts,
+                    timings,
+                });
+            }
+            timings.decode_attempts_micros = elapsed_micros(decode_started);
+            timings.total_micros = elapsed_micros(started);
+            return Err(FailedStillScan {
+                error: ScannerError::Decode(DecodeError::AutoDetectFailed),
+                attempts,
+                timings,
+            });
+        }
+        attempts.extend(results.into_iter().map(|(_, attempt, _)| attempt));
+    } else {
+        for candidate in regions {
+            let attempt_started = scan_instant_now();
+            let region = candidate.region;
+            let cropped =
+                image::imageops::crop_imm(image, region.x, region.y, region.width, region.height)
+                    .to_image();
+            let cropped = DynamicImage::ImageRgba8(cropped);
+            match decode_candidate(&decoder, &cropped, candidate) {
+                Ok(decoded) => {
+                    attempts.push(ScanAttempt {
+                        detector: candidate.detector.as_str(),
+                        layout_hint: candidate.layout_hint,
+                        stage: candidate.stage,
+                        region,
+                        decoded: true,
+                        error: None,
+                        duration_micros: elapsed_micros(attempt_started),
+                    });
+                    timings.decode_attempts_micros = elapsed_micros(decode_started);
+                    timings.total_micros = elapsed_micros(started);
+                    return Ok(StillScanResult {
+                        decoded,
+                        crop: Some(region),
+                        quad: None,
+                        warp_size: None,
+                        attempts,
+                        timings,
+                    });
+                }
+                Err(error) => attempts.push(ScanAttempt {
+                    detector: candidate.detector.as_str(),
+                    layout_hint: candidate.layout_hint,
+                    stage: candidate.stage,
+                    region,
+                    decoded: false,
+                    error: Some(error.to_string()),
+                    duration_micros: elapsed_micros(attempt_started),
+                }),
+            }
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
     for candidate in regions {
         let attempt_started = scan_instant_now();
         let region = candidate.region;
@@ -1797,6 +1937,8 @@ const MAX_RIBBON_CANDIDATES: usize = 24;
 const MAX_GENERIC_CANDIDATES: usize = 16;
 const MAX_DARK_BOUNDS_CANDIDATES: usize = 8;
 const MAX_QUAD_ATTEMPTS: usize = 4;
+#[cfg(not(target_arch = "wasm32"))]
+const PARALLEL_DECODE_CANDIDATE_THRESHOLD: usize = 8;
 
 fn ribbon_weave_candidates(
     binary: &GrayImage,
