@@ -129,6 +129,20 @@ handles still images and screenshots: it localizes RibbonWeave signatures from
 side totems and chevron rails, then uses exact or fractional-grid sampling with
 header/ECC validation before returning crop diagnostics.
 
+## Known Limitations (Current Reference Scanner)
+
+The still-image scanner is functional for clean renders and many screenshot-style
+inputs, but several robustness scenarios are intentionally not part of the
+default passing suite yet:
+
+- mild horizontal perspective skew requires stronger rectification;
+- heavy UI clutter/noise cases are present but currently ignored in default tests;
+- very small embedded samples (for example `module_px=2`) need stronger
+  low-resolution signature detection.
+
+See ignored scanner tests in `crates/glyphnet-scanner/src/lib.rs` for exact
+tracked scenarios and rationale comments.
+
 ## Engineering Workflow
 
 The CI setup is designed to keep the project maintainable:
