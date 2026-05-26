@@ -121,6 +121,10 @@ impl ReedSolomonCode {
         Self::new(parity_shards)
     }
 
+    fn is_supported(self, data_len: usize) -> bool {
+        data_len > 0 && data_len.saturating_add(self.parity_shards) <= 255
+    }
+
     fn parity_bytes(self, data: &[u8]) -> Option<Vec<u8>> {
         if data.is_empty() || self.parity_shards == 0 {
             return Some(Vec::new());
@@ -168,12 +172,44 @@ pub const fn scheme_for_mode(mode: TransmissionMode, _level: EccLevel) -> EccSch
     }
 }
 
+/// Interleave stride policy by mode.
+pub const fn interleave_stride_for_mode(mode: TransmissionMode, _level: EccLevel) -> usize {
+    match mode {
+        // Phase 2 policy scaffold: keep neutral transform (stride=1) until
+        // decoder-side deinterleave is wired at the frame-matrix boundary.
+        TransmissionMode::Print => 1,
+        TransmissionMode::Screen => 1,
+        TransmissionMode::Burst => 1,
+    }
+}
+
 /// Encode wire bytes with the selected ECC scheme.
 pub fn encode_for_mode(mode: TransmissionMode, level: EccLevel, wire: &[u8]) -> Vec<u8> {
-    match scheme_for_mode(mode, level) {
+    let encoded = match scheme_for_mode(mode, level) {
         EccScheme::Parity => ParityCode::from_level(level, wire.len()).encode(wire),
-        EccScheme::ReedSolomon => ReedSolomonCode::from_level(level, wire.len()).encode(wire),
+        EccScheme::ReedSolomon => {
+            let rs = ReedSolomonCode::from_level(level, wire.len());
+            if rs.is_supported(wire.len()) {
+                rs.encode(wire)
+            } else {
+                // Keep print-mode encodes viable for larger frames that exceed
+                // byte-shard Reed-Solomon limits.
+                ParityCode::from_level(level, wire.len()).encode(wire)
+            }
+        }
+    };
+    let data_len = wire.len();
+    if encoded.len() <= data_len {
+        return encoded;
     }
+    let stride = interleave_stride_for_mode(mode, level);
+    if stride <= 1 {
+        return encoded;
+    }
+    let mut out = Vec::with_capacity(encoded.len());
+    out.extend_from_slice(&encoded[..data_len]);
+    out.extend_from_slice(&interleave(&encoded[data_len..], stride));
+    out
 }
 
 /// Verify wire bytes with the selected ECC scheme.
@@ -183,15 +219,27 @@ pub fn verify_for_mode(
     encoded: &[u8],
     data_len: usize,
 ) -> bool {
+    if encoded.len() < data_len {
+        return false;
+    }
+    let stride = interleave_stride_for_mode(mode, level);
+    let normalized = if stride > 1 && encoded.len() > data_len {
+        let mut out = Vec::with_capacity(encoded.len());
+        out.extend_from_slice(&encoded[..data_len]);
+        out.extend_from_slice(&deinterleave(&encoded[data_len..], stride));
+        out
+    } else {
+        encoded.to_vec()
+    };
     match mode {
         TransmissionMode::Print => {
             // Backward compatibility: accept legacy parity-encoded print fixtures
             // while migrating new print encodes to Reed-Solomon.
-            ReedSolomonCode::from_level(level, data_len).verify(encoded, data_len)
-                || ParityCode::from_level(level, data_len).verify(encoded, data_len)
+            ReedSolomonCode::from_level(level, data_len).verify(&normalized, data_len)
+                || ParityCode::from_level(level, data_len).verify(&normalized, data_len)
         }
         TransmissionMode::Screen | TransmissionMode::Burst => {
-            ParityCode::from_level(level, data_len).verify(encoded, data_len)
+            ParityCode::from_level(level, data_len).verify(&normalized, data_len)
         }
     }
 }
@@ -350,6 +398,32 @@ mod tests {
         let mut encoded = code.encode(b"glyphnet");
         encoded[1] ^= 0x55;
         assert!(!code.verify(&encoded, b"glyphnet".len()));
+    }
+
+    #[test]
+    fn encode_verify_for_mode_roundtrip() {
+        let wire = b"glyphnet wire bytes";
+        for mode in [
+            TransmissionMode::Print,
+            TransmissionMode::Screen,
+            TransmissionMode::Burst,
+        ] {
+            let encoded = encode_for_mode(mode, EccLevel::High, wire);
+            assert!(verify_for_mode(mode, EccLevel::High, &encoded, wire.len()));
+        }
+    }
+
+    #[test]
+    fn print_mode_large_frames_fallback_to_parity_and_verify() {
+        let wire = vec![0x5a; 1100];
+        let encoded = encode_for_mode(TransmissionMode::Print, EccLevel::High, &wire);
+        assert!(encoded.len() > wire.len());
+        assert!(verify_for_mode(
+            TransmissionMode::Print,
+            EccLevel::High,
+            &encoded,
+            wire.len()
+        ));
     }
 
     #[test]
