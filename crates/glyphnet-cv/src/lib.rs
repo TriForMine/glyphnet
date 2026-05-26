@@ -2,6 +2,8 @@
 
 use glyphnet_core::TransmissionMode;
 use image::{DynamicImage, GrayImage, Luma};
+#[cfg(not(target_arch = "wasm32"))]
+use rayon::prelude::*;
 use thiserror::Error;
 
 /// Result type for CV operations.
@@ -20,6 +22,10 @@ pub enum CvError {
     #[error("failed to compute perspective transform")]
     WarpFailed,
 }
+
+/// Minimum image area where row-parallel adaptive thresholding is typically faster.
+#[cfg(not(target_arch = "wasm32"))]
+const PARALLEL_THRESHOLD_MIN_AREA: u32 = 500_000;
 
 /// 2D image-space point.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -176,25 +182,69 @@ pub fn adaptive_threshold(image: &GrayImage, radius: u32, bias: u8) -> Result<Gr
 
     let integral = integral_image(image);
     let mut out = GrayImage::new(image.width(), image.height());
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let area = image.width().saturating_mul(image.height());
+        if area >= PARALLEL_THRESHOLD_MIN_AREA {
+            let width = image.width();
+            let height = image.height();
+            let src = image.as_raw();
+            out.as_mut()
+                .par_chunks_mut(width as usize)
+                .enumerate()
+                .for_each(|(row_index, row)| {
+                    let y = row_index as u32;
+                    for x in 0..width {
+                        let x0 = x.saturating_sub(radius);
+                        let y0 = y.saturating_sub(radius);
+                        let x1 = (x + radius).min(width - 1);
+                        let y1 = (y + radius).min(height - 1);
+                        let area = (x1 - x0 + 1) * (y1 - y0 + 1);
+                        let sum = rect_sum(&integral, width, x0, y0, x1, y1);
+                        let mean = (sum / area) as u8;
+                        let threshold = mean.saturating_sub(bias);
+                        let index = (y * width + x) as usize;
+                        row[x as usize] = if src[index] < threshold { 0 } else { 255 };
+                    }
+                });
+        } else {
+            adaptive_threshold_scalar(image, &integral, radius, bias, &mut out);
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        adaptive_threshold_scalar(image, &integral, radius, bias, &mut out);
+    }
+
+    Ok(out)
+}
+
+fn adaptive_threshold_scalar(
+    image: &GrayImage,
+    integral: &[u32],
+    radius: u32,
+    bias: u8,
+    out: &mut GrayImage,
+) {
+    let width = image.width();
+    let src = image.as_raw();
+    let out_raw = out.as_mut();
     for y in 0..image.height() {
         for x in 0..image.width() {
             let x0 = x.saturating_sub(radius);
             let y0 = y.saturating_sub(radius);
-            let x1 = (x + radius).min(image.width() - 1);
+            let x1 = (x + radius).min(width - 1);
             let y1 = (y + radius).min(image.height() - 1);
             let area = (x1 - x0 + 1) * (y1 - y0 + 1);
-            let sum = rect_sum(&integral, image.width(), x0, y0, x1, y1);
+            let sum = rect_sum(integral, width, x0, y0, x1, y1);
             let mean = (sum / area) as u8;
             let threshold = mean.saturating_sub(bias);
-            let value = if image.get_pixel(x, y).0[0] < threshold {
-                0
-            } else {
-                255
-            };
-            out.put_pixel(x, y, Luma([value]));
+            let index = (y * width + x) as usize;
+            out_raw[index] = if src[index] < threshold { 0 } else { 255 };
         }
     }
-    Ok(out)
 }
 
 /// Find coarse anchor candidates from a thresholded image.
@@ -207,12 +257,13 @@ pub fn find_anchor_candidates(
     }
 
     let step = profile.min_anchor_px.max(4);
+    let dark_integral = integral_dark_image(binary);
     let mut candidates = Vec::new();
     let mut y = 0;
     while y + step < binary.height() {
         let mut x = 0;
         while x + step < binary.width() {
-            let darkness = dark_ratio(binary, x, y, step, step);
+            let darkness = dark_ratio_integral(&dark_integral, binary.width(), x, y, step, step);
             if (0.35..=0.75).contains(&darkness) {
                 candidates.push(AnchorCandidate {
                     center: Point {
@@ -501,6 +552,25 @@ fn integral_image(image: &GrayImage) -> Vec<u32> {
     integral
 }
 
+fn integral_dark_image(image: &GrayImage) -> Vec<u32> {
+    let width = image.width() as usize;
+    let height = image.height() as usize;
+    let mut integral = vec![0u32; (width + 1) * (height + 1)];
+    let src = image.as_raw();
+    for y in 0..height {
+        let mut row_sum = 0u32;
+        for x in 0..width {
+            let index = y * width + x;
+            if src[index] == 0 {
+                row_sum += 1;
+            }
+            let integral_index = (y + 1) * (width + 1) + (x + 1);
+            integral[integral_index] = integral[integral_index - (width + 1)] + row_sum;
+        }
+    }
+    integral
+}
+
 fn rect_sum(integral: &[u32], width: u32, x0: u32, y0: u32, x1: u32, y1: u32) -> u32 {
     let stride = width as usize + 1;
     let ax = x0 as usize;
@@ -512,18 +582,19 @@ fn rect_sum(integral: &[u32], width: u32, x0: u32, y0: u32, x1: u32, y1: u32) ->
         - integral[by * stride + ax]
 }
 
-fn dark_ratio(image: &GrayImage, x0: u32, y0: u32, width: u32, height: u32) -> f32 {
-    let mut dark = 0u32;
-    let mut total = 0u32;
-    for y in y0..(y0 + height).min(image.height()) {
-        for x in x0..(x0 + width).min(image.width()) {
-            if image.get_pixel(x, y).0[0] == 0 {
-                dark += 1;
-            }
-            total += 1;
-        }
-    }
-    dark as f32 / total.max(1) as f32
+fn dark_ratio_integral(
+    integral: &[u32],
+    image_width: u32,
+    x0: u32,
+    y0: u32,
+    width: u32,
+    height: u32,
+) -> f32 {
+    let x1 = x0.saturating_add(width).saturating_sub(1);
+    let y1 = y0.saturating_add(height).saturating_sub(1);
+    let dark = rect_sum(integral, image_width, x0, y0, x1, y1);
+    let total = width.saturating_mul(height).max(1);
+    dark as f32 / total as f32
 }
 
 #[cfg(test)]

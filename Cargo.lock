@@ -637,6 +637,7 @@ version = "0.1.0"
 dependencies = [
  "glyphnet-core",
  "image",
+ "rayon",
  "thiserror",
 ]
 

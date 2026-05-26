@@ -5,6 +5,36 @@ use glyphnet_render::{RasterRenderer, RenderOptions};
 use glyphnet_scanner::scan_still;
 use image::{DynamicImage, Rgba, RgbaImage};
 
+fn rendered_ribbon(payload: &[u8], module_px: u32) -> RgbaImage {
+    let encoded = Encoder::new(EncoderConfig {
+        layout: LayoutFamily::RibbonWeave,
+        ..EncoderConfig::default()
+    })
+    .encode_static(payload)
+    .unwrap();
+    RasterRenderer::new(RenderOptions {
+        module_px,
+        quiet_zone_modules: 4,
+        ..RenderOptions::default()
+    })
+    .render(&encoded.matrix)
+    .unwrap()
+}
+
+fn ribbon_roi(payload: &[u8], module_px: u32, border_px: u32) -> DynamicImage {
+    let symbol = rendered_ribbon(payload, module_px);
+    let canvas_width = symbol.width() + border_px * 2;
+    let canvas_height = symbol.height() + border_px * 2;
+    let mut canvas = RgbaImage::from_pixel(canvas_width, canvas_height, Rgba([255, 255, 255, 255]));
+    image::imageops::overlay(
+        &mut canvas,
+        &symbol,
+        i64::from(border_px),
+        i64::from(border_px),
+    );
+    DynamicImage::ImageRgba8(canvas)
+}
+
 fn real_debugger_screenshot(c: &mut Criterion) {
     let image =
         image::load_from_memory(include_bytes!("../fixtures/screenshot-debug-sample.png")).unwrap();
@@ -19,6 +49,42 @@ fn real_debugger_screenshot(c: &mut Criterion) {
         b.iter(|| {
             let result = scan_still(&image, TransmissionMode::Print).unwrap();
             assert_eq!(result.decoded.decoded.frame.payload, b"debug sample");
+        });
+    });
+}
+
+fn generated_ribbon_canvas_small(c: &mut Criterion) {
+    let payload = b"ribbon small";
+    let image = ribbon_roi(payload, 4, 12);
+    c.bench_function("scan_generated_ribbon_canvas_small", |b| {
+        b.iter(|| {
+            let result = scan_still(&image, TransmissionMode::Print).unwrap();
+            assert_eq!(result.decoded.decoded.frame.payload, payload);
+            assert_eq!(result.decoded.info.layout, LayoutFamily::RibbonWeave);
+        });
+    });
+}
+
+fn generated_ribbon_canvas_medium(c: &mut Criterion) {
+    let payload = b"ribbon medium";
+    let image = ribbon_roi(payload, 4, 24);
+    c.bench_function("scan_generated_ribbon_canvas_medium", |b| {
+        b.iter(|| {
+            let result = scan_still(&image, TransmissionMode::Print).unwrap();
+            assert_eq!(result.decoded.decoded.frame.payload, payload);
+            assert_eq!(result.decoded.info.layout, LayoutFamily::RibbonWeave);
+        });
+    });
+}
+
+fn generated_ribbon_canvas_large(c: &mut Criterion) {
+    let payload = b"ribbon large";
+    let image = ribbon_roi(payload, 4, 48);
+    c.bench_function("scan_generated_ribbon_canvas_large", |b| {
+        b.iter(|| {
+            let result = scan_still(&image, TransmissionMode::Print).unwrap();
+            assert_eq!(result.decoded.decoded.frame.payload, payload);
+            assert_eq!(result.decoded.info.layout, LayoutFamily::RibbonWeave);
         });
     });
 }
@@ -50,5 +116,12 @@ fn generated_matrix_canvas(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, real_debugger_screenshot, generated_matrix_canvas);
+criterion_group!(
+    benches,
+    real_debugger_screenshot,
+    generated_ribbon_canvas_small,
+    generated_ribbon_canvas_medium,
+    generated_ribbon_canvas_large,
+    generated_matrix_canvas
+);
 criterion_main!(benches);
