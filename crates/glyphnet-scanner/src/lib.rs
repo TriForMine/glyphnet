@@ -342,7 +342,8 @@ pub fn scan_still_with_diagnostics(
         }
         if let Ok(warped) = warp_perspective_gray(&gray, quad, warp_width, warp_height) {
             let warped = DynamicImage::ImageLuma8(warped);
-            if let Ok(decoded) = decoder.decode_auto_with_info(&warped)
+            if let Ok(decoded) = decoder
+                .decode_auto_with_info(&warped)
                 .or_else(|_| decode_resampled_full_frame(&decoder, &warped))
             {
                 timings.quad_micros = elapsed_micros(stage);
