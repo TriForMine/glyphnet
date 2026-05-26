@@ -505,7 +505,7 @@ fn still_scan_candidates(
     }
 
     let mut matrix = matrix_candidates(binary, image_width, image_height);
-    matrix.truncate(MAX_MATRIX_CANDIDATES.min(16));
+    matrix.truncate(MAX_MATRIX_CANDIDATES);
     candidates.extend(matrix);
 
     let mut ribbon = ribbon_weave_candidates(binary, image_width, image_height);
@@ -518,12 +518,15 @@ fn still_scan_candidates(
         candidates.extend(generic);
     }
 
-    if should_try_dark_bounds_fallback(image_width, image_height, candidates.len())
+    if candidates.len() < MAX_CANDIDATE_REGIONS
+        && should_try_dark_bounds_fallback(image_width, image_height, candidates.len())
         && let Some(bounds) = dark_bounds(binary)
     {
         let mut dark_bounds =
             ribbon_dark_bounds_candidates(bounds, padding, image_width, image_height);
-        dark_bounds.truncate(MAX_DARK_BOUNDS_CANDIDATES);
+        let dark_bounds_budget =
+            MAX_DARK_BOUNDS_CANDIDATES.min(MAX_CANDIDATE_REGIONS - candidates.len());
+        dark_bounds.truncate(dark_bounds_budget);
         candidates.extend(dark_bounds);
     }
 
@@ -752,7 +755,6 @@ fn matrix_candidates(
             }
         }
     }
-    candidates.truncate(16);
     candidates
 }
 
@@ -1585,7 +1587,7 @@ fn pixel_index(width: u32, x: u32, y: u32) -> usize {
 const MIN_COMPONENT_PIXELS: u32 = 16;
 const MAX_CANDIDATE_REGIONS: usize = 96;
 const MAX_CONTENT_CANDIDATES: usize = 24;
-const MAX_MATRIX_CANDIDATES: usize = 24;
+const MAX_MATRIX_CANDIDATES: usize = 16;
 const MAX_RIBBON_CANDIDATES: usize = 24;
 const MAX_GENERIC_CANDIDATES: usize = 16;
 const MAX_DARK_BOUNDS_CANDIDATES: usize = 8;
