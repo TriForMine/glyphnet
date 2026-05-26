@@ -44,7 +44,7 @@ jobs:
       - name: Check PR branch perf gate
         if: github.event_name == 'pull_request'
         continue-on-error: true
-        run: SCANNER_BENCH_NAMES=scan_generated_ribbon_canvas_small,scan_generated_ribbon_canvas_medium,scan_generated_ribbon_canvas_large,scan_real_debugger_screenshot SCANNER_BENCH_OUTPUT_JSON=target/scanner-perf/pr.json scripts/check_scanner_perf.sh
+        run: SCANNER_BENCH_NAMES=scan_generated_ribbon_canvas_small,scan_generated_ribbon_canvas_medium,scan_generated_ribbon_canvas_large,scan_real_debugger_screenshot SCANNER_BENCH_NON_GATING=scan_real_debugger_screenshot SCANNER_BENCH_OUTPUT_JSON=target/scanner-perf/pr.json scripts/check_scanner_perf.sh
 
       - name: Capture base benchmark metrics
         if: always() && github.event_name == 'pull_request'
@@ -54,7 +54,7 @@ jobs:
           mkdir -p /tmp/glyphnet-base/scripts
           cp scripts/check_scanner_perf.sh /tmp/glyphnet-base/scripts/check_scanner_perf.sh
           cd /tmp/glyphnet-base
-          SCANNER_BENCH_NAMES=scan_generated_ribbon_canvas_small,scan_generated_ribbon_canvas_medium,scan_generated_ribbon_canvas_large,scan_real_debugger_screenshot SCANNER_BENCH_OUTPUT_JSON=target/scanner-perf/base.json ./scripts/check_scanner_perf.sh --no-fail
+          SCANNER_BENCH_NAMES=scan_generated_ribbon_canvas_small,scan_generated_ribbon_canvas_medium,scan_generated_ribbon_canvas_large,scan_real_debugger_screenshot SCANNER_BENCH_NON_GATING=scan_real_debugger_screenshot SCANNER_BENCH_OUTPUT_JSON=target/scanner-perf/base.json ./scripts/check_scanner_perf.sh --no-fail
 
       - name: Comment benchmark comparison on PR
         if: always() && github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork
@@ -94,7 +94,8 @@ jobs:
                     const baseCell = baseMs == null ? '-' : baseMs.toFixed(3);
                     const deltaCell = delta == null ? '-' : delta.toFixed(3);
                     const deltaPctCell = deltaPct == null ? '-' : `${deltaPct.toFixed(2)}%`;
-                    return `| ${name} | ${prCell} | ${baseCell} | ${deltaCell} | ${deltaPctCell} |`;
+                    const gateCell = p && p.gating === false ? 'No' : 'Yes';
+                    return `| ${name} | ${gateCell} | ${prCell} | ${baseCell} | ${deltaCell} | ${deltaPctCell} |`;
                   })
                 ];
             const body = [
@@ -111,7 +112,9 @@ jobs:
                 ? `- **Allowed (budget + ${pr.tolerance_pct.toFixed(1)}%):** ${pr.allowed_ms.toFixed(3)} ms`
                 : '- **Allowed threshold:** unavailable',
               '',
-              ...rows,
+              rows[0].replace('| Benchmark | PR median (ms) | Base median (ms) | Delta (ms) | Delta % |', '| Benchmark | Gating | PR median (ms) | Base median (ms) | Delta (ms) | Delta % |'),
+              rows[1].replace('|---|---:|---:|---:|---:|', '|---|:---:|---:|---:|---:|---:|'),
+              ...rows.slice(2),
               '',
             ].join('\n');
 

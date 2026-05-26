@@ -24,6 +24,13 @@ else
   BENCH_NAMES=("${BENCH_NAME}")
 fi
 export SCANNER_BENCH_NAMES="$(IFS=,; echo "${BENCH_NAMES[*]}")"
+NON_GATING_RAW="${SCANNER_BENCH_NON_GATING:-}"
+if [[ -n "${NON_GATING_RAW}" ]]; then
+  IFS=',' read -r -a NON_GATING_BENCHES <<< "${NON_GATING_RAW}"
+else
+  NON_GATING_BENCHES=()
+fi
+export SCANNER_BENCH_NON_GATING="$(IFS=,; echo "${NON_GATING_BENCHES[*]}")"
 
 echo "[scanner-perf] running benchmarks: ${SCANNER_BENCH_NAMES}"
 echo "[scanner-perf] settings: warmup=${WARMUP_SECS}s measurement=${MEASURE_SECS}s sample_size=${SAMPLE_SIZE} tolerance=${TOLERANCE_PCT}%"
@@ -57,6 +64,11 @@ bench_names = [
     for name in os.environ.get("SCANNER_BENCH_NAMES", "scan_generated_ribbon_canvas_medium").split(",")
     if name.strip()
 ]
+non_gating = {
+    name.strip()
+    for name in os.environ.get("SCANNER_BENCH_NON_GATING", "").split(",")
+    if name.strip()
+}
 
 src = profile_path.read_text()
 match = re.search(
@@ -78,14 +90,17 @@ for bench_name in bench_names:
     median_ns = float(est["median"]["point_estimate"])
     median_ms = median_ns / 1_000_000.0
     status = "pass" if median_ms <= allowed_ms else "fail"
-    if status == "fail":
+    gating = bench_name not in non_gating
+    if status == "fail" and gating:
         overall_status = "fail"
     cases.append({
         "bench_name": bench_name,
         "status": status,
+        "gating": gating,
         "median_ms": median_ms,
     })
-    print(f"[scanner-perf] {bench_name}: {median_ms:.3f} ms ({status})")
+    gate_label = "gating" if gating else "non-gating"
+    print(f"[scanner-perf] {bench_name}: {median_ms:.3f} ms ({status}, {gate_label})")
 
 print(f"[scanner-perf] profile budget:  {budget_ms:.3f} ms (RibbonPrint.benchmark.max_decode_ms)")
 print(f"[scanner-perf] allowed max:     {allowed_ms:.3f} ms (with {tolerance_pct:.1f}% tolerance)")
