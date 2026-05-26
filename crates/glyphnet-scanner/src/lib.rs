@@ -505,10 +505,12 @@ fn scan_quad_candidates(
         quads.push(quad);
         quads.extend(quad_variants(quad, image_width, image_height));
     }
-    if let Some(bounds) = dark_bounds(binary) {
-        let quad = region_to_quad(bounds);
-        quads.push(quad);
-        quads.extend(quad_variants(quad, image_width, image_height));
+    if should_try_dark_bounds_fallback(image_width, image_height, anchors.len()) {
+        if let Some(bounds) = dark_bounds(binary) {
+            let quad = region_to_quad(bounds);
+            quads.push(quad);
+            quads.extend(quad_variants(quad, image_width, image_height));
+        }
     }
     quads
 }
