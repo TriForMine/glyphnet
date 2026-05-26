@@ -334,11 +334,17 @@ pub fn scan_still_with_diagnostics(
     let stage = scan_instant_now();
     let candidates = find_anchor_candidates(&binary, profile)
         .map_err(|error| failed_cv(error, timings, started))?;
-    if let Some(quad) = estimate_quad(&binary, &candidates) {
+    let quad_candidates = scan_quad_candidates(&binary, &candidates, image.width(), image.height());
+    for quad in quad_candidates {
         let (warp_width, warp_height) = quad_dimensions(quad);
+        if warp_width < 32 || warp_height < 32 {
+            continue;
+        }
         if let Ok(warped) = warp_perspective_gray(&gray, quad, warp_width, warp_height) {
             let warped = DynamicImage::ImageLuma8(warped);
-            if let Ok(decoded) = decoder.decode_auto_with_info(&warped) {
+            if let Ok(decoded) = decoder.decode_auto_with_info(&warped)
+                .or_else(|_| decode_resampled_full_frame(&decoder, &warped))
+            {
                 timings.quad_micros = elapsed_micros(stage);
                 timings.total_micros = elapsed_micros(started);
                 return Ok(StillScanResult {
@@ -485,6 +491,111 @@ fn should_try_dark_bounds_fallback(
     candidate_count: usize,
 ) -> bool {
     image_width.saturating_mul(image_height) <= 900_000 || candidate_count == 0
+}
+
+fn scan_quad_candidates(
+    binary: &GrayImage,
+    anchors: &[glyphnet_cv::AnchorCandidate],
+    image_width: u32,
+    image_height: u32,
+) -> Vec<glyphnet_cv::Quad> {
+    let mut quads = Vec::new();
+    if let Some(quad) = estimate_quad(binary, anchors) {
+        quads.push(quad);
+        quads.extend(quad_variants(quad, image_width, image_height));
+    }
+    if let Some(bounds) = dark_bounds(binary) {
+        let quad = region_to_quad(bounds);
+        quads.push(quad);
+        quads.extend(quad_variants(quad, image_width, image_height));
+    }
+    quads
+}
+
+fn region_to_quad(region: ScanRegion) -> glyphnet_cv::Quad {
+    let left = region.x as f32;
+    let top = region.y as f32;
+    let right = region.x.saturating_add(region.width.saturating_sub(1)) as f32;
+    let bottom = region.y.saturating_add(region.height.saturating_sub(1)) as f32;
+    glyphnet_cv::Quad {
+        top_left: glyphnet_cv::Point { x: left, y: top },
+        top_right: glyphnet_cv::Point { x: right, y: top },
+        bottom_right: glyphnet_cv::Point {
+            x: right,
+            y: bottom,
+        },
+        bottom_left: glyphnet_cv::Point { x: left, y: bottom },
+    }
+}
+
+fn quad_variants(
+    quad: glyphnet_cv::Quad,
+    image_width: u32,
+    image_height: u32,
+) -> Vec<glyphnet_cv::Quad> {
+    let center_x =
+        (quad.top_left.x + quad.top_right.x + quad.bottom_left.x + quad.bottom_right.x) * 0.25;
+    let center_y =
+        (quad.top_left.y + quad.top_right.y + quad.bottom_left.y + quad.bottom_right.y) * 0.25;
+    let mut out = Vec::new();
+    for scale in [0.94_f32, 0.97, 1.03, 1.06] {
+        let scaled = glyphnet_cv::Quad {
+            top_left: scale_quad_point(quad.top_left, center_x, center_y, scale),
+            top_right: scale_quad_point(quad.top_right, center_x, center_y, scale),
+            bottom_right: scale_quad_point(quad.bottom_right, center_x, center_y, scale),
+            bottom_left: scale_quad_point(quad.bottom_left, center_x, center_y, scale),
+        };
+        if quad_in_bounds(scaled, image_width, image_height) {
+            out.push(scaled);
+        }
+    }
+    out
+}
+
+fn scale_quad_point(
+    point: glyphnet_cv::Point,
+    center_x: f32,
+    center_y: f32,
+    scale: f32,
+) -> glyphnet_cv::Point {
+    glyphnet_cv::Point {
+        x: center_x + (point.x - center_x) * scale,
+        y: center_y + (point.y - center_y) * scale,
+    }
+}
+
+fn quad_in_bounds(quad: glyphnet_cv::Quad, image_width: u32, image_height: u32) -> bool {
+    let min_x = quad
+        .top_left
+        .x
+        .min(quad.top_right.x)
+        .min(quad.bottom_left.x)
+        .min(quad.bottom_right.x);
+    let max_x = quad
+        .top_left
+        .x
+        .max(quad.top_right.x)
+        .max(quad.bottom_left.x)
+        .max(quad.bottom_right.x);
+    let min_y = quad
+        .top_left
+        .y
+        .min(quad.top_right.y)
+        .min(quad.bottom_left.y)
+        .min(quad.bottom_right.y);
+    let max_y = quad
+        .top_left
+        .y
+        .max(quad.top_right.y)
+        .max(quad.bottom_left.y)
+        .max(quad.bottom_right.y);
+
+    min_x >= 0.0
+        && min_y >= 0.0
+        && max_x < image_width as f32
+        && max_y < image_height as f32
+        && (max_x - min_x) >= 32.0
+        && (max_y - min_y) >= 32.0
 }
 
 fn still_scan_candidates(
@@ -2662,14 +2773,12 @@ mod tests {
         let image = DynamicImage::ImageRgba8(canvas);
 
         let result = assert_scan_payload(&image, b"debug sample");
-        assert!(matches!(
-            result.crop,
-            Some(ScanRegion {
-                x: 80..=140,
-                y: 60..=110,
-                ..
-            })
-        ));
+        if let Some(crop) = result.crop {
+            assert!((80..=140).contains(&crop.x), "unexpected crop.x: {crop:?}");
+            assert!((60..=110).contains(&crop.y), "unexpected crop.y: {crop:?}");
+        } else {
+            assert!(result.quad.is_some(), "scanner should return crop or quad");
+        }
     }
 
     #[test]
@@ -2687,10 +2796,12 @@ mod tests {
         let result = assert_scan_payload(&image, payload);
         assert_eq!(result.decoded.info.layout, LayoutFamily::Matrix);
         assert!(
-            result
-                .attempts
-                .iter()
-                .any(|attempt| attempt.detector == CandidateDetector::GeneratedContent.as_str())
+            result.quad.is_some()
+                || result
+                    .attempts
+                    .iter()
+                    .any(|attempt| attempt.detector
+                        == CandidateDetector::GeneratedContent.as_str())
         );
     }
 
@@ -2733,7 +2844,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "module_px=2 embedded samples need stronger low-resolution signature detection"]
     fn scan_still_decodes_small_debugger_sample_canvas() {
         let image = sample_canvas(b"debug sample", 2, 80, 72);
         assert_scan_payload(&image, b"debug sample");
@@ -2836,7 +2946,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires stronger perspective rectification than the current reference scanner"]
     fn scan_still_decodes_mild_horizontal_skew() {
         let encoded = Encoder::default().encode_static(b"skew").unwrap();
         let symbol = RasterRenderer::default().render(&encoded.matrix).unwrap();
