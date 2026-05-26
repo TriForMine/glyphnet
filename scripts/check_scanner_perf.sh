@@ -10,6 +10,12 @@ TOLERANCE_PCT="${SCANNER_BENCH_TOLERANCE_PCT:-10}"
 WARMUP_SECS="${SCANNER_BENCH_WARMUP_SECS:-3}"
 MEASURE_SECS="${SCANNER_BENCH_MEASURE_SECS:-8}"
 SAMPLE_SIZE="${SCANNER_BENCH_SAMPLE_SIZE:-40}"
+OUTPUT_JSON="${SCANNER_BENCH_OUTPUT_JSON:-}"
+ENFORCE_EXIT=1
+if [[ "${1:-}" == "--no-fail" ]]; then
+  ENFORCE_EXIT=0
+fi
+export SCANNER_BENCH_ENFORCE_EXIT="${ENFORCE_EXIT}"
 
 BENCH_NAME="scan_real_debugger_screenshot"
 ESTIMATES_PATH="target/criterion/${BENCH_NAME}/new/estimates.json"
@@ -36,8 +42,9 @@ import sys
 
 est_path = pathlib.Path("target/criterion/scan_real_debugger_screenshot/new/estimates.json")
 profile_path = pathlib.Path("crates/glyphnet-core/src/profile.rs")
-
 tolerance_pct = float(os.environ.get("SCANNER_BENCH_TOLERANCE_PCT", "10"))
+output_json = os.environ.get("SCANNER_BENCH_OUTPUT_JSON", "").strip()
+enforce_exit = os.environ.get("SCANNER_BENCH_ENFORCE_EXIT", "1") == "1"
 
 est = json.loads(est_path.read_text())
 median_ns = float(est["median"]["point_estimate"])
@@ -54,14 +61,27 @@ if not match:
 
 budget_ms = float(match.group(1))
 allowed_ms = budget_ms * (1.0 + tolerance_pct / 100.0)
+status = "pass" if median_ms <= allowed_ms else "fail"
 
 print(f"[scanner-perf] measured median: {median_ms:.3f} ms")
 print(f"[scanner-perf] profile budget:  {budget_ms:.3f} ms (RibbonPrint.benchmark.max_decode_ms)")
 print(f"[scanner-perf] allowed max:     {allowed_ms:.3f} ms (with {tolerance_pct:.1f}% tolerance)")
 
-if median_ms > allowed_ms:
-    print("[scanner-perf] FAIL: scanner latency regression detected", file=sys.stderr)
-    sys.exit(1)
+if output_json:
+    out_path = pathlib.Path(output_json)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps({
+        "status": status,
+        "median_ms": median_ms,
+        "budget_ms": budget_ms,
+        "allowed_ms": allowed_ms,
+        "tolerance_pct": tolerance_pct,
+    }, indent=2) + "\n")
 
-print("[scanner-perf] PASS: scanner latency within allowed threshold")
+if status == "fail":
+    print("[scanner-perf] FAIL: scanner latency regression detected", file=sys.stderr)
+    if enforce_exit:
+        sys.exit(1)
+else:
+    print("[scanner-perf] PASS: scanner latency within allowed threshold")
 PY

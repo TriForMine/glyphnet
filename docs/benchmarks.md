@@ -46,6 +46,14 @@ Run locally:
 scripts/check_scanner_perf.sh
 ```
 
+On pull requests, CI also runs the same check on the PR branch and on the PR
+base branch, then posts/updates a sticky PR comment with:
+
+- PR median latency
+- base median latency
+- delta in ms and %
+- current budget/allowed threshold and gate status
+
 Useful knobs for local/CI tuning:
 
 - `SCANNER_BENCH_TOLERANCE_PCT` (default `10`)

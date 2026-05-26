@@ -30,9 +30,58 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: scripts/check_scanner_perf.sh
+
+      - name: Check PR branch perf gate
+        run: scripts/check_scanner_perf.sh
+
+      - name: Capture PR benchmark metrics
+        if: github.event_name == 'pull_request'
+        run: SCANNER_BENCH_OUTPUT_JSON=target/scanner-perf/pr.json scripts/check_scanner_perf.sh --no-fail
+
+      - name: Capture base benchmark metrics
+        if: github.event_name == 'pull_request'
+        run: |
+          git worktree add /tmp/glyphnet-base origin/${{ github.base_ref }}
+          cp scripts/check_scanner_perf.sh /tmp/glyphnet-base/scripts/check_scanner_perf.sh
+          cd /tmp/glyphnet-base
+          SCANNER_BENCH_OUTPUT_JSON=target/scanner-perf/base.json ./scripts/check_scanner_perf.sh --no-fail
+
+      - name: Comment benchmark comparison on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const pr = JSON.parse(fs.readFileSync('target/scanner-perf/pr.json', 'utf8'));
+            const base = JSON.parse(fs.readFileSync('/tmp/glyphnet-base/target/scanner-perf/base.json', 'utf8'));
+            const delta = pr.median_ms - base.median_ms;
+            const deltaPct = base.median_ms === 0 ? 0 : (delta / base.median_ms) * 100;
+            const emoji = delta <= 0 ? '✅' : '⚠️';
+            const marker = '<!-- scanner-perf-comment -->';
+            const body = `${marker}
+## Scanner perf (RibbonPrint fixture)
+
+${emoji} **PR median:** ${pr.median_ms.toFixed(3)} ms
+- **Base median (${context.payload.pull_request.base.ref}):** ${base.median_ms.toFixed(3)} ms
+- **Delta (PR - base):** ${delta.toFixed(3)} ms (${deltaPct.toFixed(2)}%)
+- **Profile budget:** ${pr.budget_ms.toFixed(3)} ms
+- **Allowed (budget + ${pr.tolerance_pct.toFixed(1)}%):** ${pr.allowed_ms.toFixed(3)} ms
+- **Gate status:** ${pr.status.toUpperCase()}
+`;
+
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number, per_page: 100 });
+            const existing = comments.find(c => c.body && c.body.includes(marker) && c.user && c.user.type === 'Bot');
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
 
   wasm:
     name: wasm32 check
