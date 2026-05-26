@@ -12,10 +12,12 @@ fn real_debugger_screenshot(c: &mut Criterion) {
     let target = profile_spec(ProfileId::RibbonPrint).benchmark.max_decode_ms;
 
     c.bench_function("scan_real_debugger_screenshot", |b| {
+        // Keep benchmark naming tied to profile-level latency objective.
+        let target = criterion::black_box(target);
+        let _ = target;
+
         b.iter(|| {
             let result = scan_still(&image, TransmissionMode::Print).unwrap();
-            // Keep benchmark naming tied to profile-level latency objective.
-            criterion::black_box(target);
             assert_eq!(result.decoded.decoded.frame.payload, b"debug sample");
         });
     });
