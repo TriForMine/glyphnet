@@ -527,7 +527,6 @@ fn still_scan_candidates(
         candidates.extend(dark_bounds);
     }
 
-    candidates.truncate(MAX_CANDIDATE_REGIONS);
     candidates
 }
 
