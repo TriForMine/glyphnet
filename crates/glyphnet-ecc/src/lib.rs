@@ -183,10 +183,15 @@ pub fn verify_for_mode(
     encoded: &[u8],
     data_len: usize,
 ) -> bool {
-    match scheme_for_mode(mode, level) {
-        EccScheme::Parity => ParityCode::from_level(level, data_len).verify(encoded, data_len),
-        EccScheme::ReedSolomon => {
+    match mode {
+        TransmissionMode::Print => {
+            // Backward compatibility: accept legacy parity-encoded print fixtures
+            // while migrating new print encodes to Reed-Solomon.
             ReedSolomonCode::from_level(level, data_len).verify(encoded, data_len)
+                || ParityCode::from_level(level, data_len).verify(encoded, data_len)
+        }
+        TransmissionMode::Screen | TransmissionMode::Burst => {
+            ParityCode::from_level(level, data_len).verify(encoded, data_len)
         }
     }
 }
