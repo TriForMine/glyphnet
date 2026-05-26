@@ -2,6 +2,8 @@
 
 use glyphnet_core::TransmissionMode;
 use image::{DynamicImage, GrayImage, Luma};
+#[cfg(not(target_arch = "wasm32"))]
+use rayon::prelude::*;
 use thiserror::Error;
 
 /// Result type for CV operations.
@@ -176,24 +178,76 @@ pub fn adaptive_threshold(image: &GrayImage, radius: u32, bias: u8) -> Result<Gr
 
     let integral = integral_image(image);
     let mut out = GrayImage::new(image.width(), image.height());
-    for y in 0..image.height() {
-        for x in 0..image.width() {
-            let x0 = x.saturating_sub(radius);
-            let y0 = y.saturating_sub(radius);
-            let x1 = (x + radius).min(image.width() - 1);
-            let y1 = (y + radius).min(image.height() - 1);
-            let area = (x1 - x0 + 1) * (y1 - y0 + 1);
-            let sum = rect_sum(&integral, image.width(), x0, y0, x1, y1);
-            let mean = (sum / area) as u8;
-            let threshold = mean.saturating_sub(bias);
-            let value = if image.get_pixel(x, y).0[0] < threshold {
-                0
-            } else {
-                255
-            };
-            out.put_pixel(x, y, Luma([value]));
+    let area = image.width().saturating_mul(image.height());
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        if area >= 500_000 {
+            let width = image.width();
+            let height = image.height();
+            let src = image.as_raw();
+            out.as_mut()
+                .par_chunks_mut(width as usize)
+                .enumerate()
+                .for_each(|(row_index, row)| {
+                    let y = row_index as u32;
+                    for x in 0..width {
+                        let x0 = x.saturating_sub(radius);
+                        let y0 = y.saturating_sub(radius);
+                        let x1 = (x + radius).min(width - 1);
+                        let y1 = (y + radius).min(height - 1);
+                        let area = (x1 - x0 + 1) * (y1 - y0 + 1);
+                        let sum = rect_sum(&integral, width, x0, y0, x1, y1);
+                        let mean = (sum / area) as u8;
+                        let threshold = mean.saturating_sub(bias);
+                        let index = (y * width + x) as usize;
+                        row[x as usize] = if src[index] < threshold { 0 } else { 255 };
+                    }
+                });
+        } else {
+            for y in 0..image.height() {
+                for x in 0..image.width() {
+                    let x0 = x.saturating_sub(radius);
+                    let y0 = y.saturating_sub(radius);
+                    let x1 = (x + radius).min(image.width() - 1);
+                    let y1 = (y + radius).min(image.height() - 1);
+                    let area = (x1 - x0 + 1) * (y1 - y0 + 1);
+                    let sum = rect_sum(&integral, image.width(), x0, y0, x1, y1);
+                    let mean = (sum / area) as u8;
+                    let threshold = mean.saturating_sub(bias);
+                    let value = if image.get_pixel(x, y).0[0] < threshold {
+                        0
+                    } else {
+                        255
+                    };
+                    out.put_pixel(x, y, Luma([value]));
+                }
+            }
         }
     }
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        for y in 0..image.height() {
+            for x in 0..image.width() {
+                let x0 = x.saturating_sub(radius);
+                let y0 = y.saturating_sub(radius);
+                let x1 = (x + radius).min(image.width() - 1);
+                let y1 = (y + radius).min(image.height() - 1);
+                let area = (x1 - x0 + 1) * (y1 - y0 + 1);
+                let sum = rect_sum(&integral, image.width(), x0, y0, x1, y1);
+                let mean = (sum / area) as u8;
+                let threshold = mean.saturating_sub(bias);
+                let value = if image.get_pixel(x, y).0[0] < threshold {
+                    0
+                } else {
+                    255
+                };
+                out.put_pixel(x, y, Luma([value]));
+            }
+        }
+    }
+
     Ok(out)
 }
 

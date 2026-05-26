@@ -44,7 +44,7 @@ jobs:
       - name: Check PR branch perf gate
         if: github.event_name == 'pull_request'
         continue-on-error: true
-        run: SCANNER_BENCH_OUTPUT_JSON=target/scanner-perf/pr.json scripts/check_scanner_perf.sh
+        run: SCANNER_BENCH_NAMES=scan_generated_ribbon_canvas_small,scan_generated_ribbon_canvas_medium,scan_generated_ribbon_canvas_large,scan_real_debugger_screenshot SCANNER_BENCH_OUTPUT_JSON=target/scanner-perf/pr.json scripts/check_scanner_perf.sh
 
       - name: Capture base benchmark metrics
         if: always() && github.event_name == 'pull_request'
@@ -54,7 +54,7 @@ jobs:
           mkdir -p /tmp/glyphnet-base/scripts
           cp scripts/check_scanner_perf.sh /tmp/glyphnet-base/scripts/check_scanner_perf.sh
           cd /tmp/glyphnet-base
-          SCANNER_BENCH_OUTPUT_JSON=target/scanner-perf/base.json ./scripts/check_scanner_perf.sh --no-fail
+          SCANNER_BENCH_NAMES=scan_generated_ribbon_canvas_small,scan_generated_ribbon_canvas_medium,scan_generated_ribbon_canvas_large,scan_real_debugger_screenshot SCANNER_BENCH_OUTPUT_JSON=target/scanner-perf/base.json ./scripts/check_scanner_perf.sh --no-fail
 
       - name: Comment benchmark comparison on PR
         if: always() && github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork
@@ -70,32 +70,48 @@ jobs:
             const base = fs.existsSync(basePath)
               ? JSON.parse(fs.readFileSync(basePath, 'utf8'))
               : null;
-            const delta = pr && base ? pr.median_ms - base.median_ms : null;
-            const deltaPct = pr && base && base.median_ms !== 0 ? (delta / base.median_ms) * 100 : null;
-            const emoji = delta === null ? 'ℹ️' : delta <= 0 ? '✅' : '⚠️';
+            const toMap = payload => new Map((payload?.cases || []).map(c => [c.bench_name, c]));
+            const prMap = toMap(pr);
+            const baseMap = toMap(base);
+            const benchNames = Array.from(new Set([...prMap.keys(), ...baseMap.keys()]));
+            const overallEmoji = pr ? (pr.status === 'pass' ? '✅' : '⚠️') : 'ℹ️';
             const marker = '<!-- scanner-perf-comment -->';
+            const rows = benchNames.length === 0
+              ? ['| Benchmark | PR median (ms) | Base median (ms) | Delta (ms) | Delta % |',
+                 '|---|---:|---:|---:|---:|',
+                 '| unavailable | - | - | - | - |']
+              : [
+                  '| Benchmark | PR median (ms) | Base median (ms) | Delta (ms) | Delta % |',
+                  '|---|---:|---:|---:|---:|',
+                  ...benchNames.map(name => {
+                    const p = prMap.get(name);
+                    const b = baseMap.get(name);
+                    const prMs = p ? p.median_ms : null;
+                    const baseMs = b ? b.median_ms : null;
+                    const delta = (prMs != null && baseMs != null) ? (prMs - baseMs) : null;
+                    const deltaPct = (delta != null && baseMs !== 0) ? (delta / baseMs) * 100 : null;
+                    const prCell = prMs == null ? '-' : prMs.toFixed(3);
+                    const baseCell = baseMs == null ? '-' : baseMs.toFixed(3);
+                    const deltaCell = delta == null ? '-' : delta.toFixed(3);
+                    const deltaPctCell = deltaPct == null ? '-' : `${deltaPct.toFixed(2)}%`;
+                    return `| ${name} | ${prCell} | ${baseCell} | ${deltaCell} | ${deltaPctCell} |`;
+                  })
+                ];
             const body = [
               marker,
-              '## Scanner perf (RibbonPrint fixture)',
+              '## Scanner perf (RibbonPrint fixtures)',
               '',
               pr
-                ? `${emoji} **PR median:** ${pr.median_ms.toFixed(3)} ms`
-                : '⚠️ **PR median:** unavailable (PR benchmark did not produce target/scanner-perf/pr.json)',
-              base
-                ? `- **Base median (${context.payload.pull_request.base.ref}):** ${base.median_ms.toFixed(3)} ms`
-                : `- **Base median (${context.payload.pull_request.base.ref}):** unavailable (base benchmark did not produce ${basePath})`,
-              delta === null
-                ? '- **Delta (PR - base):** unavailable'
-                : `- **Delta (PR - base):** ${delta.toFixed(3)} ms (${deltaPct.toFixed(2)}%)`,
+                ? `${overallEmoji} **PR gate status:** ${pr.status.toUpperCase()}`
+                : '⚠️ **PR gate status:** unavailable (PR benchmark did not produce target/scanner-perf/pr.json)',
               pr
                 ? `- **Profile budget:** ${pr.budget_ms.toFixed(3)} ms`
                 : '- **Profile budget:** unavailable',
               pr
                 ? `- **Allowed (budget + ${pr.tolerance_pct.toFixed(1)}%):** ${pr.allowed_ms.toFixed(3)} ms`
                 : '- **Allowed threshold:** unavailable',
-              pr
-                ? `- **Gate status:** ${pr.status.toUpperCase()}`
-                : '- **Gate status:** unavailable',
+              '',
+              ...rows,
               '',
             ].join('\n');
 
