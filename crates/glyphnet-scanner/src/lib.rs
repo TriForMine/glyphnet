@@ -524,10 +524,19 @@ fn still_scan_candidates(
         let mut dark_bounds =
             ribbon_dark_bounds_candidates(bounds, padding, image_width, image_height);
         dark_bounds.truncate(MAX_DARK_BOUNDS_CANDIDATES);
-        candidates.extend(dark_bounds);
+
+        let dark_bounds_len = dark_bounds.len().min(MAX_CANDIDATE_REGIONS);
+        let non_dark_limit = MAX_CANDIDATE_REGIONS.saturating_sub(dark_bounds_len);
+        candidates.truncate(non_dark_limit);
+        candidates.extend(
+            dark_bounds
+                .into_iter()
+                .take(MAX_CANDIDATE_REGIONS.saturating_sub(candidates.len())),
+        );
+    } else {
+        candidates.truncate(MAX_CANDIDATE_REGIONS);
     }
 
-    candidates.truncate(MAX_CANDIDATE_REGIONS);
     candidates
 }
 
