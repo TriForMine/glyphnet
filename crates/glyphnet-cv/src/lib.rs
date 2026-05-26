@@ -23,6 +23,10 @@ pub enum CvError {
     WarpFailed,
 }
 
+/// Minimum image area where row-parallel adaptive thresholding is typically faster.
+#[cfg(not(target_arch = "wasm32"))]
+const PARALLEL_THRESHOLD_MIN_AREA: u32 = 500_000;
+
 /// 2D image-space point.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Point {
@@ -182,7 +186,7 @@ pub fn adaptive_threshold(image: &GrayImage, radius: u32, bias: u8) -> Result<Gr
     #[cfg(not(target_arch = "wasm32"))]
     {
         let area = image.width().saturating_mul(image.height());
-        if area >= 500_000 {
+        if area >= PARALLEL_THRESHOLD_MIN_AREA {
             let width = image.width();
             let height = image.height();
             let src = image.as_raw();
@@ -205,49 +209,42 @@ pub fn adaptive_threshold(image: &GrayImage, radius: u32, bias: u8) -> Result<Gr
                     }
                 });
         } else {
-            for y in 0..image.height() {
-                for x in 0..image.width() {
-                    let x0 = x.saturating_sub(radius);
-                    let y0 = y.saturating_sub(radius);
-                    let x1 = (x + radius).min(image.width() - 1);
-                    let y1 = (y + radius).min(image.height() - 1);
-                    let area = (x1 - x0 + 1) * (y1 - y0 + 1);
-                    let sum = rect_sum(&integral, image.width(), x0, y0, x1, y1);
-                    let mean = (sum / area) as u8;
-                    let threshold = mean.saturating_sub(bias);
-                    let value = if image.get_pixel(x, y).0[0] < threshold {
-                        0
-                    } else {
-                        255
-                    };
-                    out.put_pixel(x, y, Luma([value]));
-                }
-            }
+            adaptive_threshold_scalar(image, &integral, radius, bias, &mut out);
         }
     }
 
     #[cfg(target_arch = "wasm32")]
     {
-        let width = image.width();
-        let src = image.as_raw();
-        let out_raw = out.as_mut();
-        for y in 0..image.height() {
-            for x in 0..image.width() {
-                let x0 = x.saturating_sub(radius);
-                let y0 = y.saturating_sub(radius);
-                let x1 = (x + radius).min(image.width() - 1);
-                let y1 = (y + radius).min(image.height() - 1);
-                let area = (x1 - x0 + 1) * (y1 - y0 + 1);
-                let sum = rect_sum(&integral, image.width(), x0, y0, x1, y1);
-                let mean = (sum / area) as u8;
-                let threshold = mean.saturating_sub(bias);
-                let index = (y * width + x) as usize;
-                out_raw[index] = if src[index] < threshold { 0 } else { 255 };
-            }
-        }
+        adaptive_threshold_scalar(image, &integral, radius, bias, &mut out);
     }
 
     Ok(out)
+}
+
+fn adaptive_threshold_scalar(
+    image: &GrayImage,
+    integral: &[u32],
+    radius: u32,
+    bias: u8,
+    out: &mut GrayImage,
+) {
+    let width = image.width();
+    let src = image.as_raw();
+    let out_raw = out.as_mut();
+    for y in 0..image.height() {
+        for x in 0..image.width() {
+            let x0 = x.saturating_sub(radius);
+            let y0 = y.saturating_sub(radius);
+            let x1 = (x + radius).min(width - 1);
+            let y1 = (y + radius).min(image.height() - 1);
+            let area = (x1 - x0 + 1) * (y1 - y0 + 1);
+            let sum = rect_sum(integral, width, x0, y0, x1, y1);
+            let mean = (sum / area) as u8;
+            let threshold = mean.saturating_sub(bias);
+            let index = (y * width + x) as usize;
+            out_raw[index] = if src[index] < threshold { 0 } else { 255 };
+        }
+    }
 }
 
 /// Find coarse anchor candidates from a thresholded image.

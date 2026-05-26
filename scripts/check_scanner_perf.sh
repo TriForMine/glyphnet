@@ -23,6 +23,19 @@ else
   BENCH_NAME="${SCANNER_BENCH_NAME:-scan_generated_ribbon_canvas_medium}"
   BENCH_NAMES=("${BENCH_NAME}")
 fi
+
+NORMALIZED_BENCH_NAMES=()
+for name in "${BENCH_NAMES[@]}"; do
+  trimmed="$(echo "${name}" | xargs)"
+  if [[ -n "${trimmed}" ]]; then
+    NORMALIZED_BENCH_NAMES+=("${trimmed}")
+  fi
+done
+BENCH_NAMES=("${NORMALIZED_BENCH_NAMES[@]}")
+if [[ ${#BENCH_NAMES[@]} -eq 0 ]]; then
+  echo "[scanner-perf] ERROR: no valid benchmark names were provided" >&2
+  exit 2
+fi
 export SCANNER_BENCH_NAMES="$(IFS=,; echo "${BENCH_NAMES[*]}")"
 NON_GATING_RAW="${SCANNER_BENCH_NON_GATING:-}"
 if [[ -n "${NON_GATING_RAW}" ]]; then
@@ -35,13 +48,15 @@ export SCANNER_BENCH_NON_GATING="$(IFS=,; echo "${NON_GATING_BENCHES[*]}")"
 echo "[scanner-perf] running benchmarks: ${SCANNER_BENCH_NAMES}"
 echo "[scanner-perf] settings: warmup=${WARMUP_SECS}s measurement=${MEASURE_SECS}s sample_size=${SAMPLE_SIZE} tolerance=${TOLERANCE_PCT}%"
 
+BENCH_REGEX="^($(IFS='|'; echo "${BENCH_NAMES[*]}"))$"
+echo "[scanner-perf] running benchmark regex '${BENCH_REGEX}'"
+cargo bench -p glyphnet-scanner --bench scanner -- "${BENCH_REGEX}" \
+  --warm-up-time "${WARMUP_SECS}" \
+  --measurement-time "${MEASURE_SECS}" \
+  --sample-size "${SAMPLE_SIZE}"
+
 for BENCH_NAME in "${BENCH_NAMES[@]}"; do
   ESTIMATES_PATH="target/criterion/${BENCH_NAME}/new/estimates.json"
-  echo "[scanner-perf] running benchmark '${BENCH_NAME}'"
-  cargo bench -p glyphnet-scanner --bench scanner -- "^${BENCH_NAME}$" \
-    --warm-up-time "${WARMUP_SECS}" \
-    --measurement-time "${MEASURE_SECS}" \
-    --sample-size "${SAMPLE_SIZE}"
   if [[ ! -f "${ESTIMATES_PATH}" ]]; then
     echo "[scanner-perf] ERROR: criterion output missing at ${ESTIMATES_PATH}" >&2
     exit 2
