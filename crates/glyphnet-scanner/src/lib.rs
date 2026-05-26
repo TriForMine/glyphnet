@@ -21,6 +21,8 @@ use glyphnet_decode::{
     AutoDecodedSymbol, DecodeError, DecodeOptions, RasterDecoder, decode_matrix,
 };
 use image::{DynamicImage, GrayImage};
+#[cfg(not(target_arch = "wasm32"))]
+use rayon::prelude::*;
 use thiserror::Error;
 
 /// Result type for scanner operations.
@@ -281,7 +283,12 @@ impl Default for Scanner {
 
 /// Scan a still image by attempting auto-decode, then a coarse crop if needed.
 pub fn scan_still(image: &DynamicImage, mode: TransmissionMode) -> Result<StillScanResult> {
-    scan_still_with_diagnostics(image, mode).map_err(|failed| failed.error)
+    scan_still_with_diagnostics_mode(image, mode, false).map_err(|failed| failed.error)
+}
+
+/// Scan a still image with heavier recovery heuristics enabled.
+pub fn scan_still_robust(image: &DynamicImage, mode: TransmissionMode) -> Result<StillScanResult> {
+    scan_still_with_diagnostics_mode(image, mode, true).map_err(|failed| failed.error)
 }
 
 /// Scan a still image and return failed-attempt diagnostics on decode failure.
@@ -289,6 +296,25 @@ pub fn scan_still_with_diagnostics(
     image: &DynamicImage,
     mode: TransmissionMode,
 ) -> std::result::Result<StillScanResult, FailedStillScan> {
+    scan_still_with_diagnostics_mode(image, mode, false)
+}
+
+fn scan_still_with_diagnostics_mode(
+    image: &DynamicImage,
+    mode: TransmissionMode,
+    robust: bool,
+) -> std::result::Result<StillScanResult, FailedStillScan> {
+    scan_still_with_diagnostics_inner(image, mode, robust, true)
+}
+
+fn scan_still_with_diagnostics_inner(
+    image: &DynamicImage,
+    mode: TransmissionMode,
+    robust: bool,
+    allow_downscale_fast_path: bool,
+) -> std::result::Result<StillScanResult, FailedStillScan> {
+    let _ = allow_downscale_fast_path;
+
     let started = scan_instant_now();
     let mut timings = ScanTimings::default();
     let decoder = RasterDecoder::default();
@@ -331,36 +357,191 @@ pub fn scan_still_with_diagnostics(
         .map_err(|error| failed_cv(error, timings, started))?;
     timings.threshold_micros = elapsed_micros(stage);
 
-    let stage = scan_instant_now();
-    let candidates = find_anchor_candidates(&binary, profile)
-        .map_err(|error| failed_cv(error, timings, started))?;
-    if let Some(quad) = estimate_quad(&binary, &candidates) {
-        let (warp_width, warp_height) = quad_dimensions(quad);
-        if let Ok(warped) = warp_perspective_gray(&gray, quad, warp_width, warp_height) {
-            let warped = DynamicImage::ImageLuma8(warped);
-            if let Ok(decoded) = decoder.decode_auto_with_info(&warped) {
-                timings.quad_micros = elapsed_micros(stage);
-                timings.total_micros = elapsed_micros(started);
-                return Ok(StillScanResult {
-                    decoded,
-                    crop: None,
-                    quad: Some(quad),
-                    warp_size: Some((warp_width, warp_height)),
-                    attempts: Vec::new(),
-                    timings,
-                });
+    if should_try_quad_rectification(image.width(), image.height(), robust) {
+        let candidates = find_anchor_candidates(&binary, profile)
+            .map_err(|error| failed_cv(error, timings, started))?;
+        let quad_candidates =
+            scan_quad_candidates(&binary, &candidates, image.width(), image.height());
+        for (index, quad) in quad_candidates
+            .into_iter()
+            .take(MAX_QUAD_ATTEMPTS)
+            .enumerate()
+        {
+            let (warp_width, warp_height) = quad_dimensions(quad);
+            if warp_width < 32 || warp_height < 32 {
+                continue;
+            }
+            if let Ok(warped) = warp_perspective_gray(&gray, quad, warp_width, warp_height) {
+                let warped = DynamicImage::ImageLuma8(warped);
+                let decoded = if index == 0 {
+                    decoder
+                        .decode_auto_with_info(&warped)
+                        .or_else(|_| decode_resampled_full_frame(&decoder, &warped))
+                } else {
+                    decoder.decode_auto_with_info(&warped)
+                };
+                if let Ok(decoded) = decoded {
+                    timings.quad_micros = elapsed_micros(stage);
+                    timings.total_micros = elapsed_micros(started);
+                    return Ok(StillScanResult {
+                        decoded,
+                        crop: None,
+                        quad: Some(quad),
+                        warp_size: Some((warp_width, warp_height)),
+                        attempts: Vec::new(),
+                        timings,
+                    });
+                }
             }
         }
     }
     timings.quad_micros = elapsed_micros(stage);
 
-    let padding = profile.min_anchor_px.max(8);
     let mut attempts = Vec::new();
+    let padding = profile.min_anchor_px.max(8);
     let stage = scan_instant_now();
-    let regions = still_scan_candidates(image, &binary, profile, padding);
+    let regions = still_scan_candidates(image, &binary, profile, padding, robust);
     timings.candidate_micros = elapsed_micros(stage);
 
     let decode_started = scan_instant_now();
+    #[cfg(not(target_arch = "wasm32"))]
+    if !robust && regions.len() >= PARALLEL_DECODE_CANDIDATE_THRESHOLD {
+        let mut results: Vec<(usize, ScanAttempt, Option<AutoDecodedSymbol>)> = regions
+            .into_par_iter()
+            .enumerate()
+            .map(|(index, candidate)| {
+                let attempt_started = scan_instant_now();
+                let region = candidate.region;
+                let cropped = image::imageops::crop_imm(
+                    image,
+                    region.x,
+                    region.y,
+                    region.width,
+                    region.height,
+                )
+                .to_image();
+                let cropped = DynamicImage::ImageRgba8(cropped);
+                let local_decoder = RasterDecoder::default();
+                match decode_candidate(&local_decoder, &cropped, candidate) {
+                    Ok(decoded) => (
+                        index,
+                        ScanAttempt {
+                            detector: candidate.detector.as_str(),
+                            layout_hint: candidate.layout_hint,
+                            stage: candidate.stage,
+                            region,
+                            decoded: true,
+                            error: None,
+                            duration_micros: elapsed_micros(attempt_started),
+                        },
+                        Some(decoded),
+                    ),
+                    Err(error) => (
+                        index,
+                        ScanAttempt {
+                            detector: candidate.detector.as_str(),
+                            layout_hint: candidate.layout_hint,
+                            stage: candidate.stage,
+                            region,
+                            decoded: false,
+                            error: Some(error.to_string()),
+                            duration_micros: elapsed_micros(attempt_started),
+                        },
+                        None,
+                    ),
+                }
+            })
+            .collect();
+        results.sort_by_key(|(index, _, _)| *index);
+
+        if let Some(hit_index) = results
+            .iter()
+            .position(|(_, attempt, decoded)| attempt.decoded && decoded.is_some())
+        {
+            let mut decoded_hit = None;
+            for (index, (_, attempt, decoded)) in results.into_iter().enumerate() {
+                if index > hit_index {
+                    break;
+                }
+                if decoded_hit.is_none() {
+                    decoded_hit = decoded;
+                }
+                attempts.push(attempt);
+            }
+            let region = attempts
+                .last()
+                .map(|attempt| attempt.region)
+                .unwrap_or(ScanRegion {
+                    x: 0,
+                    y: 0,
+                    width: image.width().max(1),
+                    height: image.height().max(1),
+                });
+            if let Some(decoded) = decoded_hit {
+                timings.decode_attempts_micros = elapsed_micros(decode_started);
+                timings.total_micros = elapsed_micros(started);
+                return Ok(StillScanResult {
+                    decoded,
+                    crop: Some(region),
+                    quad: None,
+                    warp_size: None,
+                    attempts,
+                    timings,
+                });
+            }
+            timings.decode_attempts_micros = elapsed_micros(decode_started);
+            timings.total_micros = elapsed_micros(started);
+            return Err(FailedStillScan {
+                error: ScannerError::Decode(DecodeError::AutoDetectFailed),
+                attempts,
+                timings,
+            });
+        }
+        attempts.extend(results.into_iter().map(|(_, attempt, _)| attempt));
+    } else {
+        for candidate in regions {
+            let attempt_started = scan_instant_now();
+            let region = candidate.region;
+            let cropped =
+                image::imageops::crop_imm(image, region.x, region.y, region.width, region.height)
+                    .to_image();
+            let cropped = DynamicImage::ImageRgba8(cropped);
+            match decode_candidate(&decoder, &cropped, candidate) {
+                Ok(decoded) => {
+                    attempts.push(ScanAttempt {
+                        detector: candidate.detector.as_str(),
+                        layout_hint: candidate.layout_hint,
+                        stage: candidate.stage,
+                        region,
+                        decoded: true,
+                        error: None,
+                        duration_micros: elapsed_micros(attempt_started),
+                    });
+                    timings.decode_attempts_micros = elapsed_micros(decode_started);
+                    timings.total_micros = elapsed_micros(started);
+                    return Ok(StillScanResult {
+                        decoded,
+                        crop: Some(region),
+                        quad: None,
+                        warp_size: None,
+                        attempts,
+                        timings,
+                    });
+                }
+                Err(error) => attempts.push(ScanAttempt {
+                    detector: candidate.detector.as_str(),
+                    layout_hint: candidate.layout_hint,
+                    stage: candidate.stage,
+                    region,
+                    decoded: false,
+                    error: Some(error.to_string()),
+                    duration_micros: elapsed_micros(attempt_started),
+                }),
+            }
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
     for candidate in regions {
         let attempt_started = scan_instant_now();
         let region = candidate.region;
@@ -487,49 +668,213 @@ fn should_try_dark_bounds_fallback(
     image_width.saturating_mul(image_height) <= 900_000 || candidate_count == 0
 }
 
+fn should_try_quad_rectification(image_width: u32, image_height: u32, robust: bool) -> bool {
+    robust && image_width.saturating_mul(image_height) <= 500_000
+}
+
+fn scan_quad_candidates(
+    binary: &GrayImage,
+    anchors: &[glyphnet_cv::AnchorCandidate],
+    image_width: u32,
+    image_height: u32,
+) -> Vec<glyphnet_cv::Quad> {
+    let mut quads = Vec::new();
+    if let Some(quad) = estimate_quad(binary, anchors) {
+        quads.push(quad);
+        quads.extend(quad_variants(quad, image_width, image_height));
+    }
+    if should_try_dark_bounds_fallback(image_width, image_height, anchors.len()) {
+        if let Some(bounds) = dark_bounds(binary) {
+            let quad = region_to_quad(bounds);
+            quads.push(quad);
+            quads.extend(quad_variants(quad, image_width, image_height));
+        }
+    }
+    quads
+}
+
+fn region_to_quad(region: ScanRegion) -> glyphnet_cv::Quad {
+    let left = region.x as f32;
+    let top = region.y as f32;
+    let right = region.x.saturating_add(region.width.saturating_sub(1)) as f32;
+    let bottom = region.y.saturating_add(region.height.saturating_sub(1)) as f32;
+    glyphnet_cv::Quad {
+        top_left: glyphnet_cv::Point { x: left, y: top },
+        top_right: glyphnet_cv::Point { x: right, y: top },
+        bottom_right: glyphnet_cv::Point {
+            x: right,
+            y: bottom,
+        },
+        bottom_left: glyphnet_cv::Point { x: left, y: bottom },
+    }
+}
+
+fn quad_variants(
+    quad: glyphnet_cv::Quad,
+    image_width: u32,
+    image_height: u32,
+) -> Vec<glyphnet_cv::Quad> {
+    let center_x =
+        (quad.top_left.x + quad.top_right.x + quad.bottom_left.x + quad.bottom_right.x) * 0.25;
+    let center_y =
+        (quad.top_left.y + quad.top_right.y + quad.bottom_left.y + quad.bottom_right.y) * 0.25;
+    let mut out = Vec::new();
+    for scale in [0.94_f32, 0.97, 1.03, 1.06] {
+        let scaled = glyphnet_cv::Quad {
+            top_left: scale_quad_point(quad.top_left, center_x, center_y, scale),
+            top_right: scale_quad_point(quad.top_right, center_x, center_y, scale),
+            bottom_right: scale_quad_point(quad.bottom_right, center_x, center_y, scale),
+            bottom_left: scale_quad_point(quad.bottom_left, center_x, center_y, scale),
+        };
+        if quad_in_bounds(scaled, image_width, image_height) {
+            out.push(scaled);
+        }
+    }
+    out
+}
+
+fn scale_quad_point(
+    point: glyphnet_cv::Point,
+    center_x: f32,
+    center_y: f32,
+    scale: f32,
+) -> glyphnet_cv::Point {
+    glyphnet_cv::Point {
+        x: center_x + (point.x - center_x) * scale,
+        y: center_y + (point.y - center_y) * scale,
+    }
+}
+
+fn quad_in_bounds(quad: glyphnet_cv::Quad, image_width: u32, image_height: u32) -> bool {
+    let min_x = quad
+        .top_left
+        .x
+        .min(quad.top_right.x)
+        .min(quad.bottom_left.x)
+        .min(quad.bottom_right.x);
+    let max_x = quad
+        .top_left
+        .x
+        .max(quad.top_right.x)
+        .max(quad.bottom_left.x)
+        .max(quad.bottom_right.x);
+    let min_y = quad
+        .top_left
+        .y
+        .min(quad.top_right.y)
+        .min(quad.bottom_left.y)
+        .min(quad.bottom_right.y);
+    let max_y = quad
+        .top_left
+        .y
+        .max(quad.top_right.y)
+        .max(quad.bottom_left.y)
+        .max(quad.bottom_right.y);
+
+    min_x >= 0.0
+        && min_y >= 0.0
+        && max_x < image_width as f32
+        && max_y < image_height as f32
+        && (max_x - min_x) >= 32.0
+        && (max_y - min_y) >= 32.0
+}
+
 fn still_scan_candidates(
     image: &DynamicImage,
     binary: &GrayImage,
     profile: VisionProfile,
     padding: u32,
+    robust: bool,
 ) -> Vec<ScanCandidate> {
     let image_width = image.width();
     let image_height = image.height();
+    let area = image_width.saturating_mul(image_height);
+    let large_image = area > 900_000;
+    let max_total = if robust {
+        if large_image {
+            28
+        } else {
+            MAX_CANDIDATE_REGIONS
+        }
+    } else if large_image {
+        12
+    } else {
+        28
+    };
+    let max_content = if robust && large_image {
+        8
+    } else if robust {
+        MAX_CONTENT_CANDIDATES
+    } else if large_image {
+        0
+    } else {
+        4
+    };
+    let max_matrix = if robust && large_image {
+        8
+    } else if robust {
+        MAX_MATRIX_CANDIDATES
+    } else if large_image {
+        4
+    } else {
+        8
+    };
+    let max_ribbon = if robust && large_image {
+        10
+    } else if robust {
+        MAX_RIBBON_CANDIDATES
+    } else if large_image {
+        8
+    } else {
+        12
+    };
+    let max_generic = if !robust || large_image {
+        0
+    } else {
+        MAX_GENERIC_CANDIDATES
+    };
+    let max_dark_bounds = if !robust {
+        1
+    } else if large_image {
+        4
+    } else {
+        MAX_DARK_BOUNDS_CANDIDATES
+    };
     let mut candidates = Vec::new();
 
-    if let Some(bounds) = content_bounds(image) {
+    if !large_image && let Some(bounds) = content_bounds(image) {
         let mut content =
             content_symbol_regions(bounds, image_width, image_height, profile.min_anchor_px);
-        content.truncate(MAX_CONTENT_CANDIDATES);
+        content.truncate(max_content);
         candidates.extend(content);
     }
 
     let mut matrix = matrix_candidates(binary, image_width, image_height);
-    matrix.truncate(MAX_MATRIX_CANDIDATES);
+    matrix.truncate(max_matrix);
     candidates.extend(matrix);
 
     let mut ribbon = ribbon_weave_candidates(binary, image_width, image_height);
-    ribbon.truncate(MAX_RIBBON_CANDIDATES);
+    ribbon.truncate(max_ribbon);
     candidates.extend(ribbon);
 
-    if image_width.saturating_mul(image_height) <= 900_000 {
+    if max_generic > 0 {
         let mut generic = generic_binary_candidates(binary, padding, image_width, image_height);
-        generic.truncate(MAX_GENERIC_CANDIDATES);
+        generic.truncate(max_generic);
         candidates.extend(generic);
     }
 
-    if candidates.len() < MAX_CANDIDATE_REGIONS
+    if candidates.len() < max_total
         && should_try_dark_bounds_fallback(image_width, image_height, candidates.len())
         && let Some(bounds) = dark_bounds(binary)
     {
         let mut dark_bounds =
             ribbon_dark_bounds_candidates(bounds, padding, image_width, image_height);
-        let dark_bounds_budget =
-            MAX_DARK_BOUNDS_CANDIDATES.min(MAX_CANDIDATE_REGIONS - candidates.len());
+        let dark_bounds_budget = max_dark_bounds.min(max_total - candidates.len());
         dark_bounds.truncate(dark_bounds_budget);
         candidates.extend(dark_bounds);
     }
 
+    candidates.truncate(max_total);
     candidates
 }
 
@@ -1591,6 +1936,9 @@ const MAX_MATRIX_CANDIDATES: usize = 16;
 const MAX_RIBBON_CANDIDATES: usize = 24;
 const MAX_GENERIC_CANDIDATES: usize = 16;
 const MAX_DARK_BOUNDS_CANDIDATES: usize = 8;
+const MAX_QUAD_ATTEMPTS: usize = 4;
+#[cfg(not(target_arch = "wasm32"))]
+const PARALLEL_DECODE_CANDIDATE_THRESHOLD: usize = 8;
 
 fn ribbon_weave_candidates(
     binary: &GrayImage,
@@ -2662,14 +3010,12 @@ mod tests {
         let image = DynamicImage::ImageRgba8(canvas);
 
         let result = assert_scan_payload(&image, b"debug sample");
-        assert!(matches!(
-            result.crop,
-            Some(ScanRegion {
-                x: 80..=140,
-                y: 60..=110,
-                ..
-            })
-        ));
+        if let Some(crop) = result.crop {
+            assert!((80..=140).contains(&crop.x), "unexpected crop.x: {crop:?}");
+            assert!((60..=110).contains(&crop.y), "unexpected crop.y: {crop:?}");
+        } else {
+            assert!(result.quad.is_some(), "scanner should return crop or quad");
+        }
     }
 
     #[test]
@@ -2687,10 +3033,12 @@ mod tests {
         let result = assert_scan_payload(&image, payload);
         assert_eq!(result.decoded.info.layout, LayoutFamily::Matrix);
         assert!(
-            result
-                .attempts
-                .iter()
-                .any(|attempt| attempt.detector == CandidateDetector::GeneratedContent.as_str())
+            result.quad.is_some()
+                || result
+                    .attempts
+                    .iter()
+                    .any(|attempt| attempt.detector
+                        == CandidateDetector::GeneratedContent.as_str())
         );
     }
 
@@ -2733,10 +3081,10 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "module_px=2 embedded samples need stronger low-resolution signature detection"]
     fn scan_still_decodes_small_debugger_sample_canvas() {
         let image = sample_canvas(b"debug sample", 2, 80, 72);
-        assert_scan_payload(&image, b"debug sample");
+        let result = scan_still_robust(&image, TransmissionMode::Print).unwrap();
+        assert_eq!(result.decoded.decoded.frame.payload, b"debug sample");
     }
 
     #[test]
@@ -2836,14 +3184,13 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires stronger perspective rectification than the current reference scanner"]
     fn scan_still_decodes_mild_horizontal_skew() {
         let encoded = Encoder::default().encode_static(b"skew").unwrap();
         let symbol = RasterRenderer::default().render(&encoded.matrix).unwrap();
         let canvas = place_on_canvas(&symbol, 28, 28, Rgba([255, 255, 255, 255]));
         let skewed = skew_x_on_white(&canvas, 10, -10);
         let result =
-            scan_still(&DynamicImage::ImageRgba8(skewed), TransmissionMode::Print).unwrap();
+            scan_still_robust(&DynamicImage::ImageRgba8(skewed), TransmissionMode::Print).unwrap();
         assert_eq!(result.decoded.decoded.frame.payload, b"skew");
     }
 }

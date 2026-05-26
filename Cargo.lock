@@ -697,6 +697,7 @@ dependencies = [
  "image",
  "js-sys",
  "rand 0.8.6",
+ "rayon",
  "thiserror",
  "tokio",
  "tracing",
