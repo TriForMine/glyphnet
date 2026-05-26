@@ -145,7 +145,7 @@ mod tests {
     fn short_payloads_roundtrip() {
         let mut rng = StdRng::seed_from_u64(0x6759_7068_6e65_7473);
         let lengths = [0usize, 1, 2, 3, 7, 15, 31, 63, 95, 127, 191, 255];
-        for (index, len) in lengths.into_iter().enumerate() {
+        for len in lengths {
             let mut payload = vec![0u8; len];
             rng.fill_bytes(&mut payload);
             let frame = render_roundtrip(&payload).unwrap();
