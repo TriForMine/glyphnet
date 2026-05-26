@@ -17,8 +17,10 @@ if [[ "${1:-}" == "--no-fail" ]]; then
 fi
 export SCANNER_BENCH_ENFORCE_EXIT="${ENFORCE_EXIT}"
 
-BENCH_NAME="scan_real_debugger_screenshot"
+BENCH_NAME="${SCANNER_BENCH_NAME:-scan_real_debugger_screenshot}"
 ESTIMATES_PATH="target/criterion/${BENCH_NAME}/new/estimates.json"
+export SCANNER_BENCH_NAME="${BENCH_NAME}"
+export SCANNER_BENCH_ESTIMATES_PATH="${ESTIMATES_PATH}"
 
 echo "[scanner-perf] running benchmark '${BENCH_NAME}'"
 echo "[scanner-perf] settings: warmup=${WARMUP_SECS}s measurement=${MEASURE_SECS}s sample_size=${SAMPLE_SIZE} tolerance=${TOLERANCE_PCT}%"
@@ -40,7 +42,8 @@ import pathlib
 import re
 import sys
 
-est_path = pathlib.Path("target/criterion/scan_real_debugger_screenshot/new/estimates.json")
+bench_name = os.environ.get("SCANNER_BENCH_NAME", "scan_real_debugger_screenshot")
+est_path = pathlib.Path(os.environ.get("SCANNER_BENCH_ESTIMATES_PATH", f"target/criterion/{bench_name}/new/estimates.json"))
 profile_path = pathlib.Path("crates/glyphnet-core/src/profile.rs")
 tolerance_pct = float(os.environ.get("SCANNER_BENCH_TOLERANCE_PCT", "10"))
 output_json = os.environ.get("SCANNER_BENCH_OUTPUT_JSON", "").strip()

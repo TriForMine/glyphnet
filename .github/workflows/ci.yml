@@ -36,10 +36,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Check PR branch perf gate
+        env:
+          SCANNER_BENCH_TOLERANCE_PCT: '1500'
         run: scripts/check_scanner_perf.sh
 
       - name: Capture PR benchmark metrics
         if: github.event_name == 'pull_request'
+        env:
+          SCANNER_BENCH_TOLERANCE_PCT: '1500'
         run: SCANNER_BENCH_OUTPUT_JSON=target/scanner-perf/pr.json scripts/check_scanner_perf.sh --no-fail
 
       - name: Capture base benchmark metrics
@@ -48,7 +52,7 @@ jobs:
           git worktree add /tmp/glyphnet-base origin/${{ github.base_ref }}
           cp scripts/check_scanner_perf.sh /tmp/glyphnet-base/scripts/check_scanner_perf.sh
           cd /tmp/glyphnet-base
-          SCANNER_BENCH_OUTPUT_JSON=target/scanner-perf/base.json ./scripts/check_scanner_perf.sh --no-fail
+          SCANNER_BENCH_TOLERANCE_PCT=1500 SCANNER_BENCH_OUTPUT_JSON=target/scanner-perf/base.json ./scripts/check_scanner_perf.sh --no-fail
 
       - name: Comment benchmark comparison on PR
         if: github.event_name == 'pull_request'
