@@ -505,7 +505,7 @@ fn still_scan_candidates(
     }
 
     let mut matrix = matrix_candidates(binary, image_width, image_height);
-    matrix.truncate(MAX_MATRIX_CANDIDATES);
+    matrix.truncate(MAX_MATRIX_CANDIDATES.min(16));
     candidates.extend(matrix);
 
     let mut ribbon = ribbon_weave_candidates(binary, image_width, image_height);
