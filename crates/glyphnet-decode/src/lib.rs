@@ -4,7 +4,7 @@ use glyphnet_core::{
     Cell, Frame, FrameHeader, GlyphError, HEADER_LEN, LayoutFamily, Result as CoreResult,
     SymbolMatrix, bitstream, layout,
 };
-use glyphnet_ecc::{BlockCode, ParityCode};
+use glyphnet_ecc::verify_for_mode;
 use image::{DynamicImage, GrayImage};
 use thiserror::Error;
 
@@ -91,8 +91,12 @@ pub fn decode_matrix(matrix: &SymbolMatrix) -> Result<DecodedSymbol> {
     let sampled_bytes = bitstream::bits_to_bytes(&bits);
     let frame = Frame::decode(&sampled_bytes)?;
     let data_len = HEADER_LEN + frame.header.payload_len as usize;
-    let parity = ParityCode::from_level(frame.header.ecc_level, data_len);
-    if !parity.verify(&sampled_bytes, data_len) {
+    if !verify_for_mode(
+        frame.header.mode,
+        frame.header.ecc_level,
+        &sampled_bytes,
+        data_len,
+    ) {
         return Err(DecodeError::EccMismatch);
     }
     Ok(DecodedSymbol {

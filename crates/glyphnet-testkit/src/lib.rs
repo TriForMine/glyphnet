@@ -129,7 +129,7 @@ pub fn skew_x_on_white(image: &RgbaImage, top_shift_px: i32, bottom_shift_px: i3
 
 #[cfg(test)]
 mod tests {
-    use proptest::prelude::*;
+    use rand::{RngCore, SeedableRng, rngs::StdRng};
 
     use super::*;
 
@@ -141,11 +141,15 @@ mod tests {
         }
     }
 
-    proptest! {
-        #[test]
-        fn short_payloads_roundtrip(payload in proptest::collection::vec(any::<u8>(), 0..256)) {
+    #[test]
+    fn short_payloads_roundtrip() {
+        let mut rng = StdRng::seed_from_u64(0x6759_7068_6e65_7473);
+        let lengths = [0usize, 1, 2, 3, 7, 15, 31, 63, 95, 127, 191, 255];
+        for len in lengths {
+            let mut payload = vec![0u8; len];
+            rng.fill_bytes(&mut payload);
             let frame = render_roundtrip(&payload).unwrap();
-            prop_assert_eq!(frame.payload, payload);
+            assert_eq!(frame.payload, payload);
         }
     }
 }

@@ -11,6 +11,7 @@ readme.workspace = true
 
 [dependencies]
 glyphnet-core = { path = "../glyphnet-core", version = "0.1.0" }
+reed-solomon-erasure = "6"
 thiserror.workspace = true
 
 [features]
