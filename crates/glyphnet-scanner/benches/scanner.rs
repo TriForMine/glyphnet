@@ -1,5 +1,5 @@
 use criterion::{Criterion, criterion_group, criterion_main};
-use glyphnet_core::{LayoutFamily, TransmissionMode};
+use glyphnet_core::{LayoutFamily, ProfileId, TransmissionMode, profile_spec};
 use glyphnet_encode::{Encoder, EncoderConfig};
 use glyphnet_render::{RasterRenderer, RenderOptions};
 use glyphnet_scanner::scan_still;
@@ -9,7 +9,13 @@ fn real_debugger_screenshot(c: &mut Criterion) {
     let image =
         image::load_from_memory(include_bytes!("../fixtures/screenshot-debug-sample.png")).unwrap();
 
+    let target = profile_spec(ProfileId::RibbonPrint).benchmark.max_decode_ms;
+
     c.bench_function("scan_real_debugger_screenshot", |b| {
+        // Keep benchmark naming tied to profile-level latency objective.
+        let target = criterion::black_box(target);
+        let _ = target;
+
         b.iter(|| {
             let result = scan_still(&image, TransmissionMode::Print).unwrap();
             assert_eq!(result.decoded.decoded.frame.payload, b"debug sample");
