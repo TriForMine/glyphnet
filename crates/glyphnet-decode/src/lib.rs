@@ -710,7 +710,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_matrix_recovers_single_byte_corruption_with_parity() {
+    fn decode_matrix_recovers_parity_tail_corruption_with_parity_mode() {
         let encoded = Encoder::new(EncoderConfig {
             mode: glyphnet_core::TransmissionMode::Screen,
             ..EncoderConfig::default()
@@ -718,13 +718,15 @@ mod tests {
         .encode_static(b"recover-me")
         .unwrap();
         let mut matrix = encoded.matrix.clone();
-        let mut bits = bitstream::bytes_to_bits(&encoded.codewords);
-        bits[HEADER_LEN * 8 + 11] = !bits[HEADER_LEN * 8 + 11];
+        let mut bytes = encoded.codewords.clone();
+        let corrupt_index = bytes.len() - 1;
+        bytes[corrupt_index] ^= 0x01;
+        let bits = bitstream::bytes_to_bits(&bytes);
         matrix.write_data_bits(bits);
 
         let decoded = decode_matrix(&matrix).unwrap();
         assert_eq!(decoded.frame.payload, b"recover-me");
-        assert_eq!(decoded.recovery.method, RecoveryMethod::ParityByteSearch);
+        assert_eq!(decoded.recovery.method, RecoveryMethod::ParityTailRebuild);
         assert!(decoded.recovery.recovered);
     }
 
