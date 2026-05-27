@@ -7,6 +7,7 @@ use glyphnet_render::RasterRenderer;
 use image::{DynamicImage, Rgba, RgbaImage};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use thiserror::Error;
 
 /// Errors returned by reusable testkit workflows.
@@ -27,6 +28,9 @@ pub enum TestkitError {
     /// Fixture corpus manifest semantic validation error.
     #[error("invalid fixture corpus: {0}")]
     InvalidCorpus(&'static str),
+    /// Fixture path listed in manifest does not exist.
+    #[error("fixture path does not exist: {0}")]
+    MissingFixturePath(String),
 }
 
 /// Supported fixture corpus categories.
@@ -52,6 +56,9 @@ pub struct FixtureManifestEntry {
     pub path: String,
     /// Human-readable short description.
     pub description: String,
+    /// Whether this fixture is tracked but not yet available on disk.
+    #[serde(default)]
+    pub pending: bool,
 }
 
 /// Versioned fixture corpus manifest.
@@ -66,11 +73,20 @@ pub struct FixtureCorpusManifest {
 }
 
 impl FixtureCorpusManifest {
+    /// Embedded default fixture corpus manifest JSON.
+    pub const DEFAULT_MANIFEST_JSON: &'static str =
+        include_str!("../fixtures/corpus/manifest.v1.json");
+
     /// Parse and validate a fixture corpus manifest from JSON.
     pub fn from_json(json: &str) -> Result<Self, TestkitError> {
         let manifest: Self = serde_json::from_str(json)?;
         manifest.validate()?;
         Ok(manifest)
+    }
+
+    /// Load the embedded default fixture corpus manifest.
+    pub fn default_manifest() -> Result<Self, TestkitError> {
+        Self::from_json(Self::DEFAULT_MANIFEST_JSON)
     }
 
     /// Validate basic manifest invariants.
@@ -108,6 +124,56 @@ impl FixtureCorpusManifest {
                     "entry description must not be empty",
                 ));
             }
+        }
+        Ok(())
+    }
+
+    /// Validate that all fixture paths listed in the manifest exist on disk.
+    pub fn validate_fixture_paths(
+        &self,
+        corpus_root: impl AsRef<Path>,
+    ) -> Result<(), TestkitError> {
+        let corpus_root = corpus_root.as_ref();
+        for entry in &self.entries {
+            let path = corpus_root.join(&entry.path);
+            if entry.pending {
+                continue;
+            }
+            if !path.exists() {
+                return Err(TestkitError::MissingFixturePath(
+                    path.to_string_lossy().into_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate active fixture files are non-empty and decodable PNG/JPEG images.
+    pub fn validate_fixture_images(
+        &self,
+        corpus_root: impl AsRef<Path>,
+    ) -> Result<(), TestkitError> {
+        let corpus_root = corpus_root.as_ref();
+        for entry in &self.entries {
+            if entry.pending {
+                continue;
+            }
+            let path = corpus_root.join(&entry.path);
+            let metadata = std::fs::metadata(&path).map_err(|_| {
+                TestkitError::MissingFixturePath(path.to_string_lossy().into_owned())
+            })?;
+            if metadata.len() == 0 {
+                return Err(TestkitError::InvalidCorpus(
+                    "fixture file must be non-empty",
+                ));
+            }
+            image::ImageReader::open(&path)
+                .ok()
+                .and_then(|reader| reader.with_guessed_format().ok())
+                .and_then(|reader| reader.decode().ok())
+                .ok_or(TestkitError::InvalidCorpus(
+                    "fixture file must be a decodable image",
+                ))?;
         }
         Ok(())
     }
@@ -221,6 +287,7 @@ pub fn skew_x_on_white(image: &RgbaImage, top_shift_px: i32, bottom_shift_px: i3
 #[cfg(test)]
 mod tests {
     use rand::{RngCore, SeedableRng, rngs::StdRng};
+    use std::path::Path;
 
     use super::*;
 
@@ -254,19 +321,22 @@ mod tests {
                     "id": "synthetic-ribbon-clean-001",
                     "category": "synthetic",
                     "path": "synthetic/ribbon/clean-001.png",
-                    "description": "Generated clean ribbon fixture."
+                    "description": "Generated clean ribbon fixture.",
+                    "pending": false
                 },
                 {
                     "id": "real-debugger-screenshot-001",
                     "category": "real",
                     "path": "real/debugger/screenshot-001.png",
-                    "description": "Captured debugger screenshot fixture."
+                    "description": "Captured debugger screenshot fixture.",
+                    "pending": true
                 },
                 {
                     "id": "negative-ui-clutter-001",
                     "category": "hard_negative",
                     "path": "hard_negative/ui/clutter-001.png",
-                    "description": "No symbol present; used for false-positive checks."
+                    "description": "No symbol present; used for false-positive checks.",
+                    "pending": true
                 }
             ]
         }"#;
@@ -300,5 +370,19 @@ mod tests {
             error,
             TestkitError::InvalidCorpus("entry id must be unique")
         ));
+    }
+
+    #[test]
+    fn default_manifest_paths_exist() {
+        let manifest = FixtureCorpusManifest::default_manifest().unwrap();
+        let corpus_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/corpus");
+        manifest.validate_fixture_paths(corpus_root).unwrap();
+    }
+
+    #[test]
+    fn default_manifest_active_images_decode() {
+        let manifest = FixtureCorpusManifest::default_manifest().unwrap();
+        let corpus_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/corpus");
+        manifest.validate_fixture_images(corpus_root).unwrap();
     }
 }

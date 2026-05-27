@@ -6,19 +6,43 @@
       "id": "synthetic-ribbon-clean-001",
       "category": "synthetic",
       "path": "synthetic/ribbon/clean-001.png",
+      "pending": false,
       "description": "Generated clean RibbonWeave symbol for baseline decode."
     },
     {
       "id": "real-debugger-screenshot-001",
       "category": "real",
       "path": "real/debugger/screenshot-001.png",
+      "pending": false,
       "description": "Captured debugger screenshot fixture used by scanner regression."
     },
     {
       "id": "negative-ui-clutter-001",
       "category": "hard_negative",
       "path": "hard_negative/ui/clutter-001.png",
+      "pending": false,
       "description": "No-symbol UI clutter sample for false-positive regression checks."
+    },
+    {
+      "id": "real-print-clean-001",
+      "category": "real",
+      "path": "real/print/print-clean-001.jpg",
+      "pending": false,
+      "description": "Printed ribbon symbol photo, clean lighting and framing."
+    },
+    {
+      "id": "real-print-angle-001",
+      "category": "real",
+      "path": "real/print/print-angle-001.jpg",
+      "pending": false,
+      "description": "Printed ribbon symbol photo with mild perspective tilt."
+    },
+    {
+      "id": "real-print-hard-001",
+      "category": "real",
+      "path": "real/print/print-hard-001.jpg",
+      "pending": false,
+      "description": "Printed ribbon symbol photo with strong blur and clutter."
     }
   ]
 }
