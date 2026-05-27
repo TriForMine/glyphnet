@@ -173,6 +173,45 @@ impl ReedSolomonCode {
         recovered[missing_index] = recovered_data_byte;
         Some(recovered)
     }
+
+    fn recover_data_shards(
+        self,
+        encoded: &[u8],
+        data_len: usize,
+        missing_indexes: &[usize],
+    ) -> Option<Vec<u8>> {
+        if missing_indexes.is_empty()
+            || missing_indexes.iter().any(|&index| index >= data_len)
+            || encoded.len() < data_len + self.parity_shards
+        {
+            return None;
+        }
+        if !self.is_supported(data_len) || missing_indexes.len() > self.parity_shards {
+            return None;
+        }
+        let rs = ReedSolomon::new(data_len, self.parity_shards).ok()?;
+        let mut missing = vec![false; data_len];
+        for &index in missing_indexes {
+            missing[index] = true;
+        }
+        let mut shards: Vec<Option<Vec<u8>>> = Vec::with_capacity(data_len + self.parity_shards);
+        for (index, value) in encoded.iter().enumerate().take(data_len) {
+            if missing[index] {
+                shards.push(None);
+            } else {
+                shards.push(Some(vec![*value]));
+            }
+        }
+        for index in 0..self.parity_shards {
+            shards.push(Some(vec![encoded[data_len + index]]));
+        }
+        rs.reconstruct(&mut shards).ok()?;
+        let mut recovered = encoded.to_vec();
+        for &missing_index in missing_indexes {
+            recovered[missing_index] = shards[missing_index].as_ref()?.first().copied()?;
+        }
+        Some(recovered)
+    }
 }
 
 impl BlockCode for ReedSolomonCode {
@@ -321,6 +360,41 @@ pub fn try_recover_for_mode_with_suspects(
                         return None;
                     }
                     if let Some(candidate) = rs.recover_one_data_shard(encoded, data_len, index)
+                        && rs.verify(&candidate, data_len)
+                        && Frame::decode(&candidate).is_ok()
+                    {
+                        return Some(candidate);
+                    }
+                }
+            }
+            let mut suspect_pool = Vec::new();
+            if suspects.is_empty() {
+                suspect_pool.extend(0..data_len);
+            } else {
+                for &index in suspects {
+                    if index < data_len && !suspect_pool.contains(&index) {
+                        suspect_pool.push(index);
+                    }
+                }
+                if suspect_pool.len() < 2 {
+                    for index in 0..data_len {
+                        if !suspect_pool.contains(&index) {
+                            suspect_pool.push(index);
+                        }
+                        if suspect_pool.len() >= 8 {
+                            break;
+                        }
+                    }
+                }
+            }
+            for i in 0..suspect_pool.len() {
+                for j in (i + 1)..suspect_pool.len() {
+                    attempts += 1;
+                    if attempts > max_attempts {
+                        return None;
+                    }
+                    let pair = [suspect_pool[i], suspect_pool[j]];
+                    if let Some(candidate) = rs.recover_data_shards(encoded, data_len, &pair)
                         && rs.verify(&candidate, data_len)
                         && Frame::decode(&candidate).is_ok()
                     {
@@ -699,6 +773,45 @@ mod tests {
             wire.len(),
             &[8],
             16,
+        )
+        .unwrap();
+        assert!(verify_for_mode(
+            TransmissionMode::Print,
+            EccLevel::High,
+            &recovered,
+            wire.len(),
+        ));
+        assert_eq!(&recovered[..wire.len()], wire.as_slice());
+    }
+
+    #[test]
+    fn print_mode_rs_recovery_fixes_two_data_byte_corruptions() {
+        let frame = Frame::new(
+            TransmissionMode::Print,
+            EccLevel::High,
+            0,
+            1,
+            99,
+            b"print-rs-two".to_vec(),
+        )
+        .unwrap();
+        let wire = frame.encode();
+        let mut encoded = encode_for_mode(TransmissionMode::Print, EccLevel::High, &wire);
+        encoded[8] ^= 0x66;
+        encoded[12] ^= 0x3a;
+        assert!(!verify_for_mode(
+            TransmissionMode::Print,
+            EccLevel::High,
+            &encoded,
+            wire.len(),
+        ));
+        let recovered = try_recover_for_mode_with_suspects(
+            TransmissionMode::Print,
+            EccLevel::High,
+            &encoded,
+            wire.len(),
+            &[8, 12],
+            128,
         )
         .unwrap();
         assert!(verify_for_mode(
