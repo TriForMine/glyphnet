@@ -9,11 +9,11 @@ use std::time::Instant as ScanInstant;
 #[derive(Debug, Clone, Copy)]
 struct ScanInstant(f64);
 
+#[cfg(test)]
+use glyphnet_core::layout;
 use glyphnet_core::{Frame, TransmissionMode};
 #[cfg(test)]
 use glyphnet_core::{HEADER_LEN, LayoutFamily, SymbolMatrix};
-#[cfg(test)]
-use glyphnet_core::layout;
 use glyphnet_cv::{
     VisionProfile, adaptive_threshold, estimate_quad, find_anchor_candidates, grayscale,
     quad_dimensions, warp_perspective_gray,
