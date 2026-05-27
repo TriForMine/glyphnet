@@ -708,4 +708,21 @@ mod tests {
         let decoded = decode_matrix(&matrix).unwrap();
         assert_eq!(decoded.frame.payload, b"recover-me");
     }
+
+    #[test]
+    fn decode_matrix_recovers_single_byte_corruption_with_print_rs() {
+        let encoded = Encoder::new(EncoderConfig {
+            mode: glyphnet_core::TransmissionMode::Print,
+            ..EncoderConfig::default()
+        })
+        .encode_static(b"recover-print-rs")
+        .unwrap();
+        let mut matrix = encoded.matrix.clone();
+        let mut bits = bitstream::bytes_to_bits(&encoded.codewords);
+        bits[HEADER_LEN * 8 + 13] = !bits[HEADER_LEN * 8 + 13];
+        matrix.write_data_bits(bits);
+
+        let decoded = decode_matrix(&matrix).unwrap();
+        assert_eq!(decoded.frame.payload, b"recover-print-rs");
+    }
 }

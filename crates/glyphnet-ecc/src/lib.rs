@@ -142,6 +142,37 @@ impl ReedSolomonCode {
                 .collect::<Vec<u8>>(),
         )
     }
+
+    fn recover_one_data_shard(
+        self,
+        encoded: &[u8],
+        data_len: usize,
+        missing_index: usize,
+    ) -> Option<Vec<u8>> {
+        if missing_index >= data_len || encoded.len() < data_len + self.parity_shards {
+            return None;
+        }
+        if !self.is_supported(data_len) {
+            return None;
+        }
+        let rs = ReedSolomon::new(data_len, self.parity_shards).ok()?;
+        let mut shards: Vec<Option<Vec<u8>>> = Vec::with_capacity(data_len + self.parity_shards);
+        for (index, value) in encoded.iter().enumerate().take(data_len) {
+            if index == missing_index {
+                shards.push(None);
+            } else {
+                shards.push(Some(vec![*value]));
+            }
+        }
+        for index in 0..self.parity_shards {
+            shards.push(Some(vec![encoded[data_len + index]]));
+        }
+        rs.reconstruct(&mut shards).ok()?;
+        let recovered_data_byte = shards[missing_index].as_ref()?.first().copied()?;
+        let mut recovered = encoded.to_vec();
+        recovered[missing_index] = recovered_data_byte;
+        Some(recovered)
+    }
 }
 
 impl BlockCode for ReedSolomonCode {
@@ -273,6 +304,47 @@ pub fn try_recover_for_mode_with_suspects(
 ) -> Option<Vec<u8>> {
     if encoded.len() < data_len {
         return None;
+    }
+
+    // Print mode: attempt actual Reed-Solomon one-erasure recovery first when
+    // this frame size is supported by the byte-shard RS layout.
+    if matches!(mode, TransmissionMode::Print) {
+        let rs = ReedSolomonCode::from_level(level, data_len);
+        if rs.is_supported(data_len) {
+            let mut attempts = 0usize;
+            let mut tried_index = vec![false; data_len];
+            for &index in suspects {
+                if index < data_len {
+                    tried_index[index] = true;
+                    attempts += 1;
+                    if attempts > max_attempts {
+                        return None;
+                    }
+                    if let Some(candidate) = rs.recover_one_data_shard(encoded, data_len, index)
+                        && rs.verify(&candidate, data_len)
+                        && Frame::decode(&candidate).is_ok()
+                    {
+                        return Some(candidate);
+                    }
+                }
+            }
+            for (index, already_tried) in tried_index.iter().enumerate().take(data_len) {
+                if *already_tried {
+                    continue;
+                }
+                attempts += 1;
+                if attempts > max_attempts {
+                    return None;
+                }
+                if let Some(candidate) = rs.recover_one_data_shard(encoded, data_len, index)
+                    && rs.verify(&candidate, data_len)
+                    && Frame::decode(&candidate).is_ok()
+                {
+                    return Some(candidate);
+                }
+            }
+            return None;
+        }
     }
 
     let parity = ParityCode::from_level(level, data_len);
@@ -598,6 +670,44 @@ mod tests {
             512,
         );
         assert!(hit.is_some());
+    }
+
+    #[test]
+    fn print_mode_rs_recovery_fixes_single_data_byte_corruption() {
+        let frame = Frame::new(
+            TransmissionMode::Print,
+            EccLevel::High,
+            0,
+            1,
+            91,
+            b"print-rs".to_vec(),
+        )
+        .unwrap();
+        let wire = frame.encode();
+        let mut encoded = encode_for_mode(TransmissionMode::Print, EccLevel::High, &wire);
+        encoded[8] ^= 0x66;
+        assert!(!verify_for_mode(
+            TransmissionMode::Print,
+            EccLevel::High,
+            &encoded,
+            wire.len(),
+        ));
+        let recovered = try_recover_for_mode_with_suspects(
+            TransmissionMode::Print,
+            EccLevel::High,
+            &encoded,
+            wire.len(),
+            &[8],
+            16,
+        )
+        .unwrap();
+        assert!(verify_for_mode(
+            TransmissionMode::Print,
+            EccLevel::High,
+            &recovered,
+            wire.len(),
+        ));
+        assert_eq!(&recovered[..wire.len()], wire.as_slice());
     }
 
     #[test]
