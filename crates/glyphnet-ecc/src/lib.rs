@@ -255,6 +255,22 @@ pub fn try_recover_for_mode(
     encoded: &[u8],
     data_len: usize,
 ) -> Option<Vec<u8>> {
+    try_recover_for_mode_with_suspects(mode, level, encoded, data_len, &[], usize::MAX)
+}
+
+/// Attempt to recover encoded bytes with optional suspect-byte prioritization.
+///
+/// `suspects` should contain likely-corrupted byte indexes in the data region.
+/// Recovery will try these first, then continue with full search until
+/// `max_attempts` candidate mutations have been evaluated.
+pub fn try_recover_for_mode_with_suspects(
+    mode: TransmissionMode,
+    level: EccLevel,
+    encoded: &[u8],
+    data_len: usize,
+    suspects: &[usize],
+    max_attempts: usize,
+) -> Option<Vec<u8>> {
     if encoded.len() < data_len {
         return None;
     }
@@ -283,12 +299,43 @@ pub fn try_recover_for_mode(
     }
 
     // Recovery path: brute-force one corrupted data byte.
+    let mut attempts = 0usize;
     let mut candidate = encoded.to_vec();
+    let mut tried_index = vec![false; data_len];
+
+    for &index in suspects {
+        if index < data_len {
+            tried_index[index] = true;
+            let original = candidate[index];
+            for value in 0u8..=u8::MAX {
+                if value == original {
+                    continue;
+                }
+                attempts += 1;
+                if attempts > max_attempts {
+                    return None;
+                }
+                candidate[index] = value;
+                if parity.verify(&candidate, data_len) && Frame::decode(&candidate).is_ok() {
+                    return Some(candidate);
+                }
+            }
+            candidate[index] = original;
+        }
+    }
+
     for index in 0..data_len {
+        if tried_index[index] {
+            continue;
+        }
         let original = candidate[index];
         for value in 0u8..=u8::MAX {
             if value == original {
                 continue;
+            }
+            attempts += 1;
+            if attempts > max_attempts {
+                return None;
             }
             candidate[index] = value;
             if parity.verify(&candidate, data_len) && Frame::decode(&candidate).is_ok() {
@@ -517,6 +564,40 @@ mod tests {
             wire.len(),
         ));
         assert_eq!(&recovered[..wire.len()], wire.as_slice());
+    }
+
+    #[test]
+    fn prioritized_recovery_respects_attempt_budget() {
+        let frame = Frame::new(
+            TransmissionMode::Screen,
+            EccLevel::High,
+            0,
+            1,
+            77,
+            b"budgeted-recovery".to_vec(),
+        )
+        .unwrap();
+        let wire = frame.encode();
+        let mut encoded = encode_for_mode(TransmissionMode::Screen, EccLevel::High, &wire);
+        encoded[10] ^= 0x44;
+        let no_hit = try_recover_for_mode_with_suspects(
+            TransmissionMode::Screen,
+            EccLevel::High,
+            &encoded,
+            wire.len(),
+            &[0],
+            32,
+        );
+        assert!(no_hit.is_none());
+        let hit = try_recover_for_mode_with_suspects(
+            TransmissionMode::Screen,
+            EccLevel::High,
+            &encoded,
+            wire.len(),
+            &[10],
+            512,
+        );
+        assert!(hit.is_some());
     }
 
     #[test]
