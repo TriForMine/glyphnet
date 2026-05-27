@@ -48,8 +48,8 @@ GlyphNet's default `RibbonWeave` profile is designed to be visually distinct:
 - phase traces provide synchronization without row/column finder lines;
 - the rendered artifact looks closer to a woven signal strip than a 2D barcode.
 
-The square `Matrix` layout exists only as a compatibility and benchmarking
-baseline. User-facing tools default to `RibbonWeave`.
+The square `Matrix` layout is the reliability-first baseline for scan quality
+and benchmark truth. User-facing tools still default to `RibbonWeave`.
 
 ## Protocol Profiles
 
@@ -61,7 +61,7 @@ GlyphNet has named profiles instead of one universal square symbol:
 | `spectral-screen` | `SpectralMesh` | phone/webcam scanning from displays | interleaved dark blue, teal, and violet lanes |
 | `pulse-burst` | `PulseStream` | animated high-speed optical transfer | temporal color lanes and wide pulse strips |
 | `constellation-print` | `Constellation` | experimental robust print | off-corner halo anchors |
-| `matrix-compat` | `Matrix` | benchmarks only | square baseline for comparison |
+| `matrix-compat` | `Matrix` | reliability-first baseline and benchmarks | square baseline for comparison |
 
 The first three are the main product shapes. `matrix-compat` is deliberately a
 baseline so benchmark reports can say how much density, robustness, or visual
@@ -142,6 +142,13 @@ default passing suite yet:
 
 See ignored scanner tests in `crates/glyphnet-scanner/src/lib.rs` for exact
 tracked scenarios and rationale comments.
+
+## Measurement Discipline
+
+- Public reliability claims should be based on `Matrix` baseline metrics first.
+- `RibbonWeave` claims should be scoped to wide-format/aesthetic scenarios.
+- Performance and success-rate claims should be reported as PR-vs-base deltas on
+  versioned fixtures (synthetic, real captures, and hard negatives).
 
 ## Engineering Workflow
 

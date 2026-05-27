@@ -18,6 +18,15 @@ cover every use case well. The shared protocol, frame header, ECC layer,
 renderer options, scanner diagnostics, and benchmark harness should be common;
 layout detection and sampling should be layout-specific.
 
+## Execution Order
+
+- Reliability-first baseline first: `Matrix` is the public robustness baseline.
+- Wide aesthetic format second: `RibbonWeave` remains first-class but is not the
+  default benchmark for universal reliability claims.
+- Color and burst are advanced profiles with explicit environmental
+  preconditions and fallback behavior.
+- New layouts are added only when they improve measurable target use cases.
+
 ## Product Profiles
 
 ### Matrix Primary
@@ -33,7 +42,7 @@ Use cases:
 - camera scanning from print and screens;
 - baseline comparison against QR/Data Matrix style scanners.
 
-Why it matters: this should become the reliability-first profile. It can use
+Why it matters: this is the reliability-first profile. It can use
 strong, obvious finder/timing patterns, dynamic geometry inference, and
 conservative monochrome decoding. If GlyphNet cannot beat QR here, it should at
 least be close enough to act as a compatibility and benchmark baseline.
@@ -54,7 +63,8 @@ Use cases:
 
 Why it matters: this is where GlyphNet can be meaningfully different from QR.
 The tradeoff is harder detection, especially in cluttered UI and perspective
-views. It should remain a first-class profile, but not the only scanner target.
+views. It should remain a first-class profile, but not the public reliability
+baseline until benchmark data proves parity on target fixtures.
 
 ### Spectral Screen
 
@@ -238,3 +248,11 @@ GlyphNet can claim improvement only per profile:
 - Decorative: better aesthetics with documented capacity and reliability limits.
 
 The project should make these claims measurable in CI and benchmark reports.
+
+## Security Posture
+
+- Transport framing CRC detects corruption, not authenticity.
+- For pairing/credential/ticket scenarios, add an application-level
+  authenticity envelope (signature/MAC) above the transport payload.
+- Security-sensitive profile claims require explicit verification tooling in
+  CLI/WASM/SDK surfaces.

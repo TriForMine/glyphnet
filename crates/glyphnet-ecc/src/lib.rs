@@ -445,8 +445,7 @@ pub fn try_recover_for_mode_with_suspects_and_telemetry(
                         telemetry.max_attempts_exceeded = true;
                         return (None, telemetry);
                     }
-                    if let Some(candidate) =
-                        rs.recover_one_data_shard(&normalized, data_len, index)
+                    if let Some(candidate) = rs.recover_one_data_shard(&normalized, data_len, index)
                         && rs.verify(&candidate, data_len)
                         && Frame::decode(&candidate).is_ok()
                     {
