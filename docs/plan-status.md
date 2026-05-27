@@ -7,7 +7,7 @@ This file tracks execution status for the roadmap priorities in
 
 - [x] Align public strategy/docs with reliability-first baseline and execution order.
 - [x] Fix repository metadata and harden CI/release policy defaults.
-- [x] Modularize monolithic crates, starting with `glyphnet-scanner` (phase 2).
+- [x] Modularize monolithic crates, starting with `glyphnet-scanner` (phase 1).
 - [ ] Keep scanner performance gate enforceable while converging to profile budgets.
 - [ ] Publish a versioned fixture corpus (synthetic + real + hard negatives).
 - [ ] Complete Phase 2 ECC: LDPC screen profile and scanner-facing telemetry contract.
