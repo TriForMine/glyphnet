@@ -367,6 +367,9 @@ pub fn try_recover_for_mode_with_suspects(
                     }
                 }
             }
+            // Runtime guard: skip hintless 2-byte search to avoid O(n^2)
+            // combinatorics in scanner/test paths. Pair recovery is only
+            // attempted when upstream supplies likely byte positions.
             if !suspects.is_empty() {
                 let mut suspect_pool = Vec::new();
                 for &index in suspects {
