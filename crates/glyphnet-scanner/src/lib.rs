@@ -2869,8 +2869,13 @@ mod tests {
         let mut seen = 0usize;
         for y in 0..matrix.height() {
             for x in 0..matrix.width() {
-                if layout::is_data_module_for(matrix.layout(), matrix.width(), matrix.height(), x, y)
-                {
+                if layout::is_data_module_for(
+                    matrix.layout(),
+                    matrix.width(),
+                    matrix.height(),
+                    x,
+                    y,
+                ) {
                     let is_dark = matrix.get(x, y).ok()?.is_dark();
                     if seen == bit_index {
                         return Some((x, y, is_dark));
@@ -2882,7 +2887,13 @@ mod tests {
         None
     }
 
-    fn paint_module(symbol: &mut RgbaImage, module_x: u16, module_y: u16, module_px: u32, rgba: Rgba<u8>) {
+    fn paint_module(
+        symbol: &mut RgbaImage,
+        module_x: u16,
+        module_y: u16,
+        module_px: u32,
+        rgba: Rgba<u8>,
+    ) {
         let quiet_zone_modules = 4u32;
         let start_x = (u32::from(module_x) + quiet_zone_modules) * module_px;
         let start_y = (u32::from(module_y) + quiet_zone_modules) * module_px;
@@ -3261,7 +3272,8 @@ mod tests {
             canvas.put_pixel(22, y, Rgba([220, 226, 223, 255]));
         }
 
-        let result = scan_still(&DynamicImage::ImageRgba8(canvas), TransmissionMode::Print).unwrap();
+        let result =
+            scan_still(&DynamicImage::ImageRgba8(canvas), TransmissionMode::Print).unwrap();
         assert_eq!(result.decoded.decoded.frame.payload, payload);
     }
 }
