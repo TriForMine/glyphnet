@@ -4,7 +4,7 @@ use glyphnet_core::{
     Cell, Frame, FrameHeader, GlyphError, HEADER_LEN, LayoutFamily, Result as CoreResult,
     SymbolMatrix, bitstream, layout,
 };
-use glyphnet_ecc::verify_for_mode;
+use glyphnet_ecc::{try_recover_for_mode, verify_for_mode};
 use image::{DynamicImage, GrayImage};
 use thiserror::Error;
 
@@ -89,21 +89,31 @@ pub struct AutoDecodedSymbol {
 pub fn decode_matrix(matrix: &SymbolMatrix) -> Result<DecodedSymbol> {
     let bits = matrix.read_data_bits();
     let sampled_bytes = bitstream::bits_to_bytes(&bits);
-    let frame = Frame::decode(&sampled_bytes)?;
-    let data_len = HEADER_LEN + frame.header.payload_len as usize;
-    if !verify_for_mode(
-        frame.header.mode,
-        frame.header.ecc_level,
-        &sampled_bytes,
-        data_len,
-    ) {
-        return Err(DecodeError::EccMismatch);
+    let header = FrameHeader::decode(&sampled_bytes)?;
+    let data_len = HEADER_LEN + header.payload_len as usize;
+    if verify_for_mode(header.mode, header.ecc_level, &sampled_bytes, data_len) {
+        let frame = Frame::decode(&sampled_bytes)?;
+        return Ok(DecodedSymbol {
+            matrix: matrix.clone(),
+            frame,
+            sampled_bytes,
+        });
     }
-    Ok(DecodedSymbol {
-        matrix: matrix.clone(),
-        frame,
-        sampled_bytes,
-    })
+
+    if let Some(recovered_bytes) =
+        try_recover_for_mode(header.mode, header.ecc_level, &sampled_bytes, data_len)
+    {
+        if verify_for_mode(header.mode, header.ecc_level, &recovered_bytes, data_len) {
+            let recovered_frame = Frame::decode(&recovered_bytes)?;
+            return Ok(DecodedSymbol {
+                matrix: matrix.clone(),
+                frame: recovered_frame,
+                sampled_bytes: recovered_bytes,
+            });
+        }
+    }
+
+    Err(DecodeError::EccMismatch)
 }
 
 /// Raster image decoder.
@@ -606,5 +616,22 @@ mod tests {
             .decode(&DynamicImage::ImageRgba8(image))
             .unwrap();
         assert_eq!(decoded.frame.payload, b"spectral");
+    }
+
+    #[test]
+    fn decode_matrix_recovers_single_byte_corruption_with_parity() {
+        let encoded = Encoder::new(EncoderConfig {
+            mode: glyphnet_core::TransmissionMode::Screen,
+            ..EncoderConfig::default()
+        })
+        .encode_static(b"recover-me")
+        .unwrap();
+        let mut matrix = encoded.matrix.clone();
+        let mut bits = bitstream::bytes_to_bits(&encoded.codewords);
+        bits[HEADER_LEN * 8 + 11] = !bits[HEADER_LEN * 8 + 11];
+        matrix.write_data_bits(bits);
+
+        let decoded = decode_matrix(&matrix).unwrap();
+        assert_eq!(decoded.frame.payload, b"recover-me");
     }
 }

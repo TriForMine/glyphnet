@@ -5,7 +5,7 @@
 //! The crate boundary is designed to host LDPC, fountain, and RaptorQ-like
 //! implementations without changing encoder/decoder APIs.
 
-use glyphnet_core::{EccLevel, GlyphError, TransmissionMode};
+use glyphnet_core::{EccLevel, Frame, GlyphError, TransmissionMode};
 use reed_solomon_erasure::galois_8::ReedSolomon;
 use thiserror::Error;
 
@@ -244,6 +244,62 @@ pub fn verify_for_mode(
     }
 }
 
+/// Attempt to recover encoded bytes for modes backed by parity code.
+///
+/// This currently targets single-byte corruption in the data region and
+/// deterministic parity repair. It is intentionally conservative and only
+/// returns a candidate when parity validation succeeds after repair.
+pub fn try_recover_for_mode(
+    mode: TransmissionMode,
+    level: EccLevel,
+    encoded: &[u8],
+    data_len: usize,
+) -> Option<Vec<u8>> {
+    if encoded.len() < data_len {
+        return None;
+    }
+
+    let parity = ParityCode::from_level(level, data_len);
+    let parity_len = parity.parity_len();
+    if encoded.len() < data_len + parity_len {
+        return None;
+    }
+
+    // Print mode uses Reed-Solomon when supported; do not attempt parity
+    // recovery there. For oversized print frames we already fall back to parity.
+    if matches!(mode, TransmissionMode::Print) {
+        let rs = ReedSolomonCode::from_level(level, data_len);
+        if rs.is_supported(data_len) {
+            return None;
+        }
+    }
+
+    // Fast path: data appears intact and parity tail is corrupted/noisy.
+    let mut repaired = encoded.to_vec();
+    let expected = parity.parity_bytes(&repaired[..data_len]);
+    repaired[data_len..data_len + parity_len].copy_from_slice(&expected);
+    if parity.verify(&repaired, data_len) && Frame::decode(&repaired).is_ok() {
+        return Some(repaired);
+    }
+
+    // Recovery path: brute-force one corrupted data byte.
+    let mut candidate = encoded.to_vec();
+    for index in 0..data_len {
+        let original = candidate[index];
+        for value in 0u8..=u8::MAX {
+            if value == original {
+                continue;
+            }
+            candidate[index] = value;
+            if parity.verify(&candidate, data_len) && Frame::decode(&candidate).is_ok() {
+                return Some(candidate);
+            }
+        }
+        candidate[index] = original;
+    }
+    None
+}
+
 /// Fixed-size XOR erasure recovery over equal-length shards.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct XorShardCode {
@@ -366,6 +422,7 @@ pub fn deinterleave(bytes: &[u8], stride: usize) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    use glyphnet_core::Frame;
     use proptest::prelude::*;
 
     use super::*;
@@ -424,6 +481,42 @@ mod tests {
             &encoded,
             wire.len()
         ));
+    }
+
+    #[test]
+    fn parity_recovery_fixes_single_data_byte_corruption() {
+        let frame = Frame::new(
+            TransmissionMode::Screen,
+            EccLevel::High,
+            0,
+            1,
+            42,
+            b"glyphnet wire bytes".to_vec(),
+        )
+        .unwrap();
+        let wire = frame.encode();
+        let mut encoded = encode_for_mode(TransmissionMode::Screen, EccLevel::High, &wire);
+        encoded[6] ^= 0x31;
+        assert!(!verify_for_mode(
+            TransmissionMode::Screen,
+            EccLevel::High,
+            &encoded,
+            wire.len(),
+        ));
+        let recovered = try_recover_for_mode(
+            TransmissionMode::Screen,
+            EccLevel::High,
+            &encoded,
+            wire.len(),
+        )
+        .unwrap();
+        assert!(verify_for_mode(
+            TransmissionMode::Screen,
+            EccLevel::High,
+            &recovered,
+            wire.len(),
+        ));
+        assert_eq!(&recovered[..wire.len()], wire.as_slice());
     }
 
     #[test]
