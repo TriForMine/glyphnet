@@ -157,11 +157,11 @@ impl ReedSolomonCode {
         }
         let rs = ReedSolomon::new(data_len, self.parity_shards).ok()?;
         let mut shards: Vec<Option<Vec<u8>>> = Vec::with_capacity(data_len + self.parity_shards);
-        for index in 0..data_len {
+        for (index, value) in encoded.iter().enumerate().take(data_len) {
             if index == missing_index {
                 shards.push(None);
             } else {
-                shards.push(Some(vec![encoded[index]]));
+                shards.push(Some(vec![*value]));
             }
         }
         for index in 0..self.parity_shards {
@@ -328,8 +328,8 @@ pub fn try_recover_for_mode_with_suspects(
                     }
                 }
             }
-            for index in 0..data_len {
-                if tried_index[index] {
+            for (index, already_tried) in tried_index.iter().enumerate().take(data_len) {
+                if *already_tried {
                     continue;
                 }
                 attempts += 1;
