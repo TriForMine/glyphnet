@@ -874,7 +874,78 @@ fn still_scan_candidates(
         candidates.extend(dark_bounds);
     }
 
+    if candidates.len() < max_total {
+        let mut fallback = coarse_ribbon_grid_candidates(image_width, image_height);
+        fallback.truncate(max_total - candidates.len());
+        candidates.extend(fallback);
+    }
+
     candidates.truncate(max_total);
+    candidates
+}
+
+fn coarse_ribbon_grid_candidates(image_width: u32, image_height: u32) -> Vec<ScanCandidate> {
+    if image_width < 240 || image_height < 120 {
+        return Vec::new();
+    }
+    let mut candidates = Vec::new();
+    for module_px in [4u32, 5, 3, 6, 7, 8] {
+        let width = 104 * module_px;
+        let height = 44 * module_px;
+        if width > image_width || height > image_height {
+            continue;
+        }
+        let x_fracs = [0.06_f32, 0.115, 0.16, 0.22, 0.30, 0.38];
+        let y_fracs = [0.08_f32, 0.14, 0.20, 0.233, 0.28, 0.32];
+        for xf in x_fracs {
+            for yf in y_fracs {
+                let x = ((image_width as f32 * xf).round() as u32)
+                    .min(image_width.saturating_sub(width + 1));
+                let y = ((image_height as f32 * yf).round() as u32)
+                    .min(image_height.saturating_sub(height + 1));
+                let region = ScanRegion {
+                    x,
+                    y,
+                    width,
+                    height,
+                };
+                if region_fits(region, image_width, image_height) {
+                    push_unique_candidate(
+                        &mut candidates,
+                        CandidateDetector::RibbonWeave,
+                        Some(LayoutFamily::RibbonWeave),
+                        "coarse-grid",
+                        region,
+                    );
+                }
+            }
+        }
+        if module_px == 4 {
+            let center_x = image_width.saturating_sub(width) / 2;
+            let center_y = image_height.saturating_sub(height) / 2;
+            for (x, y) in [
+                (center_x, center_y),
+                (center_x / 2, center_y),
+                (center_x / 3, center_y / 2),
+            ] {
+                let region = ScanRegion {
+                    x,
+                    y,
+                    width,
+                    height,
+                };
+                if region_fits(region, image_width, image_height) {
+                    push_unique_candidate(
+                        &mut candidates,
+                        CandidateDetector::RibbonWeave,
+                        Some(LayoutFamily::RibbonWeave),
+                        "coarse-grid",
+                        region,
+                    );
+                }
+            }
+        }
+    }
     candidates
 }
 
@@ -897,12 +968,20 @@ fn content_bounds(image: &DynamicImage) -> Option<ScanRegion> {
         }
     }
 
-    found.then_some(ScanRegion {
+    let region = found.then_some(ScanRegion {
         x: min_x,
         y: min_y,
         width: max_x.saturating_sub(min_x).saturating_add(1),
         height: max_y.saturating_sub(min_y).saturating_add(1),
-    })
+    })?;
+    let image_area = (image.width() as u64)
+        .saturating_mul(image.height() as u64)
+        .max(1);
+    let region_area = (region.width as u64).saturating_mul(region.height as u64);
+    if region_area.saturating_mul(100) / image_area >= 85 {
+        return None;
+    }
+    Some(region)
 }
 
 fn content_symbol_regions(
@@ -1468,7 +1547,7 @@ fn decode_candidate(
     candidate: ScanCandidate,
 ) -> std::result::Result<AutoDecodedSymbol, DecodeError> {
     let region = candidate.region;
-    if candidate.stage == "signature-window" {
+    if matches!(candidate.stage, "signature-window" | "coarse-grid") {
         if let Ok(decoded) = decode_exact_ribbon_candidate(image, region) {
             return Ok(decoded);
         }
@@ -3237,7 +3316,7 @@ mod tests {
     #[ignore = "still-scan candidate detection for this cluttered screen-mode case needs separate tuning"]
     fn scan_still_recovers_low_confidence_payload_bit_with_ui_clutter() {
         let payload = b"guided recovery";
-        let module_px = 8u32;
+        let module_px = 4u32;
         let encoded = Encoder::new(glyphnet_encode::EncoderConfig {
             mode: TransmissionMode::Screen,
             ..Default::default()
@@ -3273,7 +3352,7 @@ mod tests {
         }
 
         let result =
-            scan_still(&DynamicImage::ImageRgba8(canvas), TransmissionMode::Print).unwrap();
+            scan_still(&DynamicImage::ImageRgba8(canvas), TransmissionMode::Screen).unwrap();
         assert_eq!(result.decoded.decoded.frame.payload, payload);
     }
 }
