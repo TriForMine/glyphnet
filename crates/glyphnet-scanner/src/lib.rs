@@ -974,7 +974,9 @@ fn content_bounds(image: &DynamicImage) -> Option<ScanRegion> {
         width: max_x.saturating_sub(min_x).saturating_add(1),
         height: max_y.saturating_sub(min_y).saturating_add(1),
     })?;
-    let image_area = (image.width() as u64).saturating_mul(image.height() as u64).max(1);
+    let image_area = (image.width() as u64)
+        .saturating_mul(image.height() as u64)
+        .max(1);
     let region_area = (region.width as u64).saturating_mul(region.height as u64);
     if region_area.saturating_mul(100) / image_area >= 85 {
         return None;
