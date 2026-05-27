@@ -3199,6 +3199,21 @@ mod tests {
     }
 
     #[test]
+    fn scan_still_decodes_debugger_sample_with_light_ui_clutter_fast() {
+        let symbol = rendered_sample(b"debug sample", 4);
+        let mut canvas = RgbaImage::from_pixel(960, 360, Rgba([250, 250, 250, 255]));
+        for x in 0..canvas.width() {
+            canvas.put_pixel(x, 42, Rgba([232, 236, 234, 255]));
+        }
+        for y in 32..320 {
+            canvas.put_pixel(22, y, Rgba([220, 226, 223, 255]));
+            canvas.put_pixel(936, y, Rgba([220, 226, 223, 255]));
+        }
+        image::imageops::overlay(&mut canvas, &symbol, 110, 84);
+        assert_scan_payload(&DynamicImage::ImageRgba8(canvas), b"debug sample");
+    }
+
+    #[test]
     fn scan_still_decodes_small_debugger_sample_canvas() {
         let image = sample_canvas(b"debug sample", 2, 80, 72);
         let result = scan_still_robust(&image, TransmissionMode::Print).unwrap();
