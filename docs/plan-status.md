@@ -17,14 +17,13 @@ This file tracks execution status for the roadmap priorities in
 
 ## In Progress
 
-- `feat/scanner-modularization-phase1`: completed scanner extraction
-  (`types`, `detectors`, `rectification`, `candidates`) without behavior
-  changes.
+- `feat/testkit-corpus-integrity-check`: add default fixture-manifest loading
+  and integrity checks for corpus file paths.
 
 ## Next Up
 
-1. `glyphnet-decode` module split phase 1: sampling, header precheck, recovery
-   routing (done via `autodetect.rs` + `recovery.rs`).
-2. Fixture corpus scaffolding under `crates/glyphnet-testkit`.
-3. Scanner follow-up split: isolate decode/fractional paths from `lib.rs` (done
-   in `decode_paths.rs`).
+1. Keep scanner performance gate enforceable while converging to profile
+   budgets.
+2. Complete Phase 2 ECC: LDPC screen profile and scanner-facing telemetry
+   contract.
+3. Add payload authenticity envelope above transport CRC.
