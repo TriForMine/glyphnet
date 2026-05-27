@@ -15,6 +15,8 @@ change, and then updating conformance fixtures.
 - Scanner regressions: clean render, embedded screenshot-style images, and
   imported real screenshots that exercise totem/rail localization plus
   fractional-grid sampling.
+- Baseline comparisons: each scanner milestone should include QR/JAB/ZXing
+  comparison notes where equivalent fixtures are available.
 
 ## Required Local Checks
 
@@ -49,6 +51,8 @@ cargo fuzz run frame_decode
 - Profile-sensitive changes should update `docs/profiles.md` and
   `docs/benchmarks.md`.
 - Fuzz crashes should be minimized into fixtures before closing the issue.
+- Add or update entries in the versioned fixture corpus (synthetic, real, hard
+  negatives) for any scanner reliability claim.
 
 ## Determinism
 

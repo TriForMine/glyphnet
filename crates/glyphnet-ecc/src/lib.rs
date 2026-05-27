@@ -277,11 +277,12 @@ pub const fn scheme_for_mode(mode: TransmissionMode, _level: EccLevel) -> EccSch
 /// Interleave stride policy by mode.
 pub const fn interleave_stride_for_mode(mode: TransmissionMode, _level: EccLevel) -> usize {
     match mode {
-        // Phase 2 policy scaffold: keep neutral transform (stride=1) until
-        // decoder-side deinterleave is wired at the frame-matrix boundary.
+        // Keep print mode neutral while RS rollout stabilizes.
         TransmissionMode::Print => 1,
-        TransmissionMode::Screen => 1,
-        TransmissionMode::Burst => 1,
+        // Screen mode benefits from moderate parity spreading.
+        TransmissionMode::Screen => 4,
+        // Burst mode tolerates stronger parity spreading across frames.
+        TransmissionMode::Burst => 8,
     }
 }
 
@@ -341,7 +342,10 @@ pub fn verify_for_mode(
                 || ParityCode::from_level(level, data_len).verify(&normalized, data_len)
         }
         TransmissionMode::Screen | TransmissionMode::Burst => {
-            ParityCode::from_level(level, data_len).verify(&normalized, data_len)
+            let parity = ParityCode::from_level(level, data_len);
+            // Backward compatibility: accept both current interleaved parity
+            // layout and legacy non-interleaved parity layout.
+            parity.verify(&normalized, data_len) || parity.verify(encoded, data_len)
         }
     }
 }
@@ -404,6 +408,25 @@ pub fn try_recover_for_mode_with_suspects_and_telemetry(
     if encoded.len() < data_len {
         return (None, telemetry);
     }
+    let stride = interleave_stride_for_mode(mode, level);
+    let normalized = if stride > 1 && encoded.len() > data_len {
+        let mut out = Vec::with_capacity(encoded.len());
+        out.extend_from_slice(&encoded[..data_len]);
+        out.extend_from_slice(&deinterleave(&encoded[data_len..], stride));
+        out
+    } else {
+        encoded.to_vec()
+    };
+    let to_encoded_layout = |candidate: Vec<u8>| {
+        if stride > 1 && candidate.len() > data_len {
+            let mut out = Vec::with_capacity(candidate.len());
+            out.extend_from_slice(&candidate[..data_len]);
+            out.extend_from_slice(&interleave(&candidate[data_len..], stride));
+            out
+        } else {
+            candidate
+        }
+    };
 
     // Print mode: attempt actual Reed-Solomon one-erasure recovery first when
     // this frame size is supported by the byte-shard RS layout.
@@ -422,14 +445,14 @@ pub fn try_recover_for_mode_with_suspects_and_telemetry(
                         telemetry.max_attempts_exceeded = true;
                         return (None, telemetry);
                     }
-                    if let Some(candidate) = rs.recover_one_data_shard(encoded, data_len, index)
+                    if let Some(candidate) = rs.recover_one_data_shard(&normalized, data_len, index)
                         && rs.verify(&candidate, data_len)
                         && Frame::decode(&candidate).is_ok()
                     {
                         telemetry.recovered = true;
                         telemetry.attempts = attempts;
                         telemetry.method = RecoveryMethod::ReedSolomonSingle;
-                        return (Some(candidate), telemetry);
+                        return (Some(to_encoded_layout(candidate)), telemetry);
                     }
                 }
             }
@@ -462,14 +485,15 @@ pub fn try_recover_for_mode_with_suspects_and_telemetry(
                             return (None, telemetry);
                         }
                         let pair = [suspect_pool[i], suspect_pool[j]];
-                        if let Some(candidate) = rs.recover_data_shards(encoded, data_len, &pair)
+                        if let Some(candidate) =
+                            rs.recover_data_shards(&normalized, data_len, &pair)
                             && rs.verify(&candidate, data_len)
                             && Frame::decode(&candidate).is_ok()
                         {
                             telemetry.recovered = true;
                             telemetry.attempts = attempts;
                             telemetry.method = RecoveryMethod::ReedSolomonPair;
-                            return (Some(candidate), telemetry);
+                            return (Some(to_encoded_layout(candidate)), telemetry);
                         }
                     }
                 }
@@ -484,14 +508,14 @@ pub fn try_recover_for_mode_with_suspects_and_telemetry(
                     telemetry.max_attempts_exceeded = true;
                     return (None, telemetry);
                 }
-                if let Some(candidate) = rs.recover_one_data_shard(encoded, data_len, index)
+                if let Some(candidate) = rs.recover_one_data_shard(&normalized, data_len, index)
                     && rs.verify(&candidate, data_len)
                     && Frame::decode(&candidate).is_ok()
                 {
                     telemetry.recovered = true;
                     telemetry.attempts = attempts;
                     telemetry.method = RecoveryMethod::ReedSolomonSingle;
-                    return (Some(candidate), telemetry);
+                    return (Some(to_encoded_layout(candidate)), telemetry);
                 }
             }
             telemetry.attempts = attempts;
@@ -516,18 +540,18 @@ pub fn try_recover_for_mode_with_suspects_and_telemetry(
 
     // Fast path: data appears intact and parity tail is corrupted/noisy.
     telemetry.attempted = true;
-    let mut repaired = encoded.to_vec();
+    let mut repaired = normalized.to_vec();
     let expected = parity.parity_bytes(&repaired[..data_len]);
     repaired[data_len..data_len + parity_len].copy_from_slice(&expected);
     if parity.verify(&repaired, data_len) && Frame::decode(&repaired).is_ok() {
         telemetry.recovered = true;
         telemetry.method = RecoveryMethod::ParityTailRebuild;
-        return (Some(repaired), telemetry);
+        return (Some(to_encoded_layout(repaired)), telemetry);
     }
 
     // Recovery path: brute-force one corrupted data byte.
     let mut attempts = 0usize;
-    let mut candidate = encoded.to_vec();
+    let mut candidate = normalized.to_vec();
     let mut tried_index = vec![false; data_len];
 
     for &index in suspects {
@@ -549,7 +573,7 @@ pub fn try_recover_for_mode_with_suspects_and_telemetry(
                     telemetry.recovered = true;
                     telemetry.attempts = attempts;
                     telemetry.method = RecoveryMethod::ParityByteSearch;
-                    return (Some(candidate), telemetry);
+                    return (Some(to_encoded_layout(candidate)), telemetry);
                 }
             }
             candidate[index] = original;
@@ -576,7 +600,7 @@ pub fn try_recover_for_mode_with_suspects_and_telemetry(
                 telemetry.recovered = true;
                 telemetry.attempts = attempts;
                 telemetry.method = RecoveryMethod::ParityByteSearch;
-                return (Some(candidate), telemetry);
+                return (Some(to_encoded_layout(candidate)), telemetry);
             }
         }
         candidate[index] = original;
@@ -753,6 +777,34 @@ mod tests {
             let encoded = encode_for_mode(mode, EccLevel::High, wire);
             assert!(verify_for_mode(mode, EccLevel::High, &encoded, wire.len()));
         }
+    }
+
+    #[test]
+    fn interleave_policy_is_mode_specific() {
+        assert_eq!(
+            interleave_stride_for_mode(TransmissionMode::Print, EccLevel::High),
+            1
+        );
+        assert_eq!(
+            interleave_stride_for_mode(TransmissionMode::Screen, EccLevel::High),
+            4
+        );
+        assert_eq!(
+            interleave_stride_for_mode(TransmissionMode::Burst, EccLevel::High),
+            8
+        );
+    }
+
+    #[test]
+    fn verify_for_mode_accepts_legacy_non_interleaved_screen_payloads() {
+        let wire = b"legacy-screen-wire";
+        let legacy = ParityCode::from_level(EccLevel::High, wire.len()).encode(wire);
+        assert!(verify_for_mode(
+            TransmissionMode::Screen,
+            EccLevel::High,
+            &legacy,
+            wire.len(),
+        ));
     }
 
     #[test]

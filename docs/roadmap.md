@@ -4,6 +4,18 @@ The product strategy and benchmark contract are defined in
 [`docs/strategy.md`](strategy.md). This roadmap is the implementation sequence
 for that strategy.
 
+## Execution Priorities (Current)
+
+- Keep `Matrix` as the public reliability-first baseline until `RibbonWeave`
+  consistently meets equivalent robustness targets on real fixtures.
+- Prioritize scanner/decode/cv modularization before adding new layouts.
+- Keep scanner performance gates enforceable and documented against real
+  profile budgets.
+- Publish a versioned fixture corpus (synthetic + real + hard negatives) before
+  making broad reliability claims.
+- Treat burst erasure transport as the main differentiation path for large
+  payload transfer.
+
 ## Phase 0: Reference Protocol
 
 - Deterministic frame wire format.
@@ -25,6 +37,8 @@ for that strategy.
   sampling.
 - Blur, exposure, and perspective synthetic test suite.
 - Snapshot conformance vectors.
+- Reliability-first matrix detector path with explicit profile routing.
+- Published PR-vs-base scanner reliability/performance reports on fixture sets.
 
 ## Phase 2: Strong ECC
 
@@ -32,6 +46,7 @@ for that strategy.
 - LDPC profile for high-density screen mode.
 - Interleaving policies selected by mode.
 - Erasure telemetry surfaced to scanner clients.
+- Scanner-consumable confidence/erasure telemetry contract for SDK clients.
 
 ## Phase 3: Screen Density
 
@@ -48,6 +63,12 @@ for that strategy.
 - Motion blur and rolling-shutter mitigation.
 - Video export and WebRTC sender/receiver demos.
 
+## Phase 4.5: Trust and Authenticity
+
+- Add optional payload authenticity envelope (detached/embedded signatures).
+- Define verification UX for CLI/WASM/SDK consumers.
+- Keep transport CRC for corruption detection, separate from authenticity.
+
 ## Phase 5: Platform SDKs
 
 - TypeScript browser SDK published from `glyphnet-wasm`.
@@ -62,3 +83,5 @@ for that strategy.
 - Radial layout for large posters and lens-distorted surfaces.
 - AR/VR marker tracking profile.
 - GPU accelerated rectification and sampling.
+- Only promote additional layouts when they beat baseline metrics for declared
+  target scenarios.
