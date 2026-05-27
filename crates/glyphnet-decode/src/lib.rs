@@ -4,7 +4,10 @@ use glyphnet_core::{
     Cell, Frame, FrameHeader, GlyphError, HEADER_LEN, LayoutFamily, Result as CoreResult,
     SymbolMatrix, bitstream, layout,
 };
-use glyphnet_ecc::{try_recover_for_mode, try_recover_for_mode_with_suspects, verify_for_mode};
+use glyphnet_ecc::{
+    RecoveryMethod, RecoveryTelemetry, try_recover_for_mode_with_suspects_and_telemetry,
+    verify_for_mode,
+};
 use image::{DynamicImage, GrayImage};
 use thiserror::Error;
 
@@ -61,6 +64,8 @@ pub struct DecodedSymbol {
     pub frame: Frame,
     /// Complete sampled bytes, including parity and padding.
     pub sampled_bytes: Vec<u8>,
+    /// ECC recovery telemetry for this decode attempt.
+    pub recovery: RecoveryTelemetry,
 }
 
 /// Auto-detected decode parameters.
@@ -104,21 +109,30 @@ fn decode_matrix_with_suspects(
             matrix: matrix.clone(),
             frame,
             sampled_bytes,
+            recovery: RecoveryTelemetry {
+                attempted: false,
+                recovered: false,
+                attempts: 0,
+                method: RecoveryMethod::None,
+                suspect_count: suspect_bytes.len(),
+                max_attempts_exceeded: false,
+            },
         });
     }
 
-    let recovered = if suspect_bytes.is_empty() {
-        try_recover_for_mode(header.mode, header.ecc_level, &sampled_bytes, data_len)
+    let max_attempts = if suspect_bytes.is_empty() {
+        usize::MAX
     } else {
-        try_recover_for_mode_with_suspects(
-            header.mode,
-            header.ecc_level,
-            &sampled_bytes,
-            data_len,
-            suspect_bytes,
-            RECOVERY_MAX_ATTEMPTS,
-        )
+        RECOVERY_MAX_ATTEMPTS
     };
+    let (recovered, recovery) = try_recover_for_mode_with_suspects_and_telemetry(
+        header.mode,
+        header.ecc_level,
+        &sampled_bytes,
+        data_len,
+        suspect_bytes,
+        max_attempts,
+    );
     if let Some(recovered_bytes) = recovered {
         if verify_for_mode(header.mode, header.ecc_level, &recovered_bytes, data_len) {
             let recovered_frame = Frame::decode(&recovered_bytes)?;
@@ -126,6 +140,7 @@ fn decode_matrix_with_suspects(
                 matrix: matrix.clone(),
                 frame: recovered_frame,
                 sampled_bytes: recovered_bytes,
+                recovery,
             });
         }
     }
@@ -629,6 +644,7 @@ pub fn decode_wire_prefix(bytes: &[u8]) -> CoreResult<Frame> {
 #[cfg(test)]
 mod tests {
     use glyphnet_core::ProfileId;
+    use glyphnet_ecc::RecoveryMethod;
     use glyphnet_encode::{Encoder, EncoderConfig};
     use glyphnet_render::{RasterRenderer, RenderOptions};
 
@@ -642,6 +658,7 @@ mod tests {
             .decode(&DynamicImage::ImageRgba8(image))
             .unwrap();
         assert_eq!(decoded.frame.payload, b"roundtrip");
+        assert_eq!(decoded.recovery.method, RecoveryMethod::None);
     }
 
     #[test]
@@ -707,6 +724,8 @@ mod tests {
 
         let decoded = decode_matrix(&matrix).unwrap();
         assert_eq!(decoded.frame.payload, b"recover-me");
+        assert_eq!(decoded.recovery.method, RecoveryMethod::ParityByteSearch);
+        assert!(decoded.recovery.recovered);
     }
 
     #[test]
@@ -724,6 +743,8 @@ mod tests {
 
         let decoded = decode_matrix(&matrix).unwrap();
         assert_eq!(decoded.frame.payload, b"recover-print-rs");
+        assert_eq!(decoded.recovery.method, RecoveryMethod::ReedSolomonSingle);
+        assert!(decoded.recovery.recovered);
     }
 
     #[test]
@@ -744,5 +765,7 @@ mod tests {
 
         let decoded = decode_matrix_with_suspects(&matrix, &[bit_a / 8, bit_b / 8]).unwrap();
         assert_eq!(decoded.frame.payload, b"recover-print-rs-two");
+        assert_eq!(decoded.recovery.method, RecoveryMethod::ReedSolomonPair);
+        assert!(decoded.recovery.recovered);
     }
 }

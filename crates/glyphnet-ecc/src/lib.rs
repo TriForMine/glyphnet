@@ -44,6 +44,38 @@ pub enum EccScheme {
     ReedSolomon,
 }
 
+/// Recovery strategy used by ECC repair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryMethod {
+    /// No repair strategy was applied.
+    None,
+    /// Reed-Solomon single-byte erasure reconstruction.
+    ReedSolomonSingle,
+    /// Reed-Solomon two-byte erasure reconstruction.
+    ReedSolomonPair,
+    /// Rebuilt parity tail from data bytes.
+    ParityTailRebuild,
+    /// Brute-force parity-guided data-byte mutation.
+    ParityByteSearch,
+}
+
+/// Recovery telemetry emitted by ECC repair paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecoveryTelemetry {
+    /// Whether ECC recovery logic was attempted.
+    pub attempted: bool,
+    /// Whether recovery succeeded and produced a valid frame.
+    pub recovered: bool,
+    /// Number of candidate mutations/reconstructions evaluated.
+    pub attempts: usize,
+    /// Recovery strategy used by the successful candidate.
+    pub method: RecoveryMethod,
+    /// Number of suspect byte indexes provided by caller.
+    pub suspect_count: usize,
+    /// Whether recovery stopped because `max_attempts` was exceeded.
+    pub max_attempts_exceeded: bool,
+}
+
 /// Deterministic parity bytes used by the reference encoder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParityCode {
@@ -341,8 +373,36 @@ pub fn try_recover_for_mode_with_suspects(
     suspects: &[usize],
     max_attempts: usize,
 ) -> Option<Vec<u8>> {
+    try_recover_for_mode_with_suspects_and_telemetry(
+        mode,
+        level,
+        encoded,
+        data_len,
+        suspects,
+        max_attempts,
+    )
+    .0
+}
+
+/// Attempt to recover encoded bytes and return recovery telemetry.
+pub fn try_recover_for_mode_with_suspects_and_telemetry(
+    mode: TransmissionMode,
+    level: EccLevel,
+    encoded: &[u8],
+    data_len: usize,
+    suspects: &[usize],
+    max_attempts: usize,
+) -> (Option<Vec<u8>>, RecoveryTelemetry) {
+    let mut telemetry = RecoveryTelemetry {
+        attempted: false,
+        recovered: false,
+        attempts: 0,
+        method: RecoveryMethod::None,
+        suspect_count: suspects.len(),
+        max_attempts_exceeded: false,
+    };
     if encoded.len() < data_len {
-        return None;
+        return (None, telemetry);
     }
 
     // Print mode: attempt actual Reed-Solomon one-erasure recovery first when
@@ -350,6 +410,7 @@ pub fn try_recover_for_mode_with_suspects(
     if matches!(mode, TransmissionMode::Print) {
         let rs = ReedSolomonCode::from_level(level, data_len);
         if rs.is_supported(data_len) {
+            telemetry.attempted = true;
             let mut attempts = 0usize;
             let mut tried_index = vec![false; data_len];
             for &index in suspects {
@@ -357,13 +418,18 @@ pub fn try_recover_for_mode_with_suspects(
                     tried_index[index] = true;
                     attempts += 1;
                     if attempts > max_attempts {
-                        return None;
+                        telemetry.attempts = attempts;
+                        telemetry.max_attempts_exceeded = true;
+                        return (None, telemetry);
                     }
                     if let Some(candidate) = rs.recover_one_data_shard(encoded, data_len, index)
                         && rs.verify(&candidate, data_len)
                         && Frame::decode(&candidate).is_ok()
                     {
-                        return Some(candidate);
+                        telemetry.recovered = true;
+                        telemetry.attempts = attempts;
+                        telemetry.method = RecoveryMethod::ReedSolomonSingle;
+                        return (Some(candidate), telemetry);
                     }
                 }
             }
@@ -391,14 +457,19 @@ pub fn try_recover_for_mode_with_suspects(
                     for j in (i + 1)..suspect_pool.len() {
                         attempts += 1;
                         if attempts > max_attempts {
-                            return None;
+                            telemetry.attempts = attempts;
+                            telemetry.max_attempts_exceeded = true;
+                            return (None, telemetry);
                         }
                         let pair = [suspect_pool[i], suspect_pool[j]];
                         if let Some(candidate) = rs.recover_data_shards(encoded, data_len, &pair)
                             && rs.verify(&candidate, data_len)
                             && Frame::decode(&candidate).is_ok()
                         {
-                            return Some(candidate);
+                            telemetry.recovered = true;
+                            telemetry.attempts = attempts;
+                            telemetry.method = RecoveryMethod::ReedSolomonPair;
+                            return (Some(candidate), telemetry);
                         }
                     }
                 }
@@ -409,23 +480,29 @@ pub fn try_recover_for_mode_with_suspects(
                 }
                 attempts += 1;
                 if attempts > max_attempts {
-                    return None;
+                    telemetry.attempts = attempts;
+                    telemetry.max_attempts_exceeded = true;
+                    return (None, telemetry);
                 }
                 if let Some(candidate) = rs.recover_one_data_shard(encoded, data_len, index)
                     && rs.verify(&candidate, data_len)
                     && Frame::decode(&candidate).is_ok()
                 {
-                    return Some(candidate);
+                    telemetry.recovered = true;
+                    telemetry.attempts = attempts;
+                    telemetry.method = RecoveryMethod::ReedSolomonSingle;
+                    return (Some(candidate), telemetry);
                 }
             }
-            return None;
+            telemetry.attempts = attempts;
+            return (None, telemetry);
         }
     }
 
     let parity = ParityCode::from_level(level, data_len);
     let parity_len = parity.parity_len();
     if encoded.len() < data_len + parity_len {
-        return None;
+        return (None, telemetry);
     }
 
     // Print mode uses Reed-Solomon when supported; do not attempt parity
@@ -433,16 +510,19 @@ pub fn try_recover_for_mode_with_suspects(
     if matches!(mode, TransmissionMode::Print) {
         let rs = ReedSolomonCode::from_level(level, data_len);
         if rs.is_supported(data_len) {
-            return None;
+            return (None, telemetry);
         }
     }
 
     // Fast path: data appears intact and parity tail is corrupted/noisy.
+    telemetry.attempted = true;
     let mut repaired = encoded.to_vec();
     let expected = parity.parity_bytes(&repaired[..data_len]);
     repaired[data_len..data_len + parity_len].copy_from_slice(&expected);
     if parity.verify(&repaired, data_len) && Frame::decode(&repaired).is_ok() {
-        return Some(repaired);
+        telemetry.recovered = true;
+        telemetry.method = RecoveryMethod::ParityTailRebuild;
+        return (Some(repaired), telemetry);
     }
 
     // Recovery path: brute-force one corrupted data byte.
@@ -460,11 +540,16 @@ pub fn try_recover_for_mode_with_suspects(
                 }
                 attempts += 1;
                 if attempts > max_attempts {
-                    return None;
+                    telemetry.attempts = attempts;
+                    telemetry.max_attempts_exceeded = true;
+                    return (None, telemetry);
                 }
                 candidate[index] = value;
                 if parity.verify(&candidate, data_len) && Frame::decode(&candidate).is_ok() {
-                    return Some(candidate);
+                    telemetry.recovered = true;
+                    telemetry.attempts = attempts;
+                    telemetry.method = RecoveryMethod::ParityByteSearch;
+                    return (Some(candidate), telemetry);
                 }
             }
             candidate[index] = original;
@@ -482,16 +567,22 @@ pub fn try_recover_for_mode_with_suspects(
             }
             attempts += 1;
             if attempts > max_attempts {
-                return None;
+                telemetry.attempts = attempts;
+                telemetry.max_attempts_exceeded = true;
+                return (None, telemetry);
             }
             candidate[index] = value;
             if parity.verify(&candidate, data_len) && Frame::decode(&candidate).is_ok() {
-                return Some(candidate);
+                telemetry.recovered = true;
+                telemetry.attempts = attempts;
+                telemetry.method = RecoveryMethod::ParityByteSearch;
+                return (Some(candidate), telemetry);
             }
         }
         candidate[index] = original;
     }
-    None
+    telemetry.attempts = attempts;
+    (None, telemetry)
 }
 
 /// Fixed-size XOR erasure recovery over equal-length shards.
