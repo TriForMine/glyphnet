@@ -332,18 +332,6 @@ fn scan_still_with_diagnostics_inner(
                 timings,
             });
         }
-        if let Ok(decoded) = decode_resampled_full_frame(&decoder, image) {
-            timings.full_frame_micros = elapsed_micros(stage);
-            timings.total_micros = elapsed_micros(started);
-            return Ok(StillScanResult {
-                decoded,
-                crop: None,
-                quad: None,
-                warp_size: None,
-                attempts: Vec::new(),
-                timings,
-            });
-        }
         timings.full_frame_micros = elapsed_micros(stage);
     }
 
@@ -1538,7 +1526,34 @@ fn should_try_full_frame_decode(image: &DynamicImage) -> bool {
         return false;
     }
     let aspect = width as f32 / height.max(1) as f32;
-    (1.0..=8.0).contains(&aspect)
+    if !(1.0..=8.0).contains(&aspect) {
+        return false;
+    }
+    !has_wide_ui_band(image)
+}
+
+fn has_wide_ui_band(image: &DynamicImage) -> bool {
+    let luma = image.to_luma8();
+    let width = luma.width();
+    let height = luma.height();
+    if width < 64 || height < 32 {
+        return false;
+    }
+    let band_threshold = (width.saturating_mul(9)) / 10; // >= 90% non-white on a row.
+    let mut y = 0u32;
+    while y < height {
+        let mut non_white = 0u32;
+        for x in 0..width {
+            if luma.get_pixel(x, y).0[0] < 245 {
+                non_white += 1;
+            }
+        }
+        if non_white >= band_threshold {
+            return true;
+        }
+        y = y.saturating_add(1);
+    }
+    false
 }
 
 fn decode_candidate(
@@ -3195,6 +3210,17 @@ mod tests {
         let mut canvas = RgbaImage::from_pixel(960, 360, Rgba([250, 250, 250, 255]));
         add_debugger_ui_noise(&mut canvas);
         image::imageops::overlay(&mut canvas, &symbol, 110, 84);
+        assert_scan_payload(&DynamicImage::ImageRgba8(canvas), b"debug sample");
+    }
+
+    #[test]
+    fn scan_still_decodes_debugger_sample_with_light_ui_clutter_fast() {
+        let symbol = rendered_sample(b"debug sample", 4);
+        let mut canvas = RgbaImage::from_pixel(600, 240, Rgba([250, 250, 250, 255]));
+        for x in 0..canvas.width() {
+            canvas.put_pixel(x, 28, Rgba([232, 236, 234, 255]));
+        }
+        image::imageops::overlay(&mut canvas, &symbol, 88, 32);
         assert_scan_payload(&DynamicImage::ImageRgba8(canvas), b"debug sample");
     }
 
