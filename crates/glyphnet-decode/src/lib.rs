@@ -369,7 +369,7 @@ const AUTO_MAX_SYMBOL_WIDTH_MODULES: u32 = 512;
 const AUTO_MAX_SYMBOL_HEIGHT_MODULES: u32 = 256;
 const AUTO_MAX_SYMBOL_AREA_MODULES: u32 = 65_536;
 const MAX_SUSPECT_BYTES: usize = 16;
-const RECOVERY_MAX_ATTEMPTS: usize = 4096;
+const RECOVERY_MAX_ATTEMPTS: usize = 256;
 
 fn gcd_u32(mut a: u32, mut b: u32) -> u32 {
     while b != 0 {

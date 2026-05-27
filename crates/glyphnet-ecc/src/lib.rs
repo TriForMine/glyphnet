@@ -367,10 +367,8 @@ pub fn try_recover_for_mode_with_suspects(
                     }
                 }
             }
-            let mut suspect_pool = Vec::new();
-            if suspects.is_empty() {
-                suspect_pool.extend(0..data_len);
-            } else {
+            if !suspects.is_empty() {
+                let mut suspect_pool = Vec::new();
                 for &index in suspects {
                     if index < data_len && !suspect_pool.contains(&index) {
                         suspect_pool.push(index);
@@ -386,19 +384,19 @@ pub fn try_recover_for_mode_with_suspects(
                         }
                     }
                 }
-            }
-            for i in 0..suspect_pool.len() {
-                for j in (i + 1)..suspect_pool.len() {
-                    attempts += 1;
-                    if attempts > max_attempts {
-                        return None;
-                    }
-                    let pair = [suspect_pool[i], suspect_pool[j]];
-                    if let Some(candidate) = rs.recover_data_shards(encoded, data_len, &pair)
-                        && rs.verify(&candidate, data_len)
-                        && Frame::decode(&candidate).is_ok()
-                    {
-                        return Some(candidate);
+                for i in 0..suspect_pool.len() {
+                    for j in (i + 1)..suspect_pool.len() {
+                        attempts += 1;
+                        if attempts > max_attempts {
+                            return None;
+                        }
+                        let pair = [suspect_pool[i], suspect_pool[j]];
+                        if let Some(candidate) = rs.recover_data_shards(encoded, data_len, &pair)
+                            && rs.verify(&candidate, data_len)
+                            && Frame::decode(&candidate).is_ok()
+                        {
+                            return Some(candidate);
+                        }
                     }
                 }
             }
