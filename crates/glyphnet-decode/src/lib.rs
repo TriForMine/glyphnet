@@ -4,7 +4,7 @@ use glyphnet_core::{
     Cell, Frame, FrameHeader, GlyphError, HEADER_LEN, LayoutFamily, Result as CoreResult,
     SymbolMatrix, bitstream, layout,
 };
-use glyphnet_ecc::verify_for_mode;
+use glyphnet_ecc::{try_recover_for_mode, try_recover_for_mode_with_suspects, verify_for_mode};
 use image::{DynamicImage, GrayImage};
 use thiserror::Error;
 
@@ -87,23 +87,50 @@ pub struct AutoDecodedSymbol {
 
 /// Decode a matrix into a binary frame.
 pub fn decode_matrix(matrix: &SymbolMatrix) -> Result<DecodedSymbol> {
+    decode_matrix_with_suspects(matrix, &[])
+}
+
+fn decode_matrix_with_suspects(
+    matrix: &SymbolMatrix,
+    suspect_bytes: &[usize],
+) -> Result<DecodedSymbol> {
     let bits = matrix.read_data_bits();
     let sampled_bytes = bitstream::bits_to_bytes(&bits);
-    let frame = Frame::decode(&sampled_bytes)?;
-    let data_len = HEADER_LEN + frame.header.payload_len as usize;
-    if !verify_for_mode(
-        frame.header.mode,
-        frame.header.ecc_level,
-        &sampled_bytes,
-        data_len,
-    ) {
-        return Err(DecodeError::EccMismatch);
+    let header = FrameHeader::decode(&sampled_bytes)?;
+    let data_len = HEADER_LEN + header.payload_len as usize;
+    if verify_for_mode(header.mode, header.ecc_level, &sampled_bytes, data_len) {
+        let frame = Frame::decode(&sampled_bytes)?;
+        return Ok(DecodedSymbol {
+            matrix: matrix.clone(),
+            frame,
+            sampled_bytes,
+        });
     }
-    Ok(DecodedSymbol {
-        matrix: matrix.clone(),
-        frame,
-        sampled_bytes,
-    })
+
+    let recovered = if suspect_bytes.is_empty() {
+        try_recover_for_mode(header.mode, header.ecc_level, &sampled_bytes, data_len)
+    } else {
+        try_recover_for_mode_with_suspects(
+            header.mode,
+            header.ecc_level,
+            &sampled_bytes,
+            data_len,
+            suspect_bytes,
+            RECOVERY_MAX_ATTEMPTS,
+        )
+    };
+    if let Some(recovered_bytes) = recovered {
+        if verify_for_mode(header.mode, header.ecc_level, &recovered_bytes, data_len) {
+            let recovered_frame = Frame::decode(&recovered_bytes)?;
+            return Ok(DecodedSymbol {
+                matrix: matrix.clone(),
+                frame: recovered_frame,
+                sampled_bytes: recovered_bytes,
+            });
+        }
+    }
+
+    Err(DecodeError::EccMismatch)
 }
 
 /// Raster image decoder.
@@ -120,8 +147,16 @@ impl RasterDecoder {
 
     /// Decode a rendered GlyphNet image.
     pub fn decode(&self, image: &DynamicImage) -> Result<DecodedSymbol> {
-        let matrix = self.sample_matrix(image)?;
-        decode_matrix(&matrix)
+        let luma = image.to_luma8();
+        let (matrix, bit_confidence) = Self::sample_matrix_with_luma_asymmetric_and_confidence(
+            &luma,
+            &self.options,
+            self.options.quiet_zone_modules,
+            self.options.quiet_zone_modules,
+        )?;
+        let suspect_bytes =
+            suspect_bytes_from_bit_confidence(&matrix, &bit_confidence, MAX_SUSPECT_BYTES);
+        decode_matrix_with_suspects(&matrix, &suspect_bytes)
     }
 
     /// Decode a rendered GlyphNet image by inferring module size and quiet zone.
@@ -175,16 +210,22 @@ impl RasterDecoder {
                         ) {
                             continue;
                         }
-                        let matrix = match Self::sample_matrix_with_luma_asymmetric(
-                            &luma,
-                            &options,
-                            quiet_zone_x,
-                            quiet_zone_y,
-                        ) {
-                            Ok(matrix) => matrix,
-                            Err(_) => continue,
-                        };
-                        if let Ok(decoded) = decode_matrix(&matrix) {
+                        let (matrix, bit_confidence) =
+                            match Self::sample_matrix_with_luma_asymmetric_and_confidence(
+                                &luma,
+                                &options,
+                                quiet_zone_x,
+                                quiet_zone_y,
+                            ) {
+                                Ok(matrix) => matrix,
+                                Err(_) => continue,
+                            };
+                        let suspect_bytes = suspect_bytes_from_bit_confidence(
+                            &matrix,
+                            &bit_confidence,
+                            MAX_SUSPECT_BYTES,
+                        );
+                        if let Ok(decoded) = decode_matrix_with_suspects(&matrix, &suspect_bytes) {
                             return Ok(AutoDecodedSymbol {
                                 decoded,
                                 info: AutoDecodeInfo {
@@ -255,6 +296,21 @@ impl RasterDecoder {
         quiet_zone_x_modules: u32,
         quiet_zone_y_modules: u32,
     ) -> Result<SymbolMatrix> {
+        Ok(Self::sample_matrix_with_luma_asymmetric_and_confidence(
+            luma,
+            options,
+            quiet_zone_x_modules,
+            quiet_zone_y_modules,
+        )?
+        .0)
+    }
+
+    fn sample_matrix_with_luma_asymmetric_and_confidence(
+        luma: &GrayImage,
+        options: &DecodeOptions,
+        quiet_zone_x_modules: u32,
+        quiet_zone_y_modules: u32,
+    ) -> Result<(SymbolMatrix, Vec<u8>)> {
         if options.module_px == 0 {
             return Err(DecodeError::InvalidImageDimensions);
         }
@@ -274,6 +330,7 @@ impl RasterDecoder {
         let symbol_width = (width_modules - quiet_zone_x_modules * 2) as u16;
         let symbol_height = (height_modules - quiet_zone_y_modules * 2) as u16;
         let mut matrix = SymbolMatrix::with_layout(symbol_width, symbol_height, options.layout);
+        let mut bit_confidence = Vec::new();
 
         for y in 0..symbol_height {
             for x in 0..symbol_width {
@@ -291,11 +348,12 @@ impl RasterDecoder {
                         quiet_zone_y_modules,
                     );
                     matrix.set(x, y, Cell::Data(avg < options.threshold))?;
+                    bit_confidence.push(avg.abs_diff(options.threshold));
                 }
             }
         }
 
-        Ok(matrix)
+        Ok((matrix, bit_confidence))
     }
 }
 
@@ -310,6 +368,8 @@ const AUTO_MIN_SYMBOL_MODULES: u32 = 20;
 const AUTO_MAX_SYMBOL_WIDTH_MODULES: u32 = 512;
 const AUTO_MAX_SYMBOL_HEIGHT_MODULES: u32 = 256;
 const AUTO_MAX_SYMBOL_AREA_MODULES: u32 = 65_536;
+const MAX_SUSPECT_BYTES: usize = 16;
+const RECOVERY_MAX_ATTEMPTS: usize = 4096;
 
 fn gcd_u32(mut a: u32, mut b: u32) -> u32 {
     while b != 0 {
@@ -537,6 +597,30 @@ fn header_precheck(
     FrameHeader::decode(&bytes).is_ok()
 }
 
+fn suspect_bytes_from_bit_confidence(
+    matrix: &SymbolMatrix,
+    bit_confidence: &[u8],
+    limit: usize,
+) -> Vec<usize> {
+    if bit_confidence.is_empty() || limit == 0 {
+        return Vec::new();
+    }
+    let total_data_bits = matrix.read_data_bits().len();
+    let total_bytes = total_data_bits.div_ceil(8);
+    let mut scores = Vec::with_capacity(total_bytes);
+    for byte_index in 0..total_bytes {
+        let start = byte_index * 8;
+        let end = (start + 8).min(bit_confidence.len());
+        if start >= end {
+            break;
+        }
+        let score = *bit_confidence[start..end].iter().min().unwrap_or(&u8::MAX);
+        scores.push((byte_index, score));
+    }
+    scores.sort_by_key(|(_, score)| *score);
+    scores.into_iter().take(limit).map(|(idx, _)| idx).collect()
+}
+
 /// Validate a sampled byte stream without constructing a matrix.
 pub fn decode_wire_prefix(bytes: &[u8]) -> CoreResult<Frame> {
     Frame::decode(bytes)
@@ -606,5 +690,22 @@ mod tests {
             .decode(&DynamicImage::ImageRgba8(image))
             .unwrap();
         assert_eq!(decoded.frame.payload, b"spectral");
+    }
+
+    #[test]
+    fn decode_matrix_recovers_single_byte_corruption_with_parity() {
+        let encoded = Encoder::new(EncoderConfig {
+            mode: glyphnet_core::TransmissionMode::Screen,
+            ..EncoderConfig::default()
+        })
+        .encode_static(b"recover-me")
+        .unwrap();
+        let mut matrix = encoded.matrix.clone();
+        let mut bits = bitstream::bytes_to_bits(&encoded.codewords);
+        bits[HEADER_LEN * 8 + 11] = !bits[HEADER_LEN * 8 + 11];
+        matrix.write_data_bits(bits);
+
+        let decoded = decode_matrix(&matrix).unwrap();
+        assert_eq!(decoded.frame.payload, b"recover-me");
     }
 }
