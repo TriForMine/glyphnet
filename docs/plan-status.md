@@ -9,7 +9,8 @@ This file tracks execution status for the roadmap priorities in
 - [x] Fix repository metadata and harden CI/release policy defaults.
 - [x] Modularize monolithic crates, starting with `glyphnet-scanner` (phase 1).
 - [ ] Keep scanner performance gate enforceable while converging to profile budgets.
-- [ ] Publish a versioned fixture corpus (synthetic + real + hard negatives).
+- [x] Publish a versioned fixture corpus (synthetic + real + hard negatives)
+  scaffold.
 - [ ] Complete Phase 2 ECC: LDPC screen profile and scanner-facing telemetry contract.
 - [ ] Deliver burst erasure transport (fountain/RaptorQ-like direction).
 - [ ] Add payload authenticity envelope above transport CRC.

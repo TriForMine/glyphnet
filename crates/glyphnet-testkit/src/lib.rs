@@ -6,6 +6,7 @@ use glyphnet_encode::{EncodeError, Encoder};
 use glyphnet_render::RasterRenderer;
 use image::{DynamicImage, Rgba, RgbaImage};
 use rand::Rng;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Errors returned by reusable testkit workflows.
@@ -20,6 +21,96 @@ pub enum TestkitError {
     /// Decoder failed.
     #[error(transparent)]
     Decode(#[from] glyphnet_decode::DecodeError),
+    /// Fixture corpus manifest parse failure.
+    #[error(transparent)]
+    Manifest(#[from] serde_json::Error),
+    /// Fixture corpus manifest semantic validation error.
+    #[error("invalid fixture corpus: {0}")]
+    InvalidCorpus(&'static str),
+}
+
+/// Supported fixture corpus categories.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FixtureCategory {
+    /// Deterministic generated fixtures.
+    Synthetic,
+    /// Captured real-world fixtures.
+    Real,
+    /// Inputs that should not decode.
+    HardNegative,
+}
+
+/// One fixture entry in the corpus manifest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FixtureManifestEntry {
+    /// Stable fixture identifier.
+    pub id: String,
+    /// Fixture category.
+    pub category: FixtureCategory,
+    /// Relative path under the corpus root.
+    pub path: String,
+    /// Human-readable short description.
+    pub description: String,
+}
+
+/// Versioned fixture corpus manifest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FixtureCorpusManifest {
+    /// Manifest schema version.
+    pub schema_version: u32,
+    /// Corpus semantic version string.
+    pub corpus_version: String,
+    /// Fixture entries.
+    pub entries: Vec<FixtureManifestEntry>,
+}
+
+impl FixtureCorpusManifest {
+    /// Parse and validate a fixture corpus manifest from JSON.
+    pub fn from_json(json: &str) -> Result<Self, TestkitError> {
+        let manifest: Self = serde_json::from_str(json)?;
+        manifest.validate()?;
+        Ok(manifest)
+    }
+
+    /// Validate basic manifest invariants.
+    pub fn validate(&self) -> Result<(), TestkitError> {
+        if self.schema_version == 0 {
+            return Err(TestkitError::InvalidCorpus("schema_version must be >= 1"));
+        }
+        if self.corpus_version.trim().is_empty() {
+            return Err(TestkitError::InvalidCorpus(
+                "corpus_version must not be empty",
+            ));
+        }
+        if self.entries.is_empty() {
+            return Err(TestkitError::InvalidCorpus("entries must not be empty"));
+        }
+
+        let mut seen_ids = std::collections::BTreeSet::new();
+        for entry in &self.entries {
+            if entry.id.trim().is_empty() {
+                return Err(TestkitError::InvalidCorpus("entry id must not be empty"));
+            }
+            if !seen_ids.insert(entry.id.as_str()) {
+                return Err(TestkitError::InvalidCorpus("entry id must be unique"));
+            }
+            if entry.path.trim().is_empty() {
+                return Err(TestkitError::InvalidCorpus("entry path must not be empty"));
+            }
+            if entry.path.contains("..") {
+                return Err(TestkitError::InvalidCorpus(
+                    "entry path must stay within corpus root",
+                ));
+            }
+            if entry.description.trim().is_empty() {
+                return Err(TestkitError::InvalidCorpus(
+                    "entry description must not be empty",
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Canonical payload fixtures for protocol tests.
@@ -151,5 +242,63 @@ mod tests {
             let frame = render_roundtrip(&payload).unwrap();
             assert_eq!(frame.payload, payload);
         }
+    }
+
+    #[test]
+    fn fixture_manifest_parses_and_validates() {
+        let json = r#"{
+            "schema_version": 1,
+            "corpus_version": "0.1.0",
+            "entries": [
+                {
+                    "id": "synthetic-ribbon-clean-001",
+                    "category": "synthetic",
+                    "path": "synthetic/ribbon/clean-001.png",
+                    "description": "Generated clean ribbon fixture."
+                },
+                {
+                    "id": "real-debugger-screenshot-001",
+                    "category": "real",
+                    "path": "real/debugger/screenshot-001.png",
+                    "description": "Captured debugger screenshot fixture."
+                },
+                {
+                    "id": "negative-ui-clutter-001",
+                    "category": "hard_negative",
+                    "path": "hard_negative/ui/clutter-001.png",
+                    "description": "No symbol present; used for false-positive checks."
+                }
+            ]
+        }"#;
+        let manifest = FixtureCorpusManifest::from_json(json).unwrap();
+        assert_eq!(manifest.schema_version, 1);
+        assert_eq!(manifest.entries.len(), 3);
+    }
+
+    #[test]
+    fn fixture_manifest_rejects_duplicate_ids() {
+        let json = r#"{
+            "schema_version": 1,
+            "corpus_version": "0.1.0",
+            "entries": [
+                {
+                    "id": "dup-id",
+                    "category": "synthetic",
+                    "path": "synthetic/a.png",
+                    "description": "A"
+                },
+                {
+                    "id": "dup-id",
+                    "category": "real",
+                    "path": "real/b.png",
+                    "description": "B"
+                }
+            ]
+        }"#;
+        let error = FixtureCorpusManifest::from_json(json).unwrap_err();
+        assert!(matches!(
+            error,
+            TestkitError::InvalidCorpus("entry id must be unique")
+        ));
     }
 }
