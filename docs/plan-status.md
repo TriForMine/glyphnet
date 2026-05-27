@@ -23,7 +23,7 @@ This file tracks execution status for the roadmap priorities in
 ## Next Up
 
 1. `glyphnet-decode` module split phase 1: sampling, header precheck, recovery
-   routing.
+   routing (done via `autodetect.rs` + `recovery.rs`).
 2. Fixture corpus scaffolding under `crates/glyphnet-testkit`.
 3. Scanner follow-up split: isolate decode/fractional paths from `lib.rs` (done
    in `decode_paths.rs`).
