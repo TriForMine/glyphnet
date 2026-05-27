@@ -105,6 +105,6 @@ current reference scanner already reaches every target.
   the release notes explaining the quality tradeoff.
 
 
-In CI we currently set `SCANNER_BENCH_TOLERANCE_PCT=700` explicitly for this gate
-while scanner throughput is being optimized toward the profile target, so the job
-remains informative (and comments PR-vs-base deltas) instead of permanently red.
+In CI we currently set `SCANNER_BENCH_TOLERANCE_PCT=200` explicitly for this gate
+while scanner throughput is being optimized toward the profile target. This keeps
+the gate enforceable while still allowing incremental optimization work.

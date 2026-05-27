@@ -14,5 +14,4 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-features
-      - run: cargo package --workspace --allow-dirty --no-verify
-      - run: cargo package -p glyphnet-core --allow-dirty
+      - run: cargo package --workspace --locked
