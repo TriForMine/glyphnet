@@ -24,6 +24,11 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace --all-features
       - run: cargo doc --workspace --all-features --no-deps
+      - name: Enforce docs on phase-critical public APIs
+        run: |
+          RUSTDOCFLAGS="-Dmissing-docs" cargo doc -p glyphnet-ecc --no-deps
+          RUSTDOCFLAGS="-Dmissing-docs" cargo doc -p glyphnet-decode --no-deps
+          RUSTDOCFLAGS="-Dmissing-docs" cargo doc -p glyphnet-scanner --no-deps
 
   scanner-perf-gate:
     name: scanner perf gate
