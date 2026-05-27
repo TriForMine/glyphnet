@@ -892,7 +892,7 @@ fn coarse_ribbon_grid_candidates(image_width: u32, image_height: u32) -> Vec<Sca
     for module_px in [4u32, 5, 3, 6, 7, 8] {
         let width = 104 * module_px;
         let height = 44 * module_px;
-        if width >= image_width || height >= image_height {
+        if width > image_width || height > image_height {
             continue;
         }
         let x_fracs = [0.06_f32, 0.115, 0.16, 0.22, 0.30, 0.38];
@@ -974,8 +974,8 @@ fn content_bounds(image: &DynamicImage) -> Option<ScanRegion> {
         width: max_x.saturating_sub(min_x).saturating_add(1),
         height: max_y.saturating_sub(min_y).saturating_add(1),
     })?;
-    let image_area = image.width().saturating_mul(image.height()).max(1);
-    let region_area = region.width.saturating_mul(region.height);
+    let image_area = (image.width() as u64).saturating_mul(image.height() as u64).max(1);
+    let region_area = (region.width as u64).saturating_mul(region.height as u64);
     if region_area.saturating_mul(100) / image_area >= 85 {
         return None;
     }
