@@ -1,6 +1,7 @@
 # Browser SDK
 
 The browser SDK is expected to wrap `glyphnet-wasm`.
+Current maturity target: Phase 5.1 experimental preview (`@glyphnet/browser`).
 
 Planned capabilities:
 
@@ -38,13 +39,25 @@ Current WASM bridge:
   `{"key_id": <u32>, "payload_len": <u32>, "tag_hex": "<32 hex chars>"}`.
 - `verifyDetachedAuth(input, signatureJson, keyringJson)` verifies detached
   signature JSON against keyring JSON and returns:
-  `{"verified": <bool>, "key_id": <u32>, "error": <string|null>}`.
+  `{"verified": <bool>, "key_id": <u32>, "error": <string|null>, "reason": <string|null>}`.
 - `signDetachedEd25519(input, signingKeyHex, keyId)` returns detached Ed25519
   signature JSON:
   `{"key_id": <u32>, "payload_len": <u32>, "signature_hex": "<128 hex chars>"}`.
 - `verifyDetachedEd25519(input, signatureJson, keyringJson)` verifies detached
   Ed25519 signature JSON against public-key keyring JSON and returns:
-  `{"verified": <bool>, "key_id": <u32>, "error": <string|null>}`.
+  `{"verified": <bool>, "key_id": <u32>, "error": <string|null>, "reason": <string|null>}`.
+
+Phase 5.1 package contract:
+
+- Package name: `@glyphnet/browser`.
+- Runtime entry: `dist/index.js`.
+- Type entry: `dist/index.d.ts`.
+- Published files: `dist/` and `pkg/`.
+- Public init API: `initGlyphNet(...) -> Promise<GlyphNetBrowser>`.
+- Auth verification reason codes match protocol contract:
+  `unknown_key_id`, `key_not_yet_valid`, `key_expired`,
+  `missing_verification_key`, `auth_mismatch`, `invalid_envelope`,
+  `verify_failed`, `unsigned_payload`.
 
 Keyring JSON format for detached verification:
 
@@ -92,4 +105,5 @@ Build target:
 
 ```powershell
 wasm-pack build crates/glyphnet-wasm --target web --out-dir ../../sdk/browser/pkg
+npm run build
 ```
