@@ -351,6 +351,8 @@ mod tests {
         .unwrap();
         assert!(json.contains(r#""ok": true"#));
         assert!(json.contains("wasm scan"));
+        assert!(json.contains(r#""scan_telemetry""#));
+        assert!(json.contains(r#""recovery""#));
     }
 
     #[test]
@@ -383,5 +385,27 @@ mod tests {
         assert!(json.contains(r#""ok": true"#));
         assert!(json.contains("matrix sample"));
         assert!(json.contains("Matrix"));
+    }
+
+    #[test]
+    fn native_scan_api_reports_recovery_and_telemetry_contract() {
+        let encoded = Encoder::default().encode_static(b"screen telemetry").unwrap();
+        let image = glyphnet_render::RasterRenderer::default()
+            .render(&encoded.matrix)
+            .unwrap();
+        let json = scan_rgba_json(
+            image.as_raw(),
+            image.width(),
+            image.height(),
+            TransmissionMode::Print,
+        )
+        .unwrap();
+        assert!(json.contains(r#""ok": true"#));
+        assert!(json.contains("screen telemetry"));
+        assert!(json.contains(r#""scan_telemetry""#));
+        assert!(json.contains(r#""candidate_count""#));
+        assert!(json.contains(r#""failed_candidates""#));
+        assert!(json.contains(r#""recovery""#));
+        assert!(json.contains(r#""method""#));
     }
 }
