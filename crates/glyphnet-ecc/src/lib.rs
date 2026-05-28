@@ -50,6 +50,9 @@ pub enum EccScheme {
     Ldpc,
 }
 
+#[cfg(feature = "ldpc")]
+const LDPC_MIN_PARITY_BYTES: usize = 16;
+
 /// Recovery strategy used by ECC repair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecoveryMethod {
@@ -272,6 +275,84 @@ impl BlockCode for ReedSolomonCode {
     }
 }
 
+/// Sparse binary LDPC-style parity code.
+#[cfg(feature = "ldpc")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LdpcCode {
+    parity_bytes: usize,
+}
+
+#[cfg(feature = "ldpc")]
+impl LdpcCode {
+    /// Create an LDPC code with explicit parity byte count.
+    pub const fn new(parity_bytes: usize) -> Self {
+        Self { parity_bytes }
+    }
+
+    /// Select an LDPC parity byte count from ECC level and payload length.
+    pub fn from_level(level: EccLevel, data_len: usize) -> Self {
+        let (num, den) = level.parity_ratio();
+        let parity_bytes = ((data_len * num).div_ceil(den)).max(LDPC_MIN_PARITY_BYTES);
+        Self::new(parity_bytes)
+    }
+
+    pub const fn parity_len(self) -> usize {
+        self.parity_bytes
+    }
+
+    fn parity_bytes(self, data: &[u8]) -> Vec<u8> {
+        if self.parity_bytes == 0 {
+            return Vec::new();
+        }
+        let parity_bits = self.parity_bytes * 8;
+        let data_bits = data.len() * 8;
+        if data_bits == 0 {
+            return vec![0u8; self.parity_bytes];
+        }
+        let mut out = vec![0u8; self.parity_bytes];
+        // Regular-ish sparse graph: each parity bit checks 9 data bits.
+        for pbit in 0..parity_bits {
+            let mut acc = 0u8;
+            let mut seed = pbit as u32 ^ 0x9E37_79B9;
+            for tap in 0..9u32 {
+                seed = seed
+                    .wrapping_mul(1_664_525)
+                    .wrapping_add(1_013_904_223 ^ tap.rotate_left(7));
+                let dbit = (seed as usize) % data_bits;
+                acc ^= bit_at(data, dbit);
+            }
+            if acc & 1 == 1 {
+                out[pbit / 8] |= 1 << (pbit % 8);
+            }
+        }
+        out
+    }
+}
+
+#[cfg(feature = "ldpc")]
+impl BlockCode for LdpcCode {
+    fn encode(&self, data: &[u8]) -> Vec<u8> {
+        let parity = self.parity_bytes(data);
+        let mut encoded = Vec::with_capacity(data.len() + parity.len());
+        encoded.extend_from_slice(data);
+        encoded.extend_from_slice(&parity);
+        encoded
+    }
+
+    fn verify(&self, encoded: &[u8], data_len: usize) -> bool {
+        if encoded.len() < data_len + self.parity_bytes {
+            return false;
+        }
+        let expected = self.parity_bytes(&encoded[..data_len]);
+        encoded[data_len..data_len + self.parity_bytes] == expected
+    }
+}
+
+#[cfg(feature = "ldpc")]
+fn bit_at(bytes: &[u8], bit_index: usize) -> u8 {
+    (bytes[bit_index / 8] >> (bit_index % 8)) & 1
+}
+
 /// Select the ECC scheme for a frame mode and level.
 pub const fn scheme_for_mode(mode: TransmissionMode, _level: EccLevel) -> EccScheme {
     match mode {
@@ -318,10 +399,7 @@ pub fn encode_for_mode(mode: TransmissionMode, level: EccLevel, wire: &[u8]) -> 
             }
         }
         #[cfg(feature = "ldpc")]
-        EccScheme::Ldpc => {
-            // Compatibility fallback until the dedicated LDPC codec lands.
-            ParityCode::from_level(level, wire.len()).encode(wire)
-        }
+        EccScheme::Ldpc => LdpcCode::from_level(level, wire.len()).encode(wire),
     };
     let data_len = wire.len();
     if encoded.len() <= data_len {
@@ -371,9 +449,8 @@ pub fn verify_for_mode(
         }
         #[cfg(feature = "ldpc")]
         EccScheme::Ldpc => {
-            let parity = ParityCode::from_level(level, data_len);
-            // Compatibility fallback until the dedicated LDPC codec lands.
-            parity.verify(&normalized, data_len) || parity.verify(encoded, data_len)
+            let ldpc = LdpcCode::from_level(level, data_len);
+            ldpc.verify(&normalized, data_len) || ldpc.verify(encoded, data_len)
         }
     }
 }
@@ -549,6 +626,80 @@ pub fn try_recover_for_mode_with_suspects_and_telemetry(
             telemetry.attempts = attempts;
             return (None, telemetry);
         }
+    }
+
+    #[cfg(feature = "ldpc")]
+    if matches!(scheme_for_mode(mode, level), EccScheme::Ldpc) {
+        let ldpc = LdpcCode::from_level(level, data_len);
+        let parity_len = ldpc.parity_len();
+        if encoded.len() < data_len + parity_len {
+            return (None, telemetry);
+        }
+        telemetry.attempted = true;
+        let mut repaired = normalized.to_vec();
+        let expected = ldpc.parity_bytes(&repaired[..data_len]);
+        repaired[data_len..data_len + parity_len].copy_from_slice(&expected);
+        if ldpc.verify(&repaired, data_len) && Frame::decode(&repaired).is_ok() {
+            telemetry.recovered = true;
+            telemetry.method = RecoveryMethod::ParityTailRebuild;
+            return (Some(to_encoded_layout(repaired)), telemetry);
+        }
+
+        let mut attempts = 0usize;
+        let mut candidate = normalized.to_vec();
+        let mut tried_index = vec![false; data_len];
+        for &index in suspects {
+            if index < data_len {
+                tried_index[index] = true;
+                let original = candidate[index];
+                for value in 0u8..=u8::MAX {
+                    if value == original {
+                        continue;
+                    }
+                    attempts += 1;
+                    if attempts > max_attempts {
+                        telemetry.attempts = attempts;
+                        telemetry.max_attempts_exceeded = true;
+                        return (None, telemetry);
+                    }
+                    candidate[index] = value;
+                    if ldpc.verify(&candidate, data_len) && Frame::decode(&candidate).is_ok() {
+                        telemetry.recovered = true;
+                        telemetry.attempts = attempts;
+                        telemetry.method = RecoveryMethod::ParityByteSearch;
+                        return (Some(to_encoded_layout(candidate)), telemetry);
+                    }
+                }
+                candidate[index] = original;
+            }
+        }
+        for index in 0..data_len {
+            if tried_index[index] {
+                continue;
+            }
+            let original = candidate[index];
+            for value in 0u8..=u8::MAX {
+                if value == original {
+                    continue;
+                }
+                attempts += 1;
+                if attempts > max_attempts {
+                    telemetry.attempts = attempts;
+                    telemetry.max_attempts_exceeded = true;
+                    return (None, telemetry);
+                }
+                candidate[index] = value;
+                if ldpc.verify(&candidate, data_len) && Frame::decode(&candidate).is_ok() {
+                    telemetry.recovered = true;
+                    telemetry.attempts = attempts;
+                    telemetry.method = RecoveryMethod::ParityByteSearch;
+                    return (Some(to_encoded_layout(candidate)), telemetry);
+                }
+            }
+            candidate[index] = original;
+        }
+        telemetry.attempts = attempts;
+        return (None, telemetry);
     }
 
     let parity = ParityCode::from_level(level, data_len);
@@ -837,6 +988,15 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "ldpc")]
+    #[test]
+    fn ldpc_code_verifies_clean_blocks() {
+        let code = LdpcCode::from_level(EccLevel::High, b"glyphnet".len());
+        let encoded = code.encode(b"glyphnet");
+        assert!(code.verify(&encoded, b"glyphnet".len()));
+    }
+
+    #[cfg(not(feature = "ldpc"))]
     #[test]
     fn verify_for_mode_accepts_legacy_non_interleaved_screen_payloads() {
         let wire = b"legacy-screen-wire";
