@@ -1,5 +1,6 @@
 //! WebAssembly-facing API for GlyphNet.
 
+use glyphnet_core::open_authenticated_payload;
 use glyphnet_core::{LayoutFamily, ProfileId, TransmissionMode, profile_spec};
 use glyphnet_decode::decode_authenticated_payload;
 use glyphnet_encode::{Encoder, EncoderConfig};
@@ -329,6 +330,8 @@ fn parse_auth_key_hex(auth_key_hex: &str) -> Result<[u8; 32], String> {
 pub struct BurstScanSession {
     scanner: Scanner,
     frame_counter: u64,
+    verify_key: Option<[u8; 32]>,
+    verify_key_id: Option<u32>,
 }
 
 impl BurstScanSession {
@@ -339,6 +342,16 @@ impl BurstScanSession {
 
     /// Create a new burst scan session with optional max decode window.
     pub fn new_with_config(mode: TransmissionMode, max_frames: Option<usize>) -> Self {
+        Self::new_with_config_and_verification(mode, max_frames, None, None)
+    }
+
+    /// Create a new burst scan session with optional max decode window and authenticity verifier.
+    pub fn new_with_config_and_verification(
+        mode: TransmissionMode,
+        max_frames: Option<usize>,
+        verify_key: Option<[u8; 32]>,
+        verify_key_id: Option<u32>,
+    ) -> Self {
         let default_window = profile_spec(ProfileId::PulseBurst)
             .burst_max_decode_window
             .map(usize::from)
@@ -350,6 +363,8 @@ impl BurstScanSession {
                 ..ScannerConfig::default()
             }),
             frame_counter: 0,
+            verify_key,
+            verify_key_id,
         }
     }
 
@@ -382,7 +397,7 @@ impl BurstScanSession {
             })
             .map_err(|error| error.to_string())?;
         self.frame_counter = self.frame_counter.saturating_add(1);
-        serde_json::to_string_pretty(&serde_json::json!({
+        let mut payload = serde_json::json!({
             "ok": true,
             "stream_id": event.frame.header.stream_id,
             "frame_index": event.frame.header.frame_index,
@@ -392,11 +407,48 @@ impl BurstScanSession {
                 "frame_count": event.burst_progress.frame_count,
                 "received_frames": event.burst_progress.received_frames,
                 "missing_frames": event.burst_progress.missing_frames
-            },
-            "payload_utf8_lossy": event.complete_payload.as_ref().map(|payload| String::from_utf8_lossy(payload).to_string()),
-            "payload_len": event.complete_payload.as_ref().map(std::vec::Vec::len),
-        }))
-        .map_err(|error| error.to_string())
+            }
+        });
+        if let Some(raw_payload) = event.complete_payload {
+            payload["payload_utf8_lossy"] =
+                serde_json::json!(String::from_utf8_lossy(&raw_payload).to_string());
+            payload["payload_len"] = serde_json::json!(raw_payload.len());
+            if let Some(auth) = self.verify_auth_payload(&raw_payload)? {
+                payload["auth"] = auth;
+            }
+        } else {
+            payload["payload_utf8_lossy"] = serde_json::Value::Null;
+            payload["payload_len"] = serde_json::Value::Null;
+        }
+        serde_json::to_string_pretty(&payload).map_err(|error| error.to_string())
+    }
+
+    fn verify_auth_payload(&self, payload: &[u8]) -> Result<Option<serde_json::Value>, String> {
+        if open_authenticated_payload(payload, |_id| None).is_err() {
+            return Ok(None);
+        }
+        let (Some(key), Some(key_id)) = (self.verify_key, self.verify_key_id) else {
+            return Ok(Some(serde_json::json!({
+                "verified": false,
+                "key_id": serde_json::Value::Null,
+                "error": "authenticated payload detected but no verification key was provided"
+            })));
+        };
+        match decode_authenticated_payload(
+            payload,
+            |id| if id == key_id { Some(key) } else { None },
+        ) {
+            Ok(_) => Ok(Some(serde_json::json!({
+                "verified": true,
+                "key_id": key_id,
+                "error": serde_json::Value::Null
+            }))),
+            Err(error) => Ok(Some(serde_json::json!({
+                "verified": false,
+                "key_id": key_id,
+                "error": error.to_string()
+            }))),
+        }
     }
 }
 
@@ -642,6 +694,27 @@ mod wasm {
             })
         }
 
+        /// Create a session with explicit max frame window and authenticity verification key.
+        #[wasm_bindgen(js_name = withConfigAndVerification)]
+        pub fn with_config_and_verification(
+            mode: &str,
+            max_frames: u32,
+            verify_key_hex: &str,
+            verify_key_id: u32,
+        ) -> Result<WasmBurstScanSession, JsValue> {
+            let mode = crate::mode_from_str(mode).map_err(|error| JsValue::from_str(&error))?;
+            let verify_key = crate::parse_auth_key_hex(verify_key_hex)
+                .map_err(|error| JsValue::from_str(&error))?;
+            Ok(Self {
+                inner: crate::BurstScanSession::new_with_config_and_verification(
+                    mode,
+                    Some(max_frames as usize),
+                    Some(verify_key),
+                    Some(verify_key_id),
+                ),
+            })
+        }
+
         /// Scan one frame and return progress/result JSON.
         #[wasm_bindgen(js_name = scanRgbaFrameJson)]
         pub fn scan_rgba_frame_json(
@@ -779,6 +852,34 @@ mod tests {
         }
         assert!(final_json.contains(r#""complete": true"#));
         assert!(final_json.contains("burst-session"));
+    }
+
+    #[test]
+    fn native_burst_session_with_verification_still_completes() {
+        let key = [0x55u8; 32];
+        let encoder = Encoder::new(EncoderConfig {
+            mode: TransmissionMode::Burst,
+            max_frame_payload: 3,
+            ..EncoderConfig::default()
+        });
+        let frames = encoder.encode_burst(b"burst-auth").unwrap();
+        let mut session = BurstScanSession::new_with_config_and_verification(
+            TransmissionMode::Burst,
+            None,
+            Some(key),
+            Some(17),
+        );
+
+        let mut final_json = String::new();
+        for frame in frames {
+            let image = glyphnet_render::RasterRenderer::default()
+                .render(&frame.matrix)
+                .unwrap();
+            final_json = session
+                .scan_rgba_frame_json(image.as_raw(), image.width(), image.height())
+                .unwrap();
+        }
+        assert!(final_json.contains(r#""complete": true"#));
     }
 
     #[test]
