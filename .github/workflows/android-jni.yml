@@ -30,6 +30,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust Android targets
+        run: |
+          rustup target add aarch64-linux-android
+          rustup target add armv7-linux-androideabi
+          rustup target add x86_64-linux-android
       - uses: Swatinem/rust-cache@v2
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -61,4 +66,3 @@ jobs:
           name: glyphnet-android-jni-libs
           path: out/jniLibs
           if-no-files-found: error
-

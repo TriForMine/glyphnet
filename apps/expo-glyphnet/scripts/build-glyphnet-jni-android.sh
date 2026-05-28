@@ -11,6 +11,9 @@ if ! command -v cargo-ndk >/dev/null 2>&1; then
   exit 0
 fi
 
+echo "Ensuring Rust Android targets are installed..."
+rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 OUT_ROOT="${WORKSPACE_ROOT}/apps/expo-glyphnet/modules/glyphnet-scanner/android/src/main/jniLibs"
