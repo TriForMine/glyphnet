@@ -12,7 +12,7 @@ mkdir -p "$(dirname "${OUTPUT_JSON}")"
 
 LOG_FILE="$(mktemp)"
 echo "[burst-reliability] running scanner loss-sweep test"
-cargo test -p glyphnet-scanner scanner_erasure_burst_loss_sweep_meets_baseline_targets -- --nocapture 2>&1 | tee "${LOG_FILE}"
+cargo test -p glyphnet-scanner scanner_erasure_burst_loss_sweep_meets_baseline_targets -- --ignored --nocapture 2>&1 | tee "${LOG_FILE}"
 
 python3 - "${LOG_FILE}" "${OUTPUT_JSON}" <<'PY'
 import json
@@ -47,10 +47,10 @@ if not cases:
     sys.exit(2)
 
 targets = {
-    0.10: 0.80,
-    0.20: 0.55,
-    0.30: 0.10,
-    0.40: 0.00,
+    0.10: 0.95,
+    0.20: 0.90,
+    0.30: 0.65,
+    0.40: 0.45,
 }
 status = "pass"
 for case in cases:
@@ -76,4 +76,3 @@ if status == "fail":
 else:
     print("[burst-reliability] PASS: reliability within baseline targets")
 PY
-

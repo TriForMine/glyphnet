@@ -1119,9 +1119,13 @@ mod tests {
         assert_eq!(recovered, Some(payload));
     }
 
-    #[test]
-    fn scanner_erasure_burst_loss_sweep_meets_baseline_targets() {
-        let payload = vec![0x5A; 512];
+    fn run_erasure_loss_sweep(
+        payload_len: usize,
+        trials: usize,
+        max_median_frames: usize,
+        rates: &[(f32, f32)],
+    ) {
+        let payload = vec![0x5A; payload_len];
         let encoder = Encoder::new(EncoderConfig {
             mode: TransmissionMode::Burst,
             ecc_level: EccLevel::High,
@@ -1129,18 +1133,11 @@ mod tests {
         });
         let frames = encoder.encode_burst_erasure(&payload, 12).unwrap();
         let mut rng = StdRng::seed_from_u64(0xB517_5EED);
-        let rates = [
-            (0.10f32, 0.95f32),
-            (0.20f32, 0.90f32),
-            (0.30f32, 0.65f32),
-            (0.40f32, 0.45f32),
-        ];
 
-        for (drop_rate, min_success) in rates {
+        for (drop_rate, min_success) in rates.iter().copied() {
             let mut successes = 0usize;
             let mut completion_frames = Vec::new();
             let mut completion_millis = Vec::new();
-            let trials = 10usize;
             for _ in 0..trials {
                 let mut scanner = Scanner::new(ScannerConfig {
                     mode: TransmissionMode::Burst,
@@ -1186,8 +1183,8 @@ mod tests {
                     "[burst-reliability] drop_rate={drop_rate:.2} success_rate={success_rate:.3} median_frames={median} median_completion_ms={median_ms}"
                 );
                 assert!(
-                    median <= 64,
-                    "drop_rate={drop_rate:.2} median_frames_to_complete={median} exceeded 64"
+                    median <= max_median_frames,
+                    "drop_rate={drop_rate:.2} median_frames_to_complete={median} exceeded {max_median_frames}"
                 );
             } else {
                 eprintln!(
@@ -1195,6 +1192,24 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn scanner_erasure_burst_loss_sweep_fast_smoke() {
+        let rates = [(0.10f32, 0.95f32), (0.30f32, 0.60f32)];
+        run_erasure_loss_sweep(256, 4, 48, &rates);
+    }
+
+    #[test]
+    #[ignore = "full reliability sweep for CI reporting; too slow for default test suite"]
+    fn scanner_erasure_burst_loss_sweep_meets_baseline_targets() {
+        let rates = [
+            (0.10f32, 0.95f32),
+            (0.20f32, 0.90f32),
+            (0.30f32, 0.65f32),
+            (0.40f32, 0.45f32),
+        ];
+        run_erasure_loss_sweep(512, 10, 64, &rates);
     }
 
     #[test]
