@@ -1,4 +1,4 @@
-b[workspace]
+[workspace]
 members = ["crates/*"]
 exclude = ["fuzz"]
 resolver = "3"
