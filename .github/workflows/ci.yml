@@ -81,6 +81,13 @@ jobs:
             const prMap = toMap(pr);
             const baseMap = toMap(base);
             const benchNames = Array.from(new Set([...prMap.keys(), ...baseMap.keys()]));
+            const matrixBenchNames = benchNames.filter(name => name.includes('matrix'));
+            const matrixCases = matrixBenchNames
+              .map(name => prMap.get(name))
+              .filter(Boolean);
+            const matrixGatingCases = matrixCases.filter(c => c.gating !== false);
+            const matrixPassCount = matrixGatingCases.filter(c => c.status === 'pass').length;
+            const matrixFailCount = matrixGatingCases.filter(c => c.status === 'fail').length;
             const overallEmoji = pr ? (pr.status === 'pass' ? '✅' : '⚠️') : 'ℹ️';
             const marker = '<!-- scanner-perf-comment -->';
             const rows = benchNames.length === 0
@@ -118,10 +125,35 @@ jobs:
               pr
                 ? `- **Allowed (budget + ${pr.tolerance_pct.toFixed(1)}%):** ${pr.allowed_ms.toFixed(3)} ms`
                 : '- **Allowed threshold:** unavailable',
+              matrixBenchNames.length > 0
+                ? `- **Matrix gating benches:** ${matrixPassCount} pass / ${matrixFailCount} fail`
+                : '- **Matrix gating benches:** unavailable',
               '',
               rows[0],
               rows[1],
               ...rows.slice(2),
+              '',
+              matrixBenchNames.length > 0 ? '### Matrix subset' : '### Matrix subset',
+              matrixBenchNames.length === 0
+                ? '_No matrix benchmark rows were produced in this run._'
+                : [
+                    '| Benchmark | Gating | PR median (ms) | Base median (ms) | Delta (ms) | Delta % |',
+                    '|---|:---:|---:|---:|---:|---:|',
+                    ...matrixBenchNames.map(name => {
+                      const p = prMap.get(name);
+                      const b = baseMap.get(name);
+                      const prMs = p ? p.median_ms : null;
+                      const baseMs = b ? b.median_ms : null;
+                      const delta = (prMs != null && baseMs != null) ? (prMs - baseMs) : null;
+                      const deltaPct = (delta != null && baseMs !== 0) ? (delta / baseMs) * 100 : null;
+                      const prCell = prMs == null ? '-' : prMs.toFixed(3);
+                      const baseCell = baseMs == null ? '-' : baseMs.toFixed(3);
+                      const deltaCell = delta == null ? '-' : delta.toFixed(3);
+                      const deltaPctCell = deltaPct == null ? '-' : `${deltaPct.toFixed(2)}%`;
+                      const gateCell = p && p.gating === false ? 'No' : 'Yes';
+                      return `| ${name} | ${gateCell} | ${prCell} | ${baseCell} | ${deltaCell} | ${deltaPctCell} |`;
+                    }).join('\n'),
+                  ].join('\n'),
               '',
             ].join('\n');
 
