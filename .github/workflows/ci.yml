@@ -305,12 +305,12 @@ jobs:
       - name: Install browser SDK deps
         working-directory: sdk/browser
         run: bun install --frozen-lockfile
-      - name: Typecheck browser SDK
-        working-directory: sdk/browser
-        run: bun run typecheck
       - name: Build browser SDK package
         working-directory: sdk/browser
         run: bun run build
+      - name: Typecheck browser SDK
+        working-directory: sdk/browser
+        run: bun run typecheck
       - name: Dry-run npm pack
         working-directory: sdk/browser
         run: bun run pack:dry-run
