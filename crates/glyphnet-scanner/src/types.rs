@@ -1,5 +1,6 @@
 use glyphnet_core::LayoutFamily;
 use glyphnet_decode::AutoDecodedSymbol;
+use glyphnet_ecc::RecoveryTelemetry;
 
 use crate::{ScanRegion, ScannerError};
 
@@ -18,6 +19,36 @@ pub struct StillScanResult {
     pub attempts: Vec<ScanAttempt>,
     /// Scanner stage timing diagnostics.
     pub timings: ScanTimings,
+}
+
+/// Scanner-facing telemetry contract for SDK clients.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScanTelemetry {
+    /// Decode-side ECC recovery telemetry.
+    pub recovery: RecoveryTelemetry,
+    /// Number of candidate regions attempted.
+    pub candidate_count: usize,
+    /// Number of candidate regions that failed decode.
+    pub failed_candidates: usize,
+    /// Scanner stage timing diagnostics.
+    pub timings: ScanTimings,
+}
+
+impl StillScanResult {
+    /// Summarize decode/scanner telemetry into an SDK-consumable contract.
+    pub fn telemetry(&self) -> ScanTelemetry {
+        let failed_candidates = self
+            .attempts
+            .iter()
+            .filter(|attempt| !attempt.decoded)
+            .count();
+        ScanTelemetry {
+            recovery: self.decoded.decoded.recovery,
+            candidate_count: self.attempts.len(),
+            failed_candidates,
+            timings: self.timings,
+        }
+    }
 }
 
 /// Diagnostic information for one still-scan candidate.

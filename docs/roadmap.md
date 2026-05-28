@@ -48,6 +48,14 @@ for that strategy.
 - Erasure telemetry surfaced to scanner clients.
 - Scanner-consumable confidence/erasure telemetry contract for SDK clients.
 
+## Phase 2.5: Matrix Baseline Lock
+
+- Keep `Matrix` as the default reliability baseline in scanner routing and
+  acceptance tests.
+- Expand real matrix fixture coverage (clean, clutter, perspective).
+- Add matrix-specific scanner perf/reliability CI reporting alongside ribbon
+  fixtures.
+
 ## Phase 3: Screen Density
 
 - Harden `SpectralScreen` color palettes and RGB modulation.

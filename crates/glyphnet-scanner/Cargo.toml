@@ -18,6 +18,7 @@ async = ["tokio"]
 glyphnet-core = { path = "../glyphnet-core", version = "0.1.0" }
 glyphnet-cv = { path = "../glyphnet-cv", version = "0.1.0" }
 glyphnet-decode = { path = "../glyphnet-decode", version = "0.1.0" }
+glyphnet-ecc = { path = "../glyphnet-ecc", version = "0.1.0" }
 image.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, optional = true }

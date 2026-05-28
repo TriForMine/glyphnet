@@ -451,7 +451,22 @@ fn scan(input: PathBuf, mode: TransmissionMode) -> Result<()> {
             "height": height
         })
     });
-    println!("{}", decode_json(&scanned.decoded, crop, quad, warp));
+    let telemetry = scanned.telemetry();
+    let mut payload = decode_json(&scanned.decoded, crop, quad, warp);
+    payload["scan_telemetry"] = serde_json::json!({
+        "candidate_count": telemetry.candidate_count,
+        "failed_candidates": telemetry.failed_candidates,
+        "timings": {
+            "total_micros": telemetry.timings.total_micros,
+            "full_frame_micros": telemetry.timings.full_frame_micros,
+            "grayscale_micros": telemetry.timings.grayscale_micros,
+            "threshold_micros": telemetry.timings.threshold_micros,
+            "quad_micros": telemetry.timings.quad_micros,
+            "candidate_micros": telemetry.timings.candidate_micros,
+            "decode_attempts_micros": telemetry.timings.decode_attempts_micros
+        }
+    });
+    println!("{payload}");
     Ok(())
 }
 
@@ -474,6 +489,14 @@ fn decode_json(
             "quiet_zone_modules": auto_decoded.info.quiet_zone_modules,
             "threshold": auto_decoded.info.threshold,
             "layout": layout_name(auto_decoded.info.layout)
+        },
+        "recovery": {
+            "attempted": auto_decoded.decoded.recovery.attempted,
+            "recovered": auto_decoded.decoded.recovery.recovered,
+            "attempts": auto_decoded.decoded.recovery.attempts,
+            "method": format!("{:?}", auto_decoded.decoded.recovery.method),
+            "suspect_count": auto_decoded.decoded.recovery.suspect_count,
+            "max_attempts_exceeded": auto_decoded.decoded.recovery.max_attempts_exceeded
         }
     });
     if let Some(crop) = crop {

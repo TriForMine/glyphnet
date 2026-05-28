@@ -11,7 +11,8 @@ This file tracks execution status for the roadmap priorities in
 - [ ] Keep scanner performance gate enforceable while converging to profile budgets.
 - [x] Publish a versioned fixture corpus (synthetic + real + hard negatives)
   scaffold.
-- [ ] Complete Phase 2 ECC: LDPC screen profile and scanner-facing telemetry contract.
+- [x] Complete Phase 2 ECC: LDPC screen profile and scanner-facing telemetry contract.
+- [ ] Lock matrix as scanner reliability baseline in CI (fixtures + perf/reliability rows).
 - [ ] Deliver burst erasure transport (fountain/RaptorQ-like direction).
 - [ ] Add payload authenticity envelope above transport CRC.
 
@@ -19,11 +20,15 @@ This file tracks execution status for the roadmap priorities in
 
 - `feat/testkit-corpus-integrity-check`: add default fixture-manifest loading
   and integrity checks for corpus file paths.
+- `feat/phase2-ecc-telemetry`: complete Phase 2 baseline with scanner-facing
+  ECC telemetry contract, feature-gated screen LDPC path, and regression/bench
+  coverage.
 
 ## Next Up
 
 1. Keep scanner performance gate enforceable while converging to profile
    budgets.
-2. Complete Phase 2 ECC: LDPC screen profile and scanner-facing telemetry
-   contract.
-3. Add payload authenticity envelope above transport CRC.
+2. Lock matrix as scanner reliability baseline in CI:
+   add matrix-first scan path checks, real matrix fixtures, and matrix-specific
+   perf/reliability gate rows.
+3. Deliver burst erasure transport (fountain/RaptorQ-like direction).
