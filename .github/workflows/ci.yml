@@ -314,3 +314,27 @@ jobs:
       - name: Dry-run npm pack
         working-directory: sdk/browser
         run: bun run pack:dry-run
+      - name: Consumer smoke test (install + TypeScript import)
+        run: |
+          set -euo pipefail
+          cd sdk/browser
+          PACKAGE_TGZ="$(npm pack --ignore-scripts | tail -n1)"
+          CONSUMER_DIR="/tmp/glyphnet-browser-consumer"
+          rm -rf "$CONSUMER_DIR"
+          mkdir -p "$CONSUMER_DIR"
+          cat > "$CONSUMER_DIR/package.json" <<'JSON'
+          {
+            "name": "glyphnet-browser-consumer-smoke",
+            "private": true,
+            "type": "module"
+          }
+          JSON
+          cd "$CONSUMER_DIR"
+          bun add "$GITHUB_WORKSPACE/sdk/browser/$PACKAGE_TGZ"
+          bun add -d typescript
+          cat > ./smoke.ts <<'TS'
+          import { initGlyphNet, GlyphNetBrowser } from "@glyphnet/browser";
+          void initGlyphNet;
+          void GlyphNetBrowser;
+          TS
+          bunx tsc --module es2022 --moduleResolution bundler --target es2022 --noEmit smoke.ts
