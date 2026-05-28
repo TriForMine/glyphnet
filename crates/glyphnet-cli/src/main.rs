@@ -210,6 +210,16 @@ enum Command {
         #[arg(long, default_value_t = 1)]
         key_id: u32,
     },
+    /// Inspect a versioned authenticity keyset file.
+    KeysetInspect {
+        /// Keyset JSON path.
+        path: PathBuf,
+    },
+    /// Validate a versioned authenticity keyset file.
+    KeysetValidate {
+        /// Keyset JSON path.
+        path: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -399,6 +409,8 @@ fn main() -> Result<()> {
             public_key_hex,
             key_id,
         } => auth_verify_ed25519(data.as_bytes(), signature, &public_key_hex, key_id),
+        Command::KeysetInspect { path } => keyset_inspect(path),
+        Command::KeysetValidate { path } => keyset_validate(path),
     }
 }
 
@@ -840,6 +852,66 @@ fn load_verify_keys(path: &PathBuf) -> Result<VerificationKeyring> {
     Ok(out)
 }
 
+fn load_keyset_json(path: &PathBuf) -> Result<serde_json::Value> {
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("failed to read keyset file {}", path.display()))?;
+    serde_json::from_str(&content)
+        .with_context(|| format!("invalid JSON in keyset file {}", path.display()))
+}
+
+fn validate_keyset_json(json: &serde_json::Value) -> Result<()> {
+    let version = json
+        .get("version")
+        .and_then(serde_json::Value::as_u64)
+        .context("keyset missing numeric version")?;
+    if version != 1 {
+        bail!("unsupported keyset version {version}");
+    }
+    json.get("issuer")
+        .and_then(serde_json::Value::as_str)
+        .context("keyset missing string issuer")?;
+    json.get("created_at")
+        .and_then(serde_json::Value::as_str)
+        .context("keyset missing string created_at")?;
+    json.get("expires_at")
+        .and_then(serde_json::Value::as_str)
+        .context("keyset missing string expires_at")?;
+    let keys = json
+        .get("keys")
+        .and_then(serde_json::Value::as_array)
+        .context("keyset missing keys array")?;
+    if keys.is_empty() {
+        bail!("keyset keys array must not be empty");
+    }
+    for item in keys {
+        item.get("key_id")
+            .and_then(serde_json::Value::as_u64)
+            .context("keyset key missing numeric key_id")?;
+        let alg = item
+            .get("alg")
+            .and_then(serde_json::Value::as_str)
+            .context("keyset key missing string alg")?;
+        match alg {
+            "mac-blake3" => {
+                let key_hex = item
+                    .get("key_hex")
+                    .and_then(serde_json::Value::as_str)
+                    .context("mac-blake3 key missing string key_hex")?;
+                let _ = parse_auth_key_hex(key_hex)?;
+            }
+            "ed25519" => {
+                let key_hex = item
+                    .get("public_key_hex")
+                    .and_then(serde_json::Value::as_str)
+                    .context("ed25519 key missing string public_key_hex")?;
+                let _ = parse_public_key_hex(key_hex)?;
+            }
+            _ => bail!("unsupported key algorithm {alg}"),
+        }
+    }
+    Ok(())
+}
+
 enum DetachedVerificationInput {
     Mac(DetachedAuthSignature),
     Ed25519(DetachedEd25519Signature),
@@ -1192,5 +1264,46 @@ fn auth_verify_ed25519(
         }
     }
     println!("{result}");
+    Ok(())
+}
+
+fn keyset_inspect(path: PathBuf) -> Result<()> {
+    let json = load_keyset_json(&path)?;
+    validate_keyset_json(&json)?;
+    let issuer = json
+        .get("issuer")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let created_at = json
+        .get("created_at")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let expires_at = json
+        .get("expires_at")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let keys = json
+        .get("keys")
+        .and_then(serde_json::Value::as_array)
+        .map(std::vec::Vec::len)
+        .unwrap_or(0);
+    println!(
+        "{}",
+        serde_json::json!({
+            "ok": true,
+            "version": 1,
+            "issuer": issuer,
+            "created_at": created_at,
+            "expires_at": expires_at,
+            "key_count": keys
+        })
+    );
+    Ok(())
+}
+
+fn keyset_validate(path: PathBuf) -> Result<()> {
+    let json = load_keyset_json(&path)?;
+    validate_keyset_json(&json)?;
+    println!("{}", serde_json::json!({ "ok": true, "valid": true }));
     Ok(())
 }

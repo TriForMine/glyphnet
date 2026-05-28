@@ -50,3 +50,5 @@ This file tracks execution status for the roadmap priorities in
    from non-gating baseline tracking to gated targets once stable.
 5. Define and implement versioned key-discovery/distribution format for SDK
    integrations (key rotation lifecycle, trust roots, and multi-key metadata).
+   Baseline keyset schema + CLI inspect/validate is now implemented; remaining
+   work is trust-root signing and revocation lifecycle policy.

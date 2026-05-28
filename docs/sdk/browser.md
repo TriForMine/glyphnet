@@ -55,6 +55,25 @@ Keyring JSON format for detached verification:
 ]
 ```
 
+Versioned keyset format (recommended):
+
+```json
+{
+  "version": 1,
+  "issuer": "example-org",
+  "created_at": "2026-05-28T00:00:00Z",
+  "expires_at": "2027-05-28T00:00:00Z",
+  "keys": [
+    { "key_id": 1, "alg": "mac-blake3", "key_hex": "001122...ff" },
+    {
+      "key_id": 42,
+      "alg": "ed25519",
+      "public_key_hex": "aabbcc...dd"
+    }
+  ]
+}
+```
+
 Debug workbench:
 
 Build `glyphnet-wasm`, serve the repository root, then open
