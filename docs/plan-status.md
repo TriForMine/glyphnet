@@ -31,8 +31,9 @@ This file tracks execution status for the roadmap priorities in
   erasure encode/recover baseline, stateful scanner burst progress reporting,
   `scan-burst` tooling, and non-gating burst loss-sweep CI comment table.
 - `feat/phase45-auth-envelope-cli`: add embedded authenticity envelope in core,
-  authenticated encode/decode APIs, CLI verify flows, and wasm authenticated
-  encode/verify bridges.
+  authenticated encode/decode APIs, detached signature primitives, CLI keyring
+  verify + sidecar signing flow, wasm authenticated encode/verify bridges, and
+  wasm detached sign/verify exports.
 
 ## Next Up
 
@@ -46,5 +47,5 @@ This file tracks execution status for the roadmap priorities in
    promoted to gating.
 4. Improve burst high-loss reliability (30-40%) and promote burst CI thresholds
    from non-gating baseline tracking to gated targets once stable.
-5. Define/implement detached signature format and key-management ergonomics for
-   SDK clients (follow-up to embedded authenticity envelope baseline).
+5. Add public-key detached signature mode (Ed25519) and versioned key-discovery
+   format for SDK integrations beyond shared-secret MAC keys.

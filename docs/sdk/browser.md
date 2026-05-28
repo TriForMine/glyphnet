@@ -34,6 +34,20 @@ Current WASM bridge:
   scans and verifies authenticity if the payload is enveloped.
 - `BurstScanSession.withConfigAndVerification(mode, maxFrames, verifyKeyHex, verifyKeyId)`
   enables authenticity verification on completed burst payloads.
+- `signDetachedAuth(input, authKeyHex, keyId)` returns detached signature JSON:
+  `{"key_id": <u32>, "payload_len": <u32>, "tag_hex": "<32 hex chars>"}`.
+- `verifyDetachedAuth(input, signatureJson, keyringJson)` verifies detached
+  signature JSON against keyring JSON and returns:
+  `{"verified": <bool>, "key_id": <u32>, "error": <string|null>}`.
+
+Keyring JSON format for detached verification:
+
+```json
+[
+  { "key_id": 1, "key_hex": "001122...ff" },
+  { "key_id": 42, "key_hex": "aabbcc...dd" }
+]
+```
 
 Debug workbench:
 
