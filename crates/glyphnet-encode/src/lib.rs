@@ -2,11 +2,11 @@
 
 use blake3::Hash;
 use glyphnet_core::{
-    Capability, CapabilitySet, ColorEncoding, EccLevel, Frame, GlyphError, LayoutFamily, ProfileId,
-    ProtocolVersion, SymbolDescriptor, SymbolGeometry, SymbolMatrix, TransmissionMode, bitstream,
-    choose_symbol_geometry, profile_spec,
+    BurstPacket, Capability, CapabilitySet, ColorEncoding, EccLevel, Frame, GlyphError,
+    LayoutFamily, ProfileId, ProtocolVersion, SymbolDescriptor, SymbolGeometry, SymbolMatrix,
+    TransmissionMode, bitstream, choose_symbol_geometry, profile_spec,
 };
-use glyphnet_ecc::encode_for_mode;
+use glyphnet_ecc::{BurstErasureCodec, EccError, encode_for_mode};
 use thiserror::Error;
 
 /// Result type for encoder operations.
@@ -18,6 +18,9 @@ pub enum EncodeError {
     /// Wrapped core error.
     #[error(transparent)]
     Core(#[from] GlyphError),
+    /// Wrapped ECC error.
+    #[error(transparent)]
+    Ecc(#[from] EccError),
 }
 
 /// Encoder configuration.
@@ -242,6 +245,43 @@ impl Encoder {
         }
         Ok(entries)
     }
+
+    /// Encode payload as erasure-coded burst shards packed into burst packets.
+    pub fn encode_burst_erasure(
+        &self,
+        payload: &[u8],
+        target_data_shards: usize,
+    ) -> Result<Vec<EncodedSymbol>> {
+        let codec = BurstErasureCodec::from_level(
+            self.config.ecc_level,
+            payload.len(),
+            target_data_shards.max(1),
+        );
+        let shards = codec.encode(payload)?;
+        if shards.shards.len() > usize::from(u16::MAX) {
+            return Err(GlyphError::InvalidArgument(
+                "payload requires too many burst erasure shards",
+            )
+            .into());
+        }
+
+        let packet_count = shards.shards.len() as u16;
+        let stream_id = stream_id(payload);
+        let data_shards = shards.data_shards;
+        let mut frames = Vec::with_capacity(shards.shards.len());
+        for (index, shard) in shards.shards.into_iter().enumerate() {
+            let flags = if index >= data_shards { 0b0000_0001 } else { 0 };
+            let packet = BurstPacket::new(index as u16, packet_count, stream_id, flags, shard)?;
+            frames.push(self.encode_frame(
+                &packet.encode(),
+                index as u16,
+                packet_count,
+                stream_id,
+                TransmissionMode::Burst,
+            )?);
+        }
+        Ok(frames)
+    }
 }
 
 impl Default for Encoder {
@@ -353,5 +393,27 @@ mod tests {
             err,
             EncodeError::Core(GlyphError::InvalidArgument(_))
         ));
+    }
+
+    #[test]
+    fn burst_erasure_encodes_packets_with_repair_flag() {
+        let encoder = Encoder::new(EncoderConfig {
+            mode: TransmissionMode::Burst,
+            ecc_level: EccLevel::High,
+            ..EncoderConfig::default()
+        });
+        let frames = encoder
+            .encode_burst_erasure(b"hello-erasure-burst", 4)
+            .unwrap();
+        assert!(frames.len() > 4);
+
+        let mut repair_count = 0usize;
+        for frame in &frames {
+            let packet = BurstPacket::decode(&frame.frame.payload).unwrap();
+            if packet.header.flags & 0b0000_0001 != 0 {
+                repair_count += 1;
+            }
+        }
+        assert!(repair_count > 0);
     }
 }
