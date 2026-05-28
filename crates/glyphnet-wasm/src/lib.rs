@@ -3,8 +3,9 @@
 use std::collections::HashMap;
 
 use glyphnet_core::{
-    DetachedAuthSignature, open_authenticated_payload, sign_detached_payload,
-    verify_detached_payload,
+    DetachedAuthSignature, DetachedEd25519Signature, open_authenticated_payload,
+    sign_detached_payload, sign_detached_payload_ed25519, verify_detached_payload,
+    verify_detached_payload_ed25519,
 };
 use glyphnet_core::{LayoutFamily, ProfileId, TransmissionMode, profile_spec};
 use glyphnet_decode::decode_authenticated_payload;
@@ -389,6 +390,41 @@ fn parse_keyring_json(keyring_json: &str) -> Result<HashMap<u32, [u8; 32]>, Stri
     Ok(out)
 }
 
+fn parse_detached_ed25519_signature_json(
+    signature_json: &str,
+) -> Result<DetachedEd25519Signature, String> {
+    let json: serde_json::Value =
+        serde_json::from_str(signature_json).map_err(|error| error.to_string())?;
+    let key_id =
+        json.get("key_id")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| "detached signature missing numeric key_id".to_string())? as u32;
+    let payload_len = json
+        .get("payload_len")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| "detached signature missing numeric payload_len".to_string())?
+        as u32;
+    let signature_hex = json
+        .get("signature_hex")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "detached signature missing string signature_hex".to_string())?;
+    if signature_hex.len() != 128 {
+        return Err("detached signature signature_hex must be 128 hex chars".to_string());
+    }
+    let mut signature = [0u8; 64];
+    for (idx, slot) in signature.iter_mut().enumerate() {
+        let start = idx * 2;
+        let end = start + 2;
+        *slot = u8::from_str_radix(&signature_hex[start..end], 16)
+            .map_err(|_| "detached signature contains non-hex characters".to_string())?;
+    }
+    Ok(DetachedEd25519Signature {
+        key_id,
+        payload_len,
+        signature,
+    })
+}
+
 /// Build a detached authenticity signature JSON sidecar for raw payload bytes.
 pub fn sign_detached_auth_json(
     payload: &[u8],
@@ -414,6 +450,52 @@ pub fn verify_detached_auth_json(
     let keyring = parse_keyring_json(keyring_json)?;
     let result = match verify_detached_payload(payload, &signature, |id| keyring.get(&id).copied())
     {
+        Ok(()) => serde_json::json!({
+            "verified": true,
+            "key_id": signature.key_id,
+            "error": serde_json::Value::Null
+        }),
+        Err(error) => serde_json::json!({
+            "verified": false,
+            "key_id": signature.key_id,
+            "error": error.to_string()
+        }),
+    };
+    serde_json::to_string_pretty(&result).map_err(|error| error.to_string())
+}
+
+/// Build a detached Ed25519 signature JSON sidecar for raw payload bytes.
+pub fn sign_detached_ed25519_json(
+    payload: &[u8],
+    signing_key: &[u8; 32],
+    key_id: u32,
+) -> Result<String, String> {
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(signing_key);
+    let signature = sign_detached_payload_ed25519(payload, &signing_key, key_id);
+    let signature_hex = signature
+        .signature
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    serde_json::to_string_pretty(&serde_json::json!({
+        "key_id": signature.key_id,
+        "payload_len": signature.payload_len,
+        "signature_hex": signature_hex
+    }))
+    .map_err(|error| error.to_string())
+}
+
+/// Verify raw payload bytes against detached Ed25519 signature JSON and public keyring JSON.
+pub fn verify_detached_ed25519_json(
+    payload: &[u8],
+    signature_json: &str,
+    keyring_json: &str,
+) -> Result<String, String> {
+    let signature = parse_detached_ed25519_signature_json(signature_json)?;
+    let keyring = parse_keyring_json(keyring_json)?;
+    let result = match verify_detached_payload_ed25519(payload, &signature, |id| {
+        keyring.get(&id).copied()
+    }) {
         Ok(()) => serde_json::json!({
             "verified": true,
             "key_id": signature.key_id,
@@ -666,6 +748,30 @@ mod wasm {
         keyring_json: &str,
     ) -> Result<String, JsValue> {
         crate::verify_detached_auth_json(input.as_bytes(), signature_json, keyring_json)
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
+    /// Build a detached Ed25519 authenticity signature JSON sidecar.
+    #[wasm_bindgen(js_name = signDetachedEd25519)]
+    pub fn sign_detached_ed25519(
+        input: &str,
+        signing_key_hex: &str,
+        key_id: u32,
+    ) -> Result<String, JsValue> {
+        let signing_key = crate::parse_auth_key_hex(signing_key_hex)
+            .map_err(|error| JsValue::from_str(&error))?;
+        crate::sign_detached_ed25519_json(input.as_bytes(), &signing_key, key_id)
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
+    /// Verify detached Ed25519 signature JSON against payload and keyring JSON.
+    #[wasm_bindgen(js_name = verifyDetachedEd25519)]
+    pub fn verify_detached_ed25519(
+        input: &str,
+        signature_json: &str,
+        keyring_json: &str,
+    ) -> Result<String, JsValue> {
+        crate::verify_detached_ed25519_json(input.as_bytes(), signature_json, keyring_json)
             .map_err(|error| JsValue::from_str(&error))
     }
 
@@ -1079,5 +1185,21 @@ mod tests {
         .unwrap();
         assert!(json.contains(r#""ok": true"#));
         assert!(!json.contains(r#""auth""#));
+    }
+
+    #[test]
+    fn native_detached_ed25519_signature_roundtrip() {
+        let signing_key = [0xA5u8; 32];
+        let signature = sign_detached_ed25519_json(b"ed25519-ok", &signing_key, 21).unwrap();
+        let verifying_key = ed25519_dalek::SigningKey::from_bytes(&signing_key)
+            .verifying_key()
+            .to_bytes();
+        let key_hex = verifying_key
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
+        let keyring = serde_json::json!([{ "key_id": 21, "key_hex": key_hex }]).to_string();
+        let result = verify_detached_ed25519_json(b"ed25519-ok", &signature, &keyring).unwrap();
+        assert!(result.contains(r#""verified": true"#));
     }
 }

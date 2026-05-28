@@ -39,6 +39,12 @@ Current WASM bridge:
 - `verifyDetachedAuth(input, signatureJson, keyringJson)` verifies detached
   signature JSON against keyring JSON and returns:
   `{"verified": <bool>, "key_id": <u32>, "error": <string|null>}`.
+- `signDetachedEd25519(input, signingKeyHex, keyId)` returns detached Ed25519
+  signature JSON:
+  `{"key_id": <u32>, "payload_len": <u32>, "signature_hex": "<128 hex chars>"}`.
+- `verifyDetachedEd25519(input, signatureJson, keyringJson)` verifies detached
+  Ed25519 signature JSON against public-key keyring JSON and returns:
+  `{"verified": <bool>, "key_id": <u32>, "error": <string|null>}`.
 
 Keyring JSON format for detached verification:
 

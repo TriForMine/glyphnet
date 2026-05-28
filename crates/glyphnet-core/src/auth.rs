@@ -1,4 +1,5 @@
 use crate::{GlyphError, Result};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 
 const AUTH_MAGIC: [u8; 4] = *b"GAUT";
 const AUTH_VERSION: u8 = 1;
@@ -6,6 +7,8 @@ const AUTH_TAG_LEN: usize = 16;
 const AUTH_HEADER_LEN: usize = 16;
 const DETACHED_AUTH_MAGIC: [u8; 4] = *b"GDSG";
 const DETACHED_AUTH_VERSION: u8 = 1;
+const DETACHED_ED25519_MAGIC: [u8; 4] = *b"GDE2";
+const DETACHED_ED25519_VERSION: u8 = 1;
 
 /// Embedded authenticity envelope metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +28,17 @@ pub struct DetachedAuthSignature {
     pub payload_len: u32,
     /// Truncated keyed BLAKE3 tag.
     pub tag: [u8; AUTH_TAG_LEN],
+}
+
+/// Detached Ed25519 authenticity signature metadata and tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DetachedEd25519Signature {
+    /// Key identifier used by sender to select verification key.
+    pub key_id: u32,
+    /// Raw payload length covered by this signature.
+    pub payload_len: u32,
+    /// Ed25519 signature bytes.
+    pub signature: [u8; 64],
 }
 
 /// Build an embedded authenticity envelope using BLAKE3 keyed MAC.
@@ -117,6 +131,45 @@ where
     Ok(())
 }
 
+/// Create a detached Ed25519 signature over the raw payload.
+pub fn sign_detached_payload_ed25519(
+    payload: &[u8],
+    signing_key: &SigningKey,
+    key_id: u32,
+) -> DetachedEd25519Signature {
+    let message = detached_ed25519_message(payload, key_id);
+    let signature = signing_key.sign(&message);
+    DetachedEd25519Signature {
+        key_id,
+        payload_len: payload.len() as u32,
+        signature: signature.to_bytes(),
+    }
+}
+
+/// Verify a detached Ed25519 signature over the raw payload.
+pub fn verify_detached_payload_ed25519<F>(
+    payload: &[u8],
+    signature: &DetachedEd25519Signature,
+    mut key_lookup: F,
+) -> Result<()>
+where
+    F: FnMut(u32) -> Option<[u8; 32]>,
+{
+    if signature.payload_len != payload.len() as u32 {
+        return Err(GlyphError::AuthenticityMismatch);
+    }
+    let Some(pubkey_bytes) = key_lookup(signature.key_id) else {
+        return Err(GlyphError::UnknownAuthenticityKey(signature.key_id));
+    };
+    let verifying_key = VerifyingKey::from_bytes(&pubkey_bytes)
+        .map_err(|_| GlyphError::InvalidAuthenticityKeyMaterial)?;
+    let message = detached_ed25519_message(payload, signature.key_id);
+    let signature = Signature::from_bytes(&signature.signature);
+    verifying_key
+        .verify(&message, &signature)
+        .map_err(|_| GlyphError::AuthenticityMismatch)
+}
+
 fn auth_tag(bytes: &[u8], key: &[u8; 32]) -> [u8; AUTH_TAG_LEN] {
     let hash = blake3::keyed_hash(key, bytes);
     let mut out = [0u8; AUTH_TAG_LEN];
@@ -124,9 +177,21 @@ fn auth_tag(bytes: &[u8], key: &[u8; 32]) -> [u8; AUTH_TAG_LEN] {
     out
 }
 
+fn detached_ed25519_message(payload: &[u8], key_id: u32) -> Vec<u8> {
+    let mut message = Vec::with_capacity(14 + payload.len());
+    message.extend_from_slice(&DETACHED_ED25519_MAGIC);
+    message.push(DETACHED_ED25519_VERSION);
+    message.push(0);
+    message.extend_from_slice(&key_id.to_be_bytes());
+    message.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    message.extend_from_slice(payload);
+    message
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::SigningKey;
 
     const KEY_A: [u8; 32] = [0x11; 32];
     const KEY_B: [u8; 32] = [0x22; 32];
@@ -168,6 +233,34 @@ mod tests {
         let sig = sign_detached_payload(b"glyphnet-detached", &KEY_A, 5);
         let err = verify_detached_payload(b"glyphnet-detached", &sig, |id| {
             if id == 5 { Some(KEY_B) } else { None }
+        })
+        .unwrap_err();
+        assert!(matches!(err, GlyphError::AuthenticityMismatch));
+    }
+
+    #[test]
+    fn detached_ed25519_signature_roundtrip() {
+        let signing = SigningKey::from_bytes(&[0x2Au8; 32]);
+        let verifying = signing.verifying_key().to_bytes();
+        let sig = sign_detached_payload_ed25519(b"glyphnet-ed25519", &signing, 12);
+        verify_detached_payload_ed25519(b"glyphnet-ed25519", &sig, |id| {
+            if id == 12 { Some(verifying) } else { None }
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn detached_ed25519_signature_rejects_wrong_key() {
+        let signing = SigningKey::from_bytes(&[0x2Au8; 32]);
+        let wrong_signing = SigningKey::from_bytes(&[0x7Bu8; 32]);
+        let wrong_verifying = wrong_signing.verifying_key().to_bytes();
+        let sig = sign_detached_payload_ed25519(b"glyphnet-ed25519", &signing, 12);
+        let err = verify_detached_payload_ed25519(b"glyphnet-ed25519", &sig, |id| {
+            if id == 12 {
+                Some(wrong_verifying)
+            } else {
+                None
+            }
         })
         .unwrap_err();
         assert!(matches!(err, GlyphError::AuthenticityMismatch));

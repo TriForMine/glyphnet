@@ -3,9 +3,10 @@ use std::{collections::HashMap, fs, path::PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use glyphnet_core::{
-    DetachedAuthSignature, EccLevel, ProfileId, SymbolGeometry, TransmissionMode,
-    open_authenticated_payload, profile_catalog, profile_spec, sign_detached_payload,
-    verify_detached_payload,
+    DetachedAuthSignature, DetachedEd25519Signature, EccLevel, ProfileId, SymbolGeometry,
+    TransmissionMode, open_authenticated_payload, profile_catalog, profile_spec,
+    sign_detached_payload, sign_detached_payload_ed25519, verify_detached_payload,
+    verify_detached_payload_ed25519,
 };
 use glyphnet_decode::{RasterDecoder, decode_authenticated_payload};
 use glyphnet_encode::{Encoder, EncoderConfig};
@@ -178,6 +179,36 @@ enum Command {
         /// Key id attached to detached signature.
         #[arg(long, default_value_t = 1)]
         auth_key_id: u32,
+    },
+    /// Create a detached Ed25519 authenticity signature sidecar JSON for payload data.
+    AuthSignEd25519 {
+        /// Payload data.
+        #[arg(long)]
+        data: String,
+        /// Output detached signature JSON path.
+        #[arg(short, long)]
+        output: PathBuf,
+        /// 32-byte Ed25519 signing key in hex (64 hex chars).
+        #[arg(long)]
+        signing_key_hex: String,
+        /// Key id attached to detached signature.
+        #[arg(long, default_value_t = 1)]
+        key_id: u32,
+    },
+    /// Verify a detached Ed25519 authenticity signature JSON sidecar.
+    AuthVerifyEd25519 {
+        /// Payload data.
+        #[arg(long)]
+        data: String,
+        /// Detached signature JSON path.
+        #[arg(long)]
+        signature: PathBuf,
+        /// 32-byte Ed25519 public key in hex (64 hex chars).
+        #[arg(long)]
+        public_key_hex: String,
+        /// Key id used to resolve the verification key.
+        #[arg(long, default_value_t = 1)]
+        key_id: u32,
     },
 }
 
@@ -356,6 +387,18 @@ fn main() -> Result<()> {
             auth_key_hex,
             auth_key_id,
         } => auth_sign(data.as_bytes(), output, &auth_key_hex, auth_key_id),
+        Command::AuthSignEd25519 {
+            data,
+            output,
+            signing_key_hex,
+            key_id,
+        } => auth_sign_ed25519(data.as_bytes(), output, &signing_key_hex, key_id),
+        Command::AuthVerifyEd25519 {
+            data,
+            signature,
+            public_key_hex,
+            key_id,
+        } => auth_verify_ed25519(data.as_bytes(), signature, &public_key_hex, key_id),
     }
 }
 
@@ -659,6 +702,10 @@ fn parse_auth_key_hex(input: &str) -> Result<[u8; 32]> {
     Ok(key)
 }
 
+fn parse_public_key_hex(input: &str) -> Result<[u8; 32]> {
+    parse_auth_key_hex(input)
+}
+
 fn verify_auth_payload(
     payload: &[u8],
     verify_key_hex: Option<&str>,
@@ -764,6 +811,40 @@ fn load_detached_signature(path: Option<&PathBuf>) -> Result<Option<DetachedAuth
         payload_len,
         tag,
     }))
+}
+
+fn load_detached_ed25519_signature(path: &PathBuf) -> Result<DetachedEd25519Signature> {
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("failed to read detached signature file {}", path.display()))?;
+    let json: serde_json::Value = serde_json::from_str(&content)
+        .with_context(|| format!("invalid JSON in detached signature file {}", path.display()))?;
+    let key_id = json
+        .get("key_id")
+        .and_then(serde_json::Value::as_u64)
+        .context("detached signature missing numeric key_id")? as u32;
+    let payload_len = json
+        .get("payload_len")
+        .and_then(serde_json::Value::as_u64)
+        .context("detached signature missing numeric payload_len")? as u32;
+    let signature_hex = json
+        .get("signature_hex")
+        .and_then(serde_json::Value::as_str)
+        .context("detached signature missing string signature_hex")?;
+    if signature_hex.len() != 128 {
+        bail!("detached signature signature_hex must be 128 hex chars");
+    }
+    let mut signature = [0u8; 64];
+    for (idx, slot) in signature.iter_mut().enumerate() {
+        let start = idx * 2;
+        let end = start + 2;
+        *slot = u8::from_str_radix(&signature_hex[start..end], 16)
+            .with_context(|| format!("invalid signature hex at bytes {}..{}", start, end))?;
+    }
+    Ok(DetachedEd25519Signature {
+        key_id,
+        payload_len,
+        signature,
+    })
 }
 
 fn scan_burst(input_dir: PathBuf, mode: TransmissionMode) -> Result<()> {
@@ -976,5 +1057,60 @@ fn auth_sign(payload: &[u8], output: PathBuf, auth_key_hex: &str, auth_key_id: u
         }))?,
     )
     .with_context(|| format!("failed to write detached signature to {}", output.display()))?;
+    Ok(())
+}
+
+fn auth_sign_ed25519(
+    payload: &[u8],
+    output: PathBuf,
+    signing_key_hex: &str,
+    key_id: u32,
+) -> Result<()> {
+    let key = parse_auth_key_hex(signing_key_hex)?;
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&key);
+    let sig = sign_detached_payload_ed25519(payload, &signing_key, key_id);
+    let signature_hex = sig
+        .signature
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    fs::write(
+        &output,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "key_id": sig.key_id,
+            "payload_len": sig.payload_len,
+            "signature_hex": signature_hex
+        }))?,
+    )
+    .with_context(|| format!("failed to write detached signature to {}", output.display()))?;
+    Ok(())
+}
+
+fn auth_verify_ed25519(
+    payload: &[u8],
+    signature_path: PathBuf,
+    public_key_hex: &str,
+    key_id: u32,
+) -> Result<()> {
+    let signature = load_detached_ed25519_signature(&signature_path)?;
+    let pubkey = parse_public_key_hex(public_key_hex)?;
+    let mut result = serde_json::json!({
+        "verified": false,
+        "key_id": signature.key_id,
+        "error": serde_json::Value::Null
+    });
+    match verify_detached_payload_ed25519(payload, &signature, |id| {
+        if id == key_id { Some(pubkey) } else { None }
+    }) {
+        Ok(()) => {
+            result["verified"] = serde_json::json!(true);
+            result["error"] = serde_json::Value::Null;
+        }
+        Err(error) => {
+            result["verified"] = serde_json::json!(false);
+            result["error"] = serde_json::json!(error.to_string());
+        }
+    }
+    println!("{result}");
     Ok(())
 }

@@ -17,8 +17,10 @@ pub mod mode;
 pub mod profile;
 
 pub use auth::{
-    AuthEnvelopeHeader, DetachedAuthSignature, open_payload as open_authenticated_payload,
-    seal_payload as seal_authenticated_payload, sign_detached_payload, verify_detached_payload,
+    AuthEnvelopeHeader, DetachedAuthSignature, DetachedEd25519Signature,
+    open_payload as open_authenticated_payload, seal_payload as seal_authenticated_payload,
+    sign_detached_payload, sign_detached_payload_ed25519, verify_detached_payload,
+    verify_detached_payload_ed25519,
 };
 pub use burst_packet::{
     BURST_PACKET_HEADER_LEN, BURST_PACKET_MAGIC, BURST_PACKET_VERSION, BurstPacket,
