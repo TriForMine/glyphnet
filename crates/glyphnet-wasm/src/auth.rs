@@ -5,6 +5,19 @@ use glyphnet_core::{
     sign_detached_payload_ed25519, verify_detached_payload, verify_detached_payload_ed25519,
 };
 use glyphnet_decode::decode_authenticated_payload;
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+
+#[derive(Clone, Copy, Default)]
+struct KeyValidityWindow {
+    not_before: Option<OffsetDateTime>,
+    not_after: Option<OffsetDateTime>,
+}
+
+#[derive(Default)]
+struct VerificationKeyring {
+    keys: HashMap<u32, [u8; 32]>,
+    validity_by_key_id: HashMap<u32, KeyValidityWindow>,
+}
 
 pub(crate) fn parse_auth_key_hex(auth_key_hex: &str) -> Result<[u8; 32], String> {
     if auth_key_hex.len() != 64 {
@@ -57,10 +70,32 @@ fn parse_detached_signature_json(signature_json: &str) -> Result<DetachedAuthSig
     })
 }
 
-fn parse_keyring_json(keyring_json: &str) -> Result<HashMap<u32, [u8; 32]>, String> {
+fn parse_optional_rfc3339(
+    item: &serde_json::Value,
+    field: &str,
+) -> Result<Option<OffsetDateTime>, String> {
+    let Some(value) = item.get(field) else {
+        return Ok(None);
+    };
+    let ts = value
+        .as_str()
+        .ok_or_else(|| format!("keyring item {field} must be string"))?;
+    let parsed = OffsetDateTime::parse(ts, &Rfc3339)
+        .map_err(|_| format!("keyring item {field} must be RFC3339 UTC"))?;
+    Ok(Some(parsed))
+}
+
+fn parse_validity(item: &serde_json::Value) -> Result<KeyValidityWindow, String> {
+    Ok(KeyValidityWindow {
+        not_before: parse_optional_rfc3339(item, "not_before")?,
+        not_after: parse_optional_rfc3339(item, "not_after")?,
+    })
+}
+
+fn parse_keyring_json(keyring_json: &str) -> Result<VerificationKeyring, String> {
     let json: serde_json::Value =
         serde_json::from_str(keyring_json).map_err(|error| error.to_string())?;
-    let mut out = HashMap::new();
+    let mut out = VerificationKeyring::default();
     if let Some(arr) = json.as_array() {
         for item in arr {
             let key_id = item
@@ -72,7 +107,8 @@ fn parse_keyring_json(keyring_json: &str) -> Result<HashMap<u32, [u8; 32]>, Stri
                 .get("key_hex")
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| "keyring item missing string key_hex".to_string())?;
-            out.insert(key_id, parse_auth_key_hex(key_hex)?);
+            out.keys.insert(key_id, parse_auth_key_hex(key_hex)?);
+            out.validity_by_key_id.insert(key_id, parse_validity(item)?);
         }
         return Ok(out);
     }
@@ -109,7 +145,8 @@ fn parse_keyring_json(keyring_json: &str) -> Result<HashMap<u32, [u8; 32]>, Stri
                 .ok_or_else(|| "ed25519 key missing string public_key_hex".to_string())?,
             _ => return Err(format!("unsupported key algorithm {alg}")),
         };
-        out.insert(key_id, parse_auth_key_hex(key_hex)?);
+        out.keys.insert(key_id, parse_auth_key_hex(key_hex)?);
+        out.validity_by_key_id.insert(key_id, parse_validity(item)?);
     }
     Ok(out)
 }
@@ -149,6 +186,40 @@ fn parse_detached_ed25519_signature_json(
     })
 }
 
+fn reason_from_error(error: &str) -> &'static str {
+    if error.contains("unknown authenticity key id") {
+        "unknown_key_id"
+    } else if error.contains("authenticity tag mismatch") {
+        "auth_mismatch"
+    } else if error.contains("invalid authenticity envelope") {
+        "invalid_envelope"
+    } else {
+        "verify_failed"
+    }
+}
+
+fn validity_failure(
+    keyring: &VerificationKeyring,
+    key_id: u32,
+    now: OffsetDateTime,
+) -> Option<(&'static str, String)> {
+    let validity = keyring.validity_by_key_id.get(&key_id)?;
+    if let Some(not_before) = validity.not_before
+        && now < not_before
+    {
+        return Some((
+            "key_not_yet_valid",
+            format!("key_id {key_id} is not valid yet"),
+        ));
+    }
+    if let Some(not_after) = validity.not_after
+        && now > not_after
+    {
+        return Some(("key_expired", format!("key_id {key_id} is expired")));
+    }
+    None
+}
+
 pub(crate) fn sign_detached_auth_json(
     payload: &[u8],
     auth_key: &[u8; 32],
@@ -170,19 +241,34 @@ pub(crate) fn verify_detached_auth_json(
 ) -> Result<String, String> {
     let signature = parse_detached_signature_json(signature_json)?;
     let keyring = parse_keyring_json(keyring_json)?;
-    let result = match verify_detached_payload(payload, &signature, |id| keyring.get(&id).copied())
-    {
-        Ok(()) => serde_json::json!({
-            "verified": true,
-            "key_id": signature.key_id,
-            "error": serde_json::Value::Null
-        }),
-        Err(error) => serde_json::json!({
+    let now = OffsetDateTime::now_utc();
+    if let Some((reason, error)) = validity_failure(&keyring, signature.key_id, now) {
+        return serde_json::to_string_pretty(&serde_json::json!({
             "verified": false,
             "key_id": signature.key_id,
-            "error": error.to_string()
-        }),
-    };
+            "error": error,
+            "reason": reason
+        }))
+        .map_err(|error| error.to_string());
+    }
+    let result =
+        match verify_detached_payload(payload, &signature, |id| keyring.keys.get(&id).copied()) {
+            Ok(()) => serde_json::json!({
+                "verified": true,
+                "key_id": signature.key_id,
+                "error": serde_json::Value::Null,
+                "reason": serde_json::Value::Null
+            }),
+            Err(error) => {
+                let error_text = error.to_string();
+                serde_json::json!({
+                    "verified": false,
+                    "key_id": signature.key_id,
+                    "error": error_text,
+                    "reason": reason_from_error(&error_text)
+                })
+            }
+        };
     serde_json::to_string_pretty(&result).map_err(|error| error.to_string())
 }
 
@@ -213,21 +299,48 @@ pub(crate) fn verify_detached_ed25519_json(
 ) -> Result<String, String> {
     let signature = parse_detached_ed25519_signature_json(signature_json)?;
     let keyring = parse_keyring_json(keyring_json)?;
+    let now = OffsetDateTime::now_utc();
+    if let Some((reason, error)) = validity_failure(&keyring, signature.key_id, now) {
+        return serde_json::to_string_pretty(&serde_json::json!({
+            "verified": false,
+            "key_id": signature.key_id,
+            "error": error,
+            "reason": reason
+        }))
+        .map_err(|error| error.to_string());
+    }
     let result = match verify_detached_payload_ed25519(payload, &signature, |id| {
-        keyring.get(&id).copied()
+        keyring.keys.get(&id).copied()
     }) {
         Ok(()) => serde_json::json!({
             "verified": true,
             "key_id": signature.key_id,
-            "error": serde_json::Value::Null
+            "error": serde_json::Value::Null,
+            "reason": serde_json::Value::Null
         }),
-        Err(error) => serde_json::json!({
-            "verified": false,
-            "key_id": signature.key_id,
-            "error": error.to_string()
-        }),
+        Err(error) => {
+            let error_text = error.to_string();
+            serde_json::json!({
+                "verified": false,
+                "key_id": signature.key_id,
+                "error": error_text,
+                "reason": reason_from_error(&error_text)
+            })
+        }
     };
     serde_json::to_string_pretty(&result).map_err(|error| error.to_string())
+}
+
+fn extract_auth_envelope_key_id(payload: &[u8]) -> Option<u32> {
+    if payload.len() < 10 {
+        return None;
+    }
+    if &payload[0..4] != b"GAUT" || payload[4] != 1 {
+        return None;
+    }
+    Some(u32::from_be_bytes([
+        payload[6], payload[7], payload[8], payload[9],
+    ]))
 }
 
 pub(crate) fn verify_payload_with_optional_key(
@@ -235,26 +348,33 @@ pub(crate) fn verify_payload_with_optional_key(
     verify_key: Option<[u8; 32]>,
     verify_key_id: Option<u32>,
 ) -> Result<Option<serde_json::Value>, String> {
-    if decode_authenticated_payload(payload, |_id| None).is_err() {
+    let envelope_key_id = extract_auth_envelope_key_id(payload);
+    if envelope_key_id.is_none() {
         return Ok(None);
     }
     let (Some(key), Some(key_id)) = (verify_key, verify_key_id) else {
         return Ok(Some(serde_json::json!({
             "verified": false,
-            "key_id": serde_json::Value::Null,
-            "error": "authenticated payload detected but no verification key was provided"
+            "key_id": envelope_key_id,
+            "error": "authenticated payload detected but no verification key was provided",
+            "reason": "missing_verification_key"
         })));
     };
     match decode_authenticated_payload(payload, |id| if id == key_id { Some(key) } else { None }) {
         Ok(_) => Ok(Some(serde_json::json!({
             "verified": true,
-            "key_id": key_id,
-            "error": serde_json::Value::Null
+            "key_id": envelope_key_id.or(Some(key_id)),
+            "error": serde_json::Value::Null,
+            "reason": serde_json::Value::Null
         }))),
-        Err(error) => Ok(Some(serde_json::json!({
-            "verified": false,
-            "key_id": key_id,
-            "error": error.to_string()
-        }))),
+        Err(error) => {
+            let error_text = error.to_string();
+            Ok(Some(serde_json::json!({
+                "verified": false,
+                "key_id": envelope_key_id.or(Some(key_id)),
+                "error": error_text,
+                "reason": reason_from_error(&error_text)
+            })))
+        }
     }
 }

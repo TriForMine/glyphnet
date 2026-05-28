@@ -625,15 +625,19 @@ fn decode(
             .decode_auto_with_info(&image)
             .context("failed to auto-decode GlyphNet image")?;
         let mut payload = decode_json(&auto_decoded, None, None, None);
-        if let Some((verified, key_id, error)) = auth::verify_auth_payload(
+        if let Some(result) = auth::verify_auth_payload(
             &auto_decoded.decoded.frame.payload,
             verify_key_hex,
             verify_key_id,
             verify_key_file.as_ref(),
             detached_signature.as_ref(),
         )? {
-            payload["auth"] =
-                serde_json::json!({ "verified": verified, "key_id": key_id, "error": error });
+            payload["auth"] = serde_json::json!({
+                "verified": result.verified,
+                "key_id": result.key_id,
+                "error": result.error,
+                "reason": result.reason
+            });
         }
         println!("{payload}");
     } else {
@@ -649,15 +653,19 @@ fn decode(
             "payload_utf8_lossy": String::from_utf8_lossy(&decoded.frame.payload),
             "payload_len": decoded.frame.payload.len()
         });
-        if let Some((verified, key_id, error)) = auth::verify_auth_payload(
+        if let Some(result) = auth::verify_auth_payload(
             &decoded.frame.payload,
             verify_key_hex,
             verify_key_id,
             verify_key_file.as_ref(),
             detached_signature.as_ref(),
         )? {
-            payload["auth"] =
-                serde_json::json!({ "verified": verified, "key_id": key_id, "error": error });
+            payload["auth"] = serde_json::json!({
+                "verified": result.verified,
+                "key_id": result.key_id,
+                "error": result.error,
+                "reason": result.reason
+            });
         }
         println!("{payload}");
     }
@@ -718,7 +726,7 @@ fn scan(
             "decode_attempts_micros": telemetry.timings.decode_attempts_micros
         }
     });
-    if let Some((verified, key_id, error)) = auth::verify_auth_payload(
+    if let Some(result) = auth::verify_auth_payload(
         &scanned.decoded.decoded.frame.payload,
         verify_key_hex,
         verify_key_id,
@@ -726,9 +734,10 @@ fn scan(
         detached_signature.as_ref(),
     )? {
         payload["auth"] = serde_json::json!({
-            "verified": verified,
-            "key_id": key_id,
-            "error": error
+            "verified": result.verified,
+            "key_id": result.key_id,
+            "error": result.error,
+            "reason": result.reason
         });
     }
     println!("{payload}");

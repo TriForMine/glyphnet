@@ -2,9 +2,8 @@ use std::{collections::HashMap, fs, path::PathBuf};
 
 use anyhow::{Context, Result, bail};
 use glyphnet_core::{
-    DetachedAuthSignature, DetachedEd25519Signature, open_authenticated_payload,
-    sign_detached_payload, sign_detached_payload_ed25519, verify_detached_payload,
-    verify_detached_payload_ed25519,
+    DetachedAuthSignature, DetachedEd25519Signature, sign_detached_payload,
+    sign_detached_payload_ed25519, verify_detached_payload, verify_detached_payload_ed25519,
 };
 use glyphnet_decode::decode_authenticated_payload;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -18,6 +17,20 @@ pub(crate) enum DetachedVerificationInput {
 struct VerificationKeyring {
     mac_keys: HashMap<u32, [u8; 32]>,
     ed25519_public_keys: HashMap<u32, [u8; 32]>,
+    validity_by_key_id: HashMap<u32, KeyValidityWindow>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct KeyValidityWindow {
+    not_before: Option<OffsetDateTime>,
+    not_after: Option<OffsetDateTime>,
+}
+
+pub(crate) struct AuthVerificationResult {
+    pub(crate) verified: bool,
+    pub(crate) key_id: Option<u32>,
+    pub(crate) error: Option<String>,
+    pub(crate) reason: Option<&'static str>,
 }
 
 pub(crate) fn parse_auth_key_hex(input: &str) -> Result<[u8; 32]> {
@@ -45,45 +58,81 @@ pub(crate) fn verify_auth_payload(
     verify_key_id: u32,
     verify_key_file: Option<&PathBuf>,
     detached_signature: Option<&DetachedVerificationInput>,
-) -> Result<Option<(bool, u32, Option<String>)>> {
+) -> Result<Option<AuthVerificationResult>> {
     let keyring = verification_keyring(verify_key_hex, verify_key_id, verify_key_file)?;
+    let now = OffsetDateTime::now_utc();
     if let Some(signature) = detached_signature {
         match signature {
             DetachedVerificationInput::Mac(signature) => {
+                if let Some(result) = validity_failure(&keyring, signature.key_id, now) {
+                    return Ok(Some(result));
+                }
                 match verify_detached_payload(payload, signature, |id| {
                     keyring.mac_keys.get(&id).copied()
                 }) {
-                    Ok(_) => return Ok(Some((true, signature.key_id, None))),
+                    Ok(_) => {
+                        return Ok(Some(AuthVerificationResult {
+                            verified: true,
+                            key_id: Some(signature.key_id),
+                            error: None,
+                            reason: None,
+                        }));
+                    }
                     Err(error) => {
-                        return Ok(Some((false, signature.key_id, Some(error.to_string()))));
+                        return Ok(Some(error_result(Some(signature.key_id), error)));
                     }
                 }
             }
             DetachedVerificationInput::Ed25519(signature) => {
+                if let Some(result) = validity_failure(&keyring, signature.key_id, now) {
+                    return Ok(Some(result));
+                }
                 match verify_detached_payload_ed25519(payload, signature, |id| {
                     keyring.ed25519_public_keys.get(&id).copied()
                 }) {
-                    Ok(_) => return Ok(Some((true, signature.key_id, None))),
+                    Ok(_) => {
+                        return Ok(Some(AuthVerificationResult {
+                            verified: true,
+                            key_id: Some(signature.key_id),
+                            error: None,
+                            reason: None,
+                        }));
+                    }
                     Err(error) => {
-                        return Ok(Some((false, signature.key_id, Some(error.to_string()))));
+                        return Ok(Some(error_result(Some(signature.key_id), error)));
                     }
                 }
             }
         }
     }
-    if open_authenticated_payload(payload, |_id| None).is_err() {
+    let envelope_key_id = extract_auth_envelope_key_id(payload);
+    if envelope_key_id.is_none() {
         return Ok(None);
     }
     if keyring.mac_keys.is_empty() {
-        return Ok(Some((
-            false,
-            verify_key_id,
-            Some("missing verification key".to_string()),
-        )));
+        return Ok(Some(AuthVerificationResult {
+            verified: false,
+            key_id: envelope_key_id.or(Some(verify_key_id)),
+            error: Some("missing verification key".to_string()),
+            reason: Some("missing_verification_key"),
+        }));
+    }
+    if let Some(key_id) = envelope_key_id
+        && let Some(result) = validity_failure(&keyring, key_id, now)
+    {
+        return Ok(Some(result));
     }
     match decode_authenticated_payload(payload, |id| keyring.mac_keys.get(&id).copied()) {
-        Ok(_) => Ok(Some((true, verify_key_id, None))),
-        Err(error) => Ok(Some((false, verify_key_id, Some(error.to_string())))),
+        Ok(_) => Ok(Some(AuthVerificationResult {
+            verified: true,
+            key_id: envelope_key_id.or(Some(verify_key_id)),
+            error: None,
+            reason: None,
+        })),
+        Err(error) => Ok(Some(error_result(
+            envelope_key_id.or(Some(verify_key_id)),
+            error,
+        ))),
     }
 }
 
@@ -122,6 +171,7 @@ fn load_verify_keys(path: &PathBuf) -> Result<VerificationKeyring> {
                 .and_then(serde_json::Value::as_str)
                 .context("verify key item missing string key_hex")?;
             out.mac_keys.insert(key_id, parse_auth_key_hex(key_hex)?);
+            out.validity_by_key_id.insert(key_id, parse_validity(item)?);
         }
         return Ok(out);
     }
@@ -163,8 +213,88 @@ fn load_verify_keys(path: &PathBuf) -> Result<VerificationKeyring> {
             }
             _ => bail!("unsupported key algorithm {alg}"),
         }
+        out.validity_by_key_id.insert(key_id, parse_validity(item)?);
     }
     Ok(out)
+}
+
+fn parse_optional_rfc3339(item: &serde_json::Value, field: &str) -> Result<Option<OffsetDateTime>> {
+    let Some(value) = item.get(field) else {
+        return Ok(None);
+    };
+    let ts = value
+        .as_str()
+        .with_context(|| format!("verify key item {field} must be string"))?;
+    Ok(Some(OffsetDateTime::parse(ts, &Rfc3339).with_context(
+        || format!("verify key item {field} must be RFC3339 UTC"),
+    )?))
+}
+
+fn parse_validity(item: &serde_json::Value) -> Result<KeyValidityWindow> {
+    Ok(KeyValidityWindow {
+        not_before: parse_optional_rfc3339(item, "not_before")?,
+        not_after: parse_optional_rfc3339(item, "not_after")?,
+    })
+}
+
+fn validity_failure(
+    keyring: &VerificationKeyring,
+    key_id: u32,
+    now: OffsetDateTime,
+) -> Option<AuthVerificationResult> {
+    let validity = keyring.validity_by_key_id.get(&key_id)?;
+    if let Some(not_before) = validity.not_before
+        && now < not_before
+    {
+        return Some(AuthVerificationResult {
+            verified: false,
+            key_id: Some(key_id),
+            error: Some(format!("key_id {key_id} is not valid yet")),
+            reason: Some("key_not_yet_valid"),
+        });
+    }
+    if let Some(not_after) = validity.not_after
+        && now > not_after
+    {
+        return Some(AuthVerificationResult {
+            verified: false,
+            key_id: Some(key_id),
+            error: Some(format!("key_id {key_id} is expired")),
+            reason: Some("key_expired"),
+        });
+    }
+    None
+}
+
+fn extract_auth_envelope_key_id(payload: &[u8]) -> Option<u32> {
+    if payload.len() < 10 {
+        return None;
+    }
+    if &payload[0..4] != b"GAUT" || payload[4] != 1 {
+        return None;
+    }
+    Some(u32::from_be_bytes([
+        payload[6], payload[7], payload[8], payload[9],
+    ]))
+}
+
+fn error_result<E: std::fmt::Display>(key_id: Option<u32>, error: E) -> AuthVerificationResult {
+    let text = error.to_string();
+    let reason = if text.contains("unknown authenticity key id") {
+        Some("unknown_key_id")
+    } else if text.contains("authenticity tag mismatch") {
+        Some("auth_mismatch")
+    } else if text.contains("invalid authenticity envelope") {
+        Some("invalid_envelope")
+    } else {
+        Some("verify_failed")
+    };
+    AuthVerificationResult {
+        verified: false,
+        key_id,
+        error: Some(text),
+        reason,
+    }
 }
 
 fn load_keyset_json(path: &PathBuf) -> Result<serde_json::Value> {

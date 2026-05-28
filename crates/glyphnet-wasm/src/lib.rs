@@ -273,40 +273,42 @@ pub fn scan_rgba_json_with_verification(
     let image = DynamicImage::ImageRgba8(image);
     match scan_still_with_diagnostics(&image, mode) {
         Ok(scanned) => {
-            let mut auth = serde_json::json!({
-                "verified": false,
-                "key_id": serde_json::Value::Null,
-                "error": serde_json::Value::Null
+            let decoded =
+                decode_authenticated_payload(&scanned.decoded.decoded.frame.payload, |id| {
+                    if id == verify_key_id {
+                        Some(*verify_key)
+                    } else {
+                        None
+                    }
+                });
+            let auth = auth::verify_payload_with_optional_key(
+                &scanned.decoded.decoded.frame.payload,
+                Some(*verify_key),
+                Some(verify_key_id),
+            )?
+            .unwrap_or_else(|| {
+                serde_json::json!({
+                    "verified": false,
+                    "key_id": serde_json::Value::Null,
+                    "error": "payload is not authenticated",
+                    "reason": "unsigned_payload"
+                })
             });
-            match decode_authenticated_payload(&scanned.decoded.decoded.frame.payload, |id| {
-                if id == verify_key_id {
-                    Some(*verify_key)
-                } else {
-                    None
-                }
-            }) {
-                Ok(payload) => {
-                    auth["verified"] = serde_json::json!(true);
-                    auth["key_id"] = serde_json::json!(verify_key_id);
-                    auth["error"] = serde_json::Value::Null;
-                    return serde_json::to_string_pretty(&serde_json::json!({
-                        "ok": true,
-                        "payload_utf8_lossy": String::from_utf8_lossy(&payload),
-                        "payload_len": payload.len(),
-                        "auth": auth
-                    }))
-                    .map_err(|error| error.to_string());
-                }
-                Err(error) => {
-                    auth["error"] = serde_json::json!(error.to_string());
-                }
+            match decoded {
+                Ok(payload) => serde_json::to_string_pretty(&serde_json::json!({
+                    "ok": true,
+                    "payload_utf8_lossy": String::from_utf8_lossy(&payload),
+                    "payload_len": payload.len(),
+                    "auth": auth
+                }))
+                .map_err(|error| error.to_string()),
+                Err(_) => serde_json::to_string_pretty(&serde_json::json!({
+                    "ok": false,
+                    "error": "auth verification failed",
+                    "auth": auth
+                }))
+                .map_err(|error| error.to_string()),
             }
-            serde_json::to_string_pretty(&serde_json::json!({
-                "ok": false,
-                "error": "auth verification failed",
-                "auth": auth
-            }))
-            .map_err(|error| error.to_string())
         }
         Err(failed) => failed_scan_json(failed).map_err(|error| error.to_string()),
     }
