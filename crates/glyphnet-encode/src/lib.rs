@@ -252,11 +252,13 @@ impl Encoder {
         payload: &[u8],
         target_data_shards: usize,
     ) -> Result<Vec<EncodedSymbol>> {
-        let codec = BurstErasureCodec::from_level(
+        let base = BurstErasureCodec::from_level(
             self.config.ecc_level,
             payload.len(),
             target_data_shards.max(1),
         );
+        let min_repair = minimum_burst_repair_shards(base.data_shards, self.config.ecc_level);
+        let codec = BurstErasureCodec::new(base.data_shards, base.repair_shards.max(min_repair));
         let shards = codec.encode(payload)?;
         if shards.shards.len() > usize::from(u16::MAX) {
             return Err(GlyphError::InvalidArgument(
@@ -290,6 +292,22 @@ impl Encoder {
         }
         Ok(frames)
     }
+}
+
+fn minimum_burst_repair_shards(data_shards: usize, level: EccLevel) -> usize {
+    let numer = match level {
+        EccLevel::Low => 1usize,
+        EccLevel::Medium => 1usize,
+        EccLevel::High => 2usize,
+        EccLevel::Adaptive => 1usize,
+    };
+    let denom = match level {
+        EccLevel::Low => 3usize,
+        EccLevel::Medium => 2usize,
+        EccLevel::High => 3usize,
+        EccLevel::Adaptive => 1usize,
+    };
+    ((data_shards * numer).div_ceil(denom)).max(1)
 }
 
 impl Default for Encoder {
@@ -423,5 +441,20 @@ mod tests {
             }
         }
         assert!(repair_count > 0);
+    }
+
+    #[test]
+    fn burst_erasure_applies_minimum_repair_ratio_for_burst_mode() {
+        let encoder = Encoder::new(EncoderConfig {
+            mode: TransmissionMode::Burst,
+            ecc_level: EccLevel::High,
+            ..EncoderConfig::default()
+        });
+        let frames = encoder.encode_burst_erasure(&vec![0xAB; 512], 12).unwrap();
+        let first = BurstPacket::decode(&frames[0].frame.payload).unwrap();
+        let data_shards = usize::from(first.header.data_shards);
+        let packet_count = usize::from(first.header.packet_count);
+        let repair_shards = packet_count.saturating_sub(data_shards);
+        assert!(repair_shards >= (data_shards * 2).div_ceil(3));
     }
 }

@@ -1130,10 +1130,10 @@ mod tests {
         let frames = encoder.encode_burst_erasure(&payload, 12).unwrap();
         let mut rng = StdRng::seed_from_u64(0xB517_5EED);
         let rates = [
-            (0.10f32, 0.80f32),
-            (0.20f32, 0.55f32),
-            (0.30f32, 0.10f32),
-            (0.40f32, 0.0f32),
+            (0.10f32, 0.95f32),
+            (0.20f32, 0.90f32),
+            (0.30f32, 0.65f32),
+            (0.40f32, 0.45f32),
         ];
 
         for (drop_rate, min_success) in rates {
