@@ -659,6 +659,16 @@ impl BurstAssembler {
         }
         Ok(None)
     }
+
+    /// Number of unique frames collected so far.
+    pub fn received_count(&self) -> usize {
+        self.frames.len()
+    }
+
+    /// Number of frames still missing for completion.
+    pub fn missing_count(&self) -> usize {
+        usize::from(self.frame_count).saturating_sub(self.frames.len())
+    }
 }
 
 /// Burst packet assembly state for pre-frame transport chunks.
@@ -697,14 +707,24 @@ impl BurstPacketAssembler {
         }
         Ok(None)
     }
+
+    /// Number of unique packets collected so far.
+    pub fn received_count(&self) -> usize {
+        self.packets.len()
+    }
+
+    /// Number of packets still missing for completion.
+    pub fn missing_count(&self) -> usize {
+        usize::from(self.packet_count).saturating_sub(self.packets.len())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::time::Instant;
 
-    use glyphnet_core::{EccLevel, Frame};
-    use glyphnet_encode::Encoder;
+    use glyphnet_core::{BurstPacket, EccLevel, Frame, TransmissionMode};
+    use glyphnet_encode::{BurstScheduleConfig, Encoder, EncoderConfig};
     use glyphnet_render::{RasterRenderer, RenderOptions};
     use glyphnet_testkit::{
         add_salt_pepper_noise, adjust_exposure, blur, place_on_canvas, resize, skew_x_on_white,
@@ -885,6 +905,54 @@ mod tests {
             assembler.push(&packet),
             Err(ScannerError::InconsistentBurst(77))
         ));
+    }
+
+    #[test]
+    fn burst_packet_assembler_reports_progress() {
+        let mut assembler = BurstPacketAssembler::new(3);
+        let p0 = BurstPacket::new(0, 3, 15, 0, b"aa".to_vec()).unwrap();
+        let p2 = BurstPacket::new(2, 3, 15, 0, b"cc".to_vec()).unwrap();
+
+        assert_eq!(assembler.received_count(), 0);
+        assert_eq!(assembler.missing_count(), 3);
+        assert!(assembler.push(&p2).unwrap().is_none());
+        assert_eq!(assembler.received_count(), 1);
+        assert_eq!(assembler.missing_count(), 2);
+        assert!(assembler.push(&p0).unwrap().is_none());
+        assert_eq!(assembler.received_count(), 2);
+        assert_eq!(assembler.missing_count(), 1);
+    }
+
+    #[test]
+    fn burst_schedule_recovers_after_first_pass_loss() {
+        let encoder = Encoder::new(EncoderConfig {
+            mode: TransmissionMode::Burst,
+            max_frame_payload: 3,
+            ..EncoderConfig::default()
+        });
+        let payload = b"offline-burst-payload".to_vec();
+        let scheduled = encoder
+            .encode_burst_schedule(&payload, BurstScheduleConfig { passes: 2 })
+            .unwrap();
+        let frame_count = scheduled
+            .first()
+            .map(|entry| entry.symbol.frame.header.frame_count)
+            .unwrap_or(1);
+        let mut assembler = BurstAssembler::new(frame_count);
+        let mut recovered = None;
+
+        for entry in scheduled {
+            if entry.pass == 0 && entry.frame_index % 2 == 0 {
+                continue;
+            }
+            recovered = assembler.push(&entry.symbol.frame).unwrap();
+            if recovered.is_some() {
+                break;
+            }
+        }
+
+        assert_eq!(recovered, Some(payload));
+        assert_eq!(assembler.missing_count(), 0);
     }
 
     #[test]
