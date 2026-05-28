@@ -5,6 +5,8 @@ use glyphnet_core::{
 };
 use glyphnet_ecc::RecoveryTelemetry;
 use image::{DynamicImage, GrayImage};
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::PathBuf;
 use thiserror::Error;
 
 mod autodetect;
@@ -134,6 +136,7 @@ impl RasterDecoder {
 
     /// Decode a rendered GlyphNet image and return the inferred parameters.
     pub fn decode_auto_with_info(&self, image: &DynamicImage) -> Result<AutoDecodedSymbol> {
+        let mut debug = DecodeAutoDebug::from_env();
         let luma = image.to_luma8();
         let width = luma.width();
         let height = luma.height();
@@ -142,22 +145,42 @@ impl RasterDecoder {
         }
         let gcd = gcd_u32(width, height);
         let mut candidates = module_candidates(gcd, self.options.module_px);
+        debug.log(format!(
+            "auto_infer start width={} height={} gcd={} module_candidates={:?}",
+            width, height, gcd, candidates
+        ));
         if candidates.is_empty() {
+            debug.log("auto_infer no module candidates");
             return Err(DecodeError::AutoDetectFailed);
         }
         let thresholds = threshold_candidates(self.options.threshold, &luma);
         let layouts = layout_candidates(self.options.layout);
+        debug.log(format!("auto_infer thresholds={:?}", thresholds));
+        debug.log(format!("auto_infer layouts={:?}", layouts));
         for module_px in candidates.drain(..) {
             let width_modules = width / module_px;
             let height_modules = height / module_px;
+            debug.log(format!(
+                "candidate module_px={} width_modules={} height_modules={}",
+                module_px, width_modules, height_modules
+            ));
             for (quiet_zone_x, quiet_zone_y) in quiet_zone_candidates(width_modules, height_modules)
             {
+                debug.log(format!(
+                    "  quiet_zone_x={} quiet_zone_y={}",
+                    quiet_zone_x, quiet_zone_y
+                ));
                 if width_modules <= quiet_zone_x * 2 || height_modules <= quiet_zone_y * 2 {
+                    debug.log("    rejected: quiet zone consumes full image");
                     continue;
                 }
                 let symbol_width = width_modules - quiet_zone_x * 2;
                 let symbol_height = height_modules - quiet_zone_y * 2;
                 if !plausible_symbol_geometry(symbol_width, symbol_height) {
+                    debug.log(format!(
+                        "    rejected: implausible symbol geometry {}x{}",
+                        symbol_width, symbol_height
+                    ));
                     continue;
                 }
                 for layout in &layouts {
@@ -176,6 +199,10 @@ impl RasterDecoder {
                             symbol_width as u16,
                             symbol_height as u16,
                         ) {
+                            debug.log(format!(
+                                "    precheck failed layout={:?} threshold={}",
+                                layout, threshold
+                            ));
                             continue;
                         }
                         let (matrix, bit_confidence) =
@@ -186,7 +213,10 @@ impl RasterDecoder {
                                 quiet_zone_y,
                             ) {
                                 Ok(matrix) => matrix,
-                                Err(_) => continue,
+                                Err(_) => {
+                                    debug.log("    sample_matrix failed");
+                                    continue;
+                                }
                             };
                         let suspect_bytes = suspect_bytes_from_bit_confidence(
                             &matrix,
@@ -194,6 +224,13 @@ impl RasterDecoder {
                             MAX_SUSPECT_BYTES,
                         );
                         if let Ok(decoded) = decode_matrix_with_suspects(&matrix, &suspect_bytes) {
+                            debug.log(format!(
+                                "    success layout={:?} module_px={} quiet={} threshold={}",
+                                layout,
+                                module_px,
+                                quiet_zone_x.min(quiet_zone_y),
+                                threshold
+                            ));
                             return Ok(AutoDecodedSymbol {
                                 decoded,
                                 info: AutoDecodeInfo {
@@ -204,10 +241,18 @@ impl RasterDecoder {
                                 },
                             });
                         }
+                        debug.log(format!(
+                            "    decode failed layout={:?} module_px={} quiet={} threshold={}",
+                            layout,
+                            module_px,
+                            quiet_zone_x.min(quiet_zone_y),
+                            threshold
+                        ));
                     }
                 }
             }
         }
+        debug.log("auto_infer exhausted candidates -> AutoDetectFailed");
         Err(DecodeError::AutoDetectFailed)
     }
 
@@ -323,6 +368,44 @@ impl RasterDecoder {
 
         Ok((matrix, bit_confidence))
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Default)]
+struct DecodeAutoDebug {
+    dir: Option<PathBuf>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl DecodeAutoDebug {
+    fn from_env() -> Self {
+        let dir = std::env::var_os("GLYPHNET_SCAN_DEBUG_DIR").map(PathBuf::from);
+        if let Some(dir) = &dir {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        Self { dir }
+    }
+
+    fn log(&mut self, line: impl AsRef<str>) {
+        let Some(dir) = &self.dir else { return };
+        let path = dir.join("06_decode_auto_infer.log");
+        let mut current = std::fs::read_to_string(&path).unwrap_or_default();
+        current.push_str(line.as_ref());
+        current.push('\n');
+        let _ = std::fs::write(path, current);
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Debug, Default)]
+struct DecodeAutoDebug;
+
+#[cfg(target_arch = "wasm32")]
+impl DecodeAutoDebug {
+    fn from_env() -> Self {
+        Self
+    }
+    fn log(&mut self, _line: impl AsRef<str>) {}
 }
 
 impl Default for RasterDecoder {
