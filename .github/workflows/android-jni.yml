@@ -1,0 +1,64 @@
+name: Android JNI
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "crates/glyphnet-jni/**"
+      - "crates/glyphnet-core/**"
+      - "crates/glyphnet-encode/**"
+      - "crates/glyphnet-render/**"
+      - "crates/glyphnet-scanner/**"
+      - "apps/expo-glyphnet/modules/glyphnet-scanner/**"
+      - "apps/expo-glyphnet/scripts/build-glyphnet-jni-android.sh"
+      - ".github/workflows/android-jni.yml"
+  push:
+    branches: [main]
+    paths:
+      - "crates/glyphnet-jni/**"
+      - "crates/glyphnet-core/**"
+      - "crates/glyphnet-encode/**"
+      - "crates/glyphnet-render/**"
+      - "crates/glyphnet-scanner/**"
+      - "apps/expo-glyphnet/modules/glyphnet-scanner/**"
+      - "apps/expo-glyphnet/scripts/build-glyphnet-jni-android.sh"
+      - ".github/workflows/android-jni.yml"
+
+jobs:
+  build-android-jni:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk
+      - name: Build JNI shared libraries
+        run: |
+          set -euo pipefail
+          cargo ndk -t aarch64-linux-android build --release -p glyphnet-jni
+          cargo ndk -t armv7-linux-androideabi build --release -p glyphnet-jni
+          cargo ndk -t x86_64-linux-android build --release -p glyphnet-jni
+      - name: Assemble jniLibs artifact tree
+        run: |
+          set -euo pipefail
+          mkdir -p out/jniLibs/arm64-v8a out/jniLibs/armeabi-v7a out/jniLibs/x86_64
+          cp target/aarch64-linux-android/release/libglyphnet_jni.so out/jniLibs/arm64-v8a/libglyphnet_scanner_bridge.so
+          cp target/armv7-linux-androideabi/release/libglyphnet_jni.so out/jniLibs/armeabi-v7a/libglyphnet_scanner_bridge.so
+          cp target/x86_64-linux-android/release/libglyphnet_jni.so out/jniLibs/x86_64/libglyphnet_scanner_bridge.so
+      - name: Upload JNI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: glyphnet-android-jni-libs
+          path: out/jniLibs
+          if-no-files-found: error
+

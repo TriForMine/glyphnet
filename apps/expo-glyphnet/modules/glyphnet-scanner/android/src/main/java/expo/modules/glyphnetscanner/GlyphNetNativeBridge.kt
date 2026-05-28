@@ -29,7 +29,9 @@ internal object GlyphNetNativeBridge {
     return encodeSvgNative(payload)
   }
 
+  @JvmStatic
   private external fun scanStillNative(requestJson: String): String
+
+  @JvmStatic
   private external fun encodeSvgNative(payload: String): String
 }
-

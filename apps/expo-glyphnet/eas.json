@@ -1,0 +1,30 @@
+{
+  "cli": {
+    "version": ">= 16.18.1",
+    "appVersionSource": "remote"
+  },
+  "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "env": {
+        "GLYPHNET_BUILD_JNI": "0"
+      }
+    },
+    "preview": {
+      "distribution": "internal",
+      "env": {
+        "GLYPHNET_BUILD_JNI": "0"
+      }
+    },
+    "production": {
+      "autoIncrement": true,
+      "env": {
+        "GLYPHNET_BUILD_JNI": "0"
+      }
+    }
+  },
+  "submit": {
+    "production": {}
+  }
+}

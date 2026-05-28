@@ -8,6 +8,11 @@ version = '0.1.0'
 
 android {
   namespace "expo.modules.glyphnetscanner"
+  sourceSets {
+    main {
+      jniLibs.srcDirs = ['src/main/jniLibs']
+    }
+  }
   defaultConfig {
     versionCode 1
     versionName "0.1.0"
@@ -16,3 +21,19 @@ android {
     abortOnError false
   }
 }
+
+def shouldBuildGlyphnetJni = (System.getenv("GLYPHNET_BUILD_JNI") ?: "0") == "1"
+
+tasks.register("buildGlyphnetJni", Exec) {
+  def moduleRoot = projectDir.parentFile
+  def appRoot = moduleRoot.parentFile.parentFile
+  workingDir appRoot
+  onlyIf { shouldBuildGlyphnetJni }
+  if (org.gradle.internal.os.OperatingSystem.current().isWindows()) {
+    commandLine "powershell", "-ExecutionPolicy", "Bypass", "-File", "scripts/build-glyphnet-jni-android.ps1"
+  } else {
+    commandLine "bash", "scripts/build-glyphnet-jni-android.sh"
+  }
+}
+
+preBuild.dependsOn("buildGlyphnetJni")
