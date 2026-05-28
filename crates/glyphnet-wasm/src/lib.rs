@@ -3,7 +3,10 @@
 use glyphnet_core::{LayoutFamily, TransmissionMode};
 use glyphnet_encode::{Encoder, EncoderConfig};
 use glyphnet_render::{RasterRenderer, RenderOptions, SvgRenderer};
-use glyphnet_scanner::{FailedStillScan, ScanAttempt, ScanTimings, scan_still_with_diagnostics};
+use glyphnet_scanner::{
+    CameraFrame, FailedStillScan, ScanAttempt, ScanTimings, Scanner, ScannerConfig,
+    scan_still_with_diagnostics,
+};
 use image::{DynamicImage, ImageEncoder, RgbaImage};
 
 /// Encode bytes and return the symbol descriptor as JSON.
@@ -181,6 +184,72 @@ pub fn scan_rgba_json(
     }
 }
 
+/// Stateful burst scanner session for incremental frame ingest.
+#[derive(Debug)]
+pub struct BurstScanSession {
+    scanner: Scanner,
+    frame_counter: u64,
+}
+
+impl BurstScanSession {
+    /// Create a new burst scan session.
+    pub fn new(mode: TransmissionMode) -> Self {
+        Self {
+            scanner: Scanner::new(ScannerConfig {
+                mode,
+                ..ScannerConfig::default()
+            }),
+            frame_counter: 0,
+        }
+    }
+
+    /// Scan one RGBA frame and return progress/result JSON.
+    pub fn scan_rgba_frame_json(
+        &mut self,
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<String, String> {
+        let expected = width
+            .checked_mul(height)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or_else(|| "image dimensions overflow".to_string())?
+            as usize;
+        if rgba.len() != expected {
+            return Err(format!(
+                "invalid RGBA buffer length: expected {expected}, got {}",
+                rgba.len()
+            ));
+        }
+        let image = RgbaImage::from_raw(width, height, rgba.to_vec())
+            .ok_or_else(|| "failed to construct RGBA image".to_string())?;
+        let image = DynamicImage::ImageRgba8(image);
+        let event = self
+            .scanner
+            .scan_frame(CameraFrame {
+                image,
+                timestamp_micros: self.frame_counter,
+            })
+            .map_err(|error| error.to_string())?;
+        self.frame_counter = self.frame_counter.saturating_add(1);
+        serde_json::to_string_pretty(&serde_json::json!({
+            "ok": true,
+            "stream_id": event.frame.header.stream_id,
+            "frame_index": event.frame.header.frame_index,
+            "frame_count": event.frame.header.frame_count,
+            "complete": event.complete_payload.is_some(),
+            "burst_progress": {
+                "frame_count": event.burst_progress.frame_count,
+                "received_frames": event.burst_progress.received_frames,
+                "missing_frames": event.burst_progress.missing_frames
+            },
+            "payload_utf8_lossy": event.complete_payload.as_ref().map(|payload| String::from_utf8_lossy(payload).to_string()),
+            "payload_len": event.complete_payload.as_ref().map(std::vec::Vec::len),
+        }))
+        .map_err(|error| error.to_string())
+    }
+}
+
 fn failed_scan_json(failed: FailedStillScan) -> serde_json::Result<String> {
     let attempts = attempts_json(&failed.attempts);
     serde_json::to_string_pretty(&serde_json::json!({
@@ -322,6 +391,37 @@ mod wasm {
         let mode = crate::mode_from_str(mode).map_err(|error| JsValue::from_str(&error))?;
         crate::scan_rgba_json(rgba, width, height, mode).map_err(|error| JsValue::from_str(&error))
     }
+
+    /// Stateful burst scan session for incremental frame ingest.
+    #[wasm_bindgen(js_name = BurstScanSession)]
+    pub struct WasmBurstScanSession {
+        inner: crate::BurstScanSession,
+    }
+
+    #[wasm_bindgen(js_class = BurstScanSession)]
+    impl WasmBurstScanSession {
+        /// Create a session with scan mode (print|screen|burst).
+        #[wasm_bindgen(constructor)]
+        pub fn new(mode: &str) -> Result<WasmBurstScanSession, JsValue> {
+            let mode = crate::mode_from_str(mode).map_err(|error| JsValue::from_str(&error))?;
+            Ok(Self {
+                inner: crate::BurstScanSession::new(mode),
+            })
+        }
+
+        /// Scan one frame and return progress/result JSON.
+        #[wasm_bindgen(js_name = scanRgbaFrameJson)]
+        pub fn scan_rgba_frame_json(
+            &mut self,
+            rgba: &[u8],
+            width: u32,
+            height: u32,
+        ) -> Result<String, JsValue> {
+            self.inner
+                .scan_rgba_frame_json(rgba, width, height)
+                .map_err(|error| JsValue::from_str(&error))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -414,5 +514,37 @@ mod tests {
         assert!(json.contains(r#""failed_candidates""#));
         assert!(json.contains(r#""recovery""#));
         assert!(json.contains(r#""method""#));
+    }
+
+    #[test]
+    fn native_burst_session_reports_progress_and_completion() {
+        let encoder = Encoder::new(EncoderConfig {
+            mode: TransmissionMode::Burst,
+            max_frame_payload: 3,
+            ..EncoderConfig::default()
+        });
+        let frames = encoder.encode_burst(b"burst-session").unwrap();
+        let mut session = BurstScanSession::new(TransmissionMode::Burst);
+
+        let first = glyphnet_render::RasterRenderer::default()
+            .render(&frames[0].matrix)
+            .unwrap();
+        let first_json = session
+            .scan_rgba_frame_json(first.as_raw(), first.width(), first.height())
+            .unwrap();
+        assert!(first_json.contains(r#""complete": false"#));
+        assert!(first_json.contains(r#""received_frames": 1"#));
+
+        let mut final_json = String::new();
+        for frame in frames.into_iter().skip(1) {
+            let image = glyphnet_render::RasterRenderer::default()
+                .render(&frame.matrix)
+                .unwrap();
+            final_json = session
+                .scan_rgba_frame_json(image.as_raw(), image.width(), image.height())
+                .unwrap();
+        }
+        assert!(final_json.contains(r#""complete": true"#));
+        assert!(final_json.contains("burst-session"));
     }
 }
