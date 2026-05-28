@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
 use glyphnet_core::{
-    DetachedAuthSignature, DetachedEd25519Signature, sign_detached_payload,
+    AuthVerifyReason, DetachedAuthSignature, DetachedEd25519Signature,
+    extract_auth_envelope_key_id, reason_from_glyph_error, sign_detached_payload,
     sign_detached_payload_ed25519, verify_detached_payload, verify_detached_payload_ed25519,
 };
 use glyphnet_decode::decode_authenticated_payload;
@@ -186,18 +187,6 @@ fn parse_detached_ed25519_signature_json(
     })
 }
 
-fn reason_from_error(error: &str) -> &'static str {
-    if error.contains("unknown authenticity key id") {
-        "unknown_key_id"
-    } else if error.contains("authenticity tag mismatch") {
-        "auth_mismatch"
-    } else if error.contains("invalid authenticity envelope") {
-        "invalid_envelope"
-    } else {
-        "verify_failed"
-    }
-}
-
 fn validity_failure(
     keyring: &VerificationKeyring,
     key_id: u32,
@@ -208,16 +197,31 @@ fn validity_failure(
         && now < not_before
     {
         return Some((
-            "key_not_yet_valid",
+            AuthVerifyReason::KeyNotYetValid.as_str(),
             format!("key_id {key_id} is not valid yet"),
         ));
     }
     if let Some(not_after) = validity.not_after
         && now > not_after
     {
-        return Some(("key_expired", format!("key_id {key_id} is expired")));
+        return Some((
+            AuthVerifyReason::KeyExpired.as_str(),
+            format!("key_id {key_id} is expired"),
+        ));
     }
     None
+}
+
+fn reason_from_error_text(error: &str) -> &'static str {
+    if error.contains("unknown authenticity key id") {
+        AuthVerifyReason::UnknownKeyId.as_str()
+    } else if error.contains("authenticity tag mismatch") {
+        AuthVerifyReason::AuthMismatch.as_str()
+    } else if error.contains("invalid authenticity envelope") {
+        AuthVerifyReason::InvalidEnvelope.as_str()
+    } else {
+        AuthVerifyReason::VerifyFailed.as_str()
+    }
 }
 
 pub(crate) fn sign_detached_auth_json(
@@ -265,7 +269,7 @@ pub(crate) fn verify_detached_auth_json(
                     "verified": false,
                     "key_id": signature.key_id,
                     "error": error_text,
-                    "reason": reason_from_error(&error_text)
+                    "reason": reason_from_glyph_error(error).as_str()
                 })
             }
         };
@@ -324,23 +328,11 @@ pub(crate) fn verify_detached_ed25519_json(
                 "verified": false,
                 "key_id": signature.key_id,
                 "error": error_text,
-                "reason": reason_from_error(&error_text)
+                "reason": reason_from_glyph_error(error).as_str()
             })
         }
     };
     serde_json::to_string_pretty(&result).map_err(|error| error.to_string())
-}
-
-fn extract_auth_envelope_key_id(payload: &[u8]) -> Option<u32> {
-    if payload.len() < 10 {
-        return None;
-    }
-    if &payload[0..4] != b"GAUT" || payload[4] != 1 {
-        return None;
-    }
-    Some(u32::from_be_bytes([
-        payload[6], payload[7], payload[8], payload[9],
-    ]))
 }
 
 pub(crate) fn verify_payload_with_optional_key(
@@ -357,7 +349,7 @@ pub(crate) fn verify_payload_with_optional_key(
             "verified": false,
             "key_id": envelope_key_id,
             "error": "authenticated payload detected but no verification key was provided",
-            "reason": "missing_verification_key"
+            "reason": AuthVerifyReason::MissingVerificationKey.as_str()
         })));
     };
     match decode_authenticated_payload(payload, |id| if id == key_id { Some(key) } else { None }) {
@@ -373,7 +365,7 @@ pub(crate) fn verify_payload_with_optional_key(
                 "verified": false,
                 "key_id": envelope_key_id.or(Some(key_id)),
                 "error": error_text,
-                "reason": reason_from_error(&error_text)
+                "reason": reason_from_error_text(&error_text)
             })))
         }
     }

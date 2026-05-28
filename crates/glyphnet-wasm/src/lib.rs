@@ -291,7 +291,7 @@ pub fn scan_rgba_json_with_verification(
                     "verified": false,
                     "key_id": serde_json::Value::Null,
                     "error": "payload is not authenticated",
-                    "reason": "unsigned_payload"
+                    "reason": glyphnet_core::AuthVerifyReason::UnsignedPayload.as_str()
                 })
             });
             match decoded {

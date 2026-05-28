@@ -2,8 +2,9 @@ use std::{collections::HashMap, fs, path::PathBuf};
 
 use anyhow::{Context, Result, bail};
 use glyphnet_core::{
-    DetachedAuthSignature, DetachedEd25519Signature, sign_detached_payload,
-    sign_detached_payload_ed25519, verify_detached_payload, verify_detached_payload_ed25519,
+    AuthVerifyReason, DetachedAuthSignature, DetachedEd25519Signature, reason_from_glyph_error,
+    sign_detached_payload, sign_detached_payload_ed25519, verify_detached_payload,
+    verify_detached_payload_ed25519,
 };
 use glyphnet_decode::decode_authenticated_payload;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -105,7 +106,7 @@ pub(crate) fn verify_auth_payload(
             }
         }
     }
-    let envelope_key_id = extract_auth_envelope_key_id(payload);
+    let envelope_key_id = glyphnet_core::extract_auth_envelope_key_id(payload);
     if envelope_key_id.is_none() {
         return Ok(None);
     }
@@ -114,7 +115,7 @@ pub(crate) fn verify_auth_payload(
             verified: false,
             key_id: envelope_key_id.or(Some(verify_key_id)),
             error: Some("missing verification key".to_string()),
-            reason: Some("missing_verification_key"),
+            reason: Some(AuthVerifyReason::MissingVerificationKey.as_str()),
         }));
     }
     if let Some(key_id) = envelope_key_id
@@ -129,7 +130,7 @@ pub(crate) fn verify_auth_payload(
             error: None,
             reason: None,
         })),
-        Err(error) => Ok(Some(error_result(
+        Err(error) => Ok(Some(error_result_text(
             envelope_key_id.or(Some(verify_key_id)),
             error,
         ))),
@@ -250,7 +251,7 @@ fn validity_failure(
             verified: false,
             key_id: Some(key_id),
             error: Some(format!("key_id {key_id} is not valid yet")),
-            reason: Some("key_not_yet_valid"),
+            reason: Some(AuthVerifyReason::KeyNotYetValid.as_str()),
         });
     }
     if let Some(not_after) = validity.not_after
@@ -260,40 +261,42 @@ fn validity_failure(
             verified: false,
             key_id: Some(key_id),
             error: Some(format!("key_id {key_id} is expired")),
-            reason: Some("key_expired"),
+            reason: Some(AuthVerifyReason::KeyExpired.as_str()),
         });
     }
     None
 }
 
-fn extract_auth_envelope_key_id(payload: &[u8]) -> Option<u32> {
-    if payload.len() < 10 {
-        return None;
-    }
-    if &payload[0..4] != b"GAUT" || payload[4] != 1 {
-        return None;
-    }
-    Some(u32::from_be_bytes([
-        payload[6], payload[7], payload[8], payload[9],
-    ]))
-}
-
-fn error_result<E: std::fmt::Display>(key_id: Option<u32>, error: E) -> AuthVerificationResult {
+fn error_result(key_id: Option<u32>, error: glyphnet_core::GlyphError) -> AuthVerificationResult {
     let text = error.to_string();
-    let reason = if text.contains("unknown authenticity key id") {
-        Some("unknown_key_id")
-    } else if text.contains("authenticity tag mismatch") {
-        Some("auth_mismatch")
-    } else if text.contains("invalid authenticity envelope") {
-        Some("invalid_envelope")
-    } else {
-        Some("verify_failed")
-    };
+    let reason = Some(reason_from_glyph_error(error).as_str());
     AuthVerificationResult {
         verified: false,
         key_id,
         error: Some(text),
         reason,
+    }
+}
+
+fn reason_from_error_text(text: &str) -> &'static str {
+    if text.contains("unknown authenticity key id") {
+        AuthVerifyReason::UnknownKeyId.as_str()
+    } else if text.contains("authenticity tag mismatch") {
+        AuthVerifyReason::AuthMismatch.as_str()
+    } else if text.contains("invalid authenticity envelope") {
+        AuthVerifyReason::InvalidEnvelope.as_str()
+    } else {
+        AuthVerifyReason::VerifyFailed.as_str()
+    }
+}
+
+fn error_result_text<E: std::fmt::Display>(key_id: Option<u32>, error: E) -> AuthVerificationResult {
+    let text = error.to_string();
+    AuthVerificationResult {
+        verified: false,
+        key_id,
+        error: Some(text.clone()),
+        reason: Some(reason_from_error_text(&text)),
     }
 }
 

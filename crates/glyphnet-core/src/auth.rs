@@ -10,6 +10,58 @@ const DETACHED_AUTH_VERSION: u8 = 1;
 const DETACHED_ED25519_MAGIC: [u8; 4] = *b"GDE2";
 const DETACHED_ED25519_VERSION: u8 = 1;
 
+/// Shared reason codes for authentication verification outcomes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthVerifyReason {
+    UnknownKeyId,
+    KeyNotYetValid,
+    KeyExpired,
+    MissingVerificationKey,
+    AuthMismatch,
+    InvalidEnvelope,
+    VerifyFailed,
+    UnsignedPayload,
+}
+
+impl AuthVerifyReason {
+    /// Stable snake_case code for JSON outputs.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::UnknownKeyId => "unknown_key_id",
+            Self::KeyNotYetValid => "key_not_yet_valid",
+            Self::KeyExpired => "key_expired",
+            Self::MissingVerificationKey => "missing_verification_key",
+            Self::AuthMismatch => "auth_mismatch",
+            Self::InvalidEnvelope => "invalid_envelope",
+            Self::VerifyFailed => "verify_failed",
+            Self::UnsignedPayload => "unsigned_payload",
+        }
+    }
+}
+
+/// Extract `key_id` from an embedded authenticity envelope header, if present.
+pub fn extract_auth_envelope_key_id(payload: &[u8]) -> Option<u32> {
+    if payload.len() < 10 {
+        return None;
+    }
+    if payload[0..4] != AUTH_MAGIC || payload[4] != AUTH_VERSION {
+        return None;
+    }
+    Some(u32::from_be_bytes([
+        payload[6], payload[7], payload[8], payload[9],
+    ]))
+}
+
+/// Map core auth verification errors to stable reason codes.
+pub fn reason_from_glyph_error(error: GlyphError) -> AuthVerifyReason {
+    match error {
+        GlyphError::UnknownAuthenticityKey(_) => AuthVerifyReason::UnknownKeyId,
+        GlyphError::AuthenticityMismatch => AuthVerifyReason::AuthMismatch,
+        GlyphError::InvalidAuthenticityEnvelope => AuthVerifyReason::InvalidEnvelope,
+        _ => AuthVerifyReason::VerifyFailed,
+    }
+}
+
 /// Embedded authenticity envelope metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AuthEnvelopeHeader {
@@ -264,5 +316,28 @@ mod tests {
         })
         .unwrap_err();
         assert!(matches!(err, GlyphError::AuthenticityMismatch));
+    }
+
+    #[test]
+    fn reason_mapping_is_stable() {
+        assert_eq!(
+            reason_from_glyph_error(GlyphError::UnknownAuthenticityKey(9)).as_str(),
+            "unknown_key_id"
+        );
+        assert_eq!(
+            reason_from_glyph_error(GlyphError::AuthenticityMismatch).as_str(),
+            "auth_mismatch"
+        );
+        assert_eq!(
+            reason_from_glyph_error(GlyphError::InvalidAuthenticityEnvelope).as_str(),
+            "invalid_envelope"
+        );
+    }
+
+    #[test]
+    fn extract_key_id_from_auth_envelope_header() {
+        let sealed = seal_payload(b"glyphnet-auth", &KEY_A, 42);
+        assert_eq!(extract_auth_envelope_key_id(&sealed), Some(42));
+        assert_eq!(extract_auth_envelope_key_id(b"plain"), None);
     }
 }
