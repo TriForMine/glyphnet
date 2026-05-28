@@ -51,7 +51,7 @@ jobs:
       - name: Check PR branch perf gate
         if: github.event_name == 'pull_request'
         continue-on-error: true
-        run: SCANNER_BENCH_NAMES=scan_generated_ribbon_canvas_small,scan_generated_ribbon_canvas_medium,scan_generated_ribbon_canvas_large,scan_generated_matrix_canvas,scan_real_debugger_screenshot SCANNER_BENCH_NON_GATING=scan_real_debugger_screenshot SCANNER_BENCH_OUTPUT_JSON=target/scanner-perf/pr.json scripts/check_scanner_perf.sh
+        run: SCANNER_BENCH_NAMES=scan_generated_ribbon_canvas_small,scan_generated_ribbon_canvas_medium,scan_generated_ribbon_canvas_large,scan_generated_matrix_roi,scan_generated_matrix_canvas,scan_real_debugger_screenshot SCANNER_BENCH_NON_GATING=scan_generated_matrix_canvas,scan_real_debugger_screenshot SCANNER_BENCH_OUTPUT_JSON=target/scanner-perf/pr.json scripts/check_scanner_perf.sh
 
       - name: Capture base benchmark metrics
         if: always() && github.event_name == 'pull_request'
@@ -61,7 +61,7 @@ jobs:
           mkdir -p /tmp/glyphnet-base/scripts
           cp scripts/check_scanner_perf.sh /tmp/glyphnet-base/scripts/check_scanner_perf.sh
           cd /tmp/glyphnet-base
-          SCANNER_BENCH_NAMES=scan_generated_ribbon_canvas_small,scan_generated_ribbon_canvas_medium,scan_generated_ribbon_canvas_large,scan_generated_matrix_canvas,scan_real_debugger_screenshot SCANNER_BENCH_NON_GATING=scan_real_debugger_screenshot SCANNER_BENCH_OUTPUT_JSON=target/scanner-perf/base.json ./scripts/check_scanner_perf.sh --no-fail
+          SCANNER_BENCH_NAMES=scan_generated_ribbon_canvas_small,scan_generated_ribbon_canvas_medium,scan_generated_ribbon_canvas_large,scan_generated_matrix_roi,scan_generated_matrix_canvas,scan_real_debugger_screenshot SCANNER_BENCH_NON_GATING=scan_generated_matrix_canvas,scan_real_debugger_screenshot SCANNER_BENCH_OUTPUT_JSON=target/scanner-perf/base.json ./scripts/check_scanner_perf.sh --no-fail
 
       - name: Comment benchmark comparison on PR
         if: always() && github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork

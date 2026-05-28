@@ -481,6 +481,7 @@ fn matrix_finders(binary: &GrayImage) -> Vec<MatrixFinder> {
         }
     }
     finders.truncate(96);
+
     finders
 }
 

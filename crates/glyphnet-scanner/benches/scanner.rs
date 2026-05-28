@@ -116,12 +116,46 @@ fn generated_matrix_canvas(c: &mut Criterion) {
     });
 }
 
+fn generated_matrix_roi(c: &mut Criterion) {
+    let payload = b"matrix roi";
+    let encoded = Encoder::new(EncoderConfig {
+        layout: LayoutFamily::Matrix,
+        ..EncoderConfig::default()
+    })
+    .encode_static(payload)
+    .unwrap();
+    let symbol = RasterRenderer::new(RenderOptions {
+        module_px: 4,
+        quiet_zone_modules: 4,
+        ..RenderOptions::default()
+    })
+    .render(&encoded.matrix)
+    .unwrap();
+    let border = 16u32;
+    let mut canvas = RgbaImage::from_pixel(
+        symbol.width() + border * 2,
+        symbol.height() + border * 2,
+        Rgba([255, 255, 255, 255]),
+    );
+    image::imageops::overlay(&mut canvas, &symbol, i64::from(border), i64::from(border));
+    let image = DynamicImage::ImageRgba8(canvas);
+
+    c.bench_function("scan_generated_matrix_roi", |b| {
+        b.iter(|| {
+            let result = scan_still(&image, TransmissionMode::Print).unwrap();
+            assert_eq!(result.decoded.decoded.frame.payload, payload);
+            assert_eq!(result.decoded.info.layout, LayoutFamily::Matrix);
+        });
+    });
+}
+
 criterion_group!(
     benches,
     real_debugger_screenshot,
     generated_ribbon_canvas_small,
     generated_ribbon_canvas_medium,
     generated_ribbon_canvas_large,
-    generated_matrix_canvas
+    generated_matrix_canvas,
+    generated_matrix_roi
 );
 criterion_main!(benches);
