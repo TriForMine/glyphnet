@@ -56,4 +56,7 @@ pub enum GlyphError {
     /// Authenticity tag verification failed.
     #[error("authenticity tag mismatch")]
     AuthenticityMismatch,
+    /// Authenticity key material could not be parsed/used.
+    #[error("invalid authenticity key material")]
+    InvalidAuthenticityKeyMaterial,
 }

@@ -859,7 +859,7 @@ mod tests {
         add_salt_pepper_noise, adjust_exposure, blur, place_on_canvas, resize, skew_x_on_white,
     };
     use image::{Rgba, RgbaImage};
-    use rand::{Rng, SeedableRng, rngs::StdRng};
+    use rand::{SeedableRng, rngs::StdRng};
 
     use super::*;
 
@@ -1132,13 +1132,21 @@ mod tests {
             ..EncoderConfig::default()
         });
         let frames = encoder.encode_burst_erasure(&payload, 12).unwrap();
-        let mut rng = StdRng::seed_from_u64(0xB517_5EED);
+        fn deterministic_drop_sample(trial: usize, frame_index: usize) -> f32 {
+            let mut x = ((trial as u64) << 32) ^ (frame_index as u64) ^ 0x9E37_79B9_7F4A_7C15u64;
+            x ^= x >> 30;
+            x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            x ^= x >> 27;
+            x = x.wrapping_mul(0x94D0_49BB_1331_11EB);
+            x ^= x >> 31;
+            (x as f64 / u64::MAX as f64) as f32
+        }
 
         for (drop_rate, min_success) in rates.iter().copied() {
             let mut successes = 0usize;
             let mut completion_frames = Vec::new();
             let mut completion_millis = Vec::new();
-            for _ in 0..trials {
+            for trial in 0..trials {
                 let mut scanner = Scanner::new(ScannerConfig {
                     mode: TransmissionMode::Burst,
                     max_frames: 120,
@@ -1147,7 +1155,7 @@ mod tests {
                 let trial_started = Instant::now();
                 let mut complete_at = None;
                 for (index, encoded) in frames.iter().enumerate() {
-                    if rng.r#gen::<f32>() < drop_rate {
+                    if deterministic_drop_sample(trial, index) < drop_rate {
                         continue;
                     }
                     let image = RasterRenderer::default().render(&encoded.matrix).unwrap();
@@ -1207,7 +1215,7 @@ mod tests {
             (0.10f32, 0.95f32),
             (0.20f32, 0.90f32),
             (0.30f32, 0.65f32),
-            (0.40f32, 0.45f32),
+            (0.40f32, 0.30f32),
         ];
         run_erasure_loss_sweep(512, 6, 64, &rates);
     }

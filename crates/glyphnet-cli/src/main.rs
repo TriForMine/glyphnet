@@ -9,6 +9,7 @@ use glyphnet_decode::RasterDecoder;
 use glyphnet_encode::{Encoder, EncoderConfig};
 use glyphnet_render::{RasterRenderer, RenderOptions, SvgRenderer};
 use glyphnet_scanner::{CameraFrame, Scanner, ScannerConfig, scan_still};
+mod auth;
 
 #[derive(Debug, Parser)]
 #[command(name = "glyphnet")]
@@ -52,6 +53,12 @@ enum Command {
         /// Fit output height in pixels.
         #[arg(long, value_name = "PX")]
         fit_height_px: Option<u32>,
+        /// Optional 32-byte authentication key in hex (64 hex chars).
+        #[arg(long)]
+        auth_key_hex: Option<String>,
+        /// Key id attached to the authenticity envelope.
+        #[arg(long, default_value_t = 1)]
+        auth_key_id: u32,
     },
     /// Decode a rendered PNG/JPEG image produced by the reference renderer.
     Decode {
@@ -60,6 +67,18 @@ enum Command {
         /// Infer module size and quiet zone automatically.
         #[arg(long)]
         auto: bool,
+        /// Optional verification key in hex for authenticated payload envelopes.
+        #[arg(long)]
+        verify_key_hex: Option<String>,
+        /// Key id for the verification key.
+        #[arg(long, default_value_t = 1)]
+        verify_key_id: u32,
+        /// Optional verification keyring JSON file: [{ "key_id": 1, "key_hex": "..." }].
+        #[arg(long)]
+        verify_key_file: Option<PathBuf>,
+        /// Optional detached signature JSON file.
+        #[arg(long)]
+        detached_auth_file: Option<PathBuf>,
     },
     /// Scan an image, attempting coarse auto-crop before decoding.
     Scan {
@@ -68,6 +87,18 @@ enum Command {
         /// Transmission mode used for CV tuning.
         #[arg(long, value_enum, default_value_t = ModeArg::Print)]
         mode: ModeArg,
+        /// Optional verification key in hex for authenticated payload envelopes.
+        #[arg(long)]
+        verify_key_hex: Option<String>,
+        /// Key id for the verification key.
+        #[arg(long, default_value_t = 1)]
+        verify_key_id: u32,
+        /// Optional verification keyring JSON file: [{ "key_id": 1, "key_hex": "..." }].
+        #[arg(long)]
+        verify_key_file: Option<PathBuf>,
+        /// Optional detached signature JSON file.
+        #[arg(long)]
+        detached_auth_file: Option<PathBuf>,
     },
     /// Scan an ordered directory of frames as a burst session.
     ScanBurst {
@@ -132,6 +163,86 @@ enum Command {
     Profiles,
     /// Print benchmark targets and suggested regression commands as JSON.
     BenchPlan,
+    /// Create a detached authenticity signature sidecar JSON for payload data.
+    AuthSign {
+        /// Payload data.
+        #[arg(long)]
+        data: String,
+        /// Output detached signature JSON path.
+        #[arg(short, long)]
+        output: PathBuf,
+        /// 32-byte authentication key in hex (64 hex chars).
+        #[arg(long)]
+        auth_key_hex: String,
+        /// Key id attached to detached signature.
+        #[arg(long, default_value_t = 1)]
+        auth_key_id: u32,
+    },
+    /// Create a detached Ed25519 authenticity signature sidecar JSON for payload data.
+    AuthSignEd25519 {
+        /// Payload data.
+        #[arg(long)]
+        data: String,
+        /// Output detached signature JSON path.
+        #[arg(short, long)]
+        output: PathBuf,
+        /// 32-byte Ed25519 signing key in hex (64 hex chars).
+        #[arg(long)]
+        signing_key_hex: String,
+        /// Key id attached to detached signature.
+        #[arg(long, default_value_t = 1)]
+        key_id: u32,
+    },
+    /// Verify a detached Ed25519 authenticity signature JSON sidecar.
+    AuthVerifyEd25519 {
+        /// Payload data.
+        #[arg(long)]
+        data: String,
+        /// Detached signature JSON path.
+        #[arg(long)]
+        signature: PathBuf,
+        /// 32-byte Ed25519 public key in hex (64 hex chars).
+        #[arg(long)]
+        public_key_hex: String,
+        /// Key id used to resolve the verification key.
+        #[arg(long, default_value_t = 1)]
+        key_id: u32,
+    },
+    /// Inspect a versioned authenticity keyset file.
+    KeysetInspect {
+        /// Keyset JSON path.
+        path: PathBuf,
+    },
+    /// Validate a versioned authenticity keyset file.
+    KeysetValidate {
+        /// Keyset JSON path.
+        path: PathBuf,
+        /// Optional trusted root public key (hex) to enforce keyset signature verification.
+        #[arg(long)]
+        root_pubkey_hex: Option<String>,
+    },
+    /// Sign a keyset JSON using detached Ed25519 signature metadata.
+    KeysetSignEd25519 {
+        /// Input keyset JSON path.
+        input: PathBuf,
+        /// Output keyset JSON path.
+        #[arg(short, long)]
+        output: PathBuf,
+        /// 32-byte Ed25519 signing key in hex (64 hex chars).
+        #[arg(long)]
+        signing_key_hex: String,
+        /// Signer identity label.
+        #[arg(long, default_value = "root")]
+        signed_by: String,
+    },
+    /// Verify a signed keyset JSON with trusted root public key.
+    KeysetVerify {
+        /// Keyset JSON path.
+        path: PathBuf,
+        /// 32-byte trusted root Ed25519 public key in hex (64 hex chars).
+        #[arg(long)]
+        root_pubkey_hex: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -216,20 +327,52 @@ fn main() -> Result<()> {
             height_modules,
             fit_width_px,
             fit_height_px,
+            auth_key_hex,
+            auth_key_id,
         } => {
             let sizing = render_sizing(width_modules, height_modules, fit_width_px, fit_height_px)?;
-            encode(
-                data.as_bytes(),
+            encode(EncodeRequest {
+                payload: data.as_bytes(),
                 output,
-                profile.into(),
-                mode.map(Into::into),
-                ecc.map(Into::into),
+                profile: profile.into(),
+                mode: mode.map(Into::into),
+                ecc_level: ecc.map(Into::into),
                 format,
                 sizing,
-            )
+                auth_key_hex: auth_key_hex.as_deref(),
+                auth_key_id,
+            })
         }
-        Command::Decode { input, auto } => decode(input, auto),
-        Command::Scan { input, mode } => scan(input, mode.into()),
+        Command::Decode {
+            input,
+            auto,
+            verify_key_hex,
+            verify_key_id,
+            verify_key_file,
+            detached_auth_file,
+        } => decode(
+            input,
+            auto,
+            verify_key_hex.as_deref(),
+            verify_key_id,
+            verify_key_file,
+            detached_auth_file,
+        ),
+        Command::Scan {
+            input,
+            mode,
+            verify_key_hex,
+            verify_key_id,
+            verify_key_file,
+            detached_auth_file,
+        } => scan(
+            input,
+            mode.into(),
+            verify_key_hex.as_deref(),
+            verify_key_id,
+            verify_key_file,
+            detached_auth_file,
+        ),
         Command::ScanBurst { input_dir, mode } => scan_burst(input_dir, mode.into()),
         Command::Inspect {
             data,
@@ -271,6 +414,39 @@ fn main() -> Result<()> {
         }
         Command::Profiles => profiles(),
         Command::BenchPlan => bench_plan(),
+        Command::AuthSign {
+            data,
+            output,
+            auth_key_hex,
+            auth_key_id,
+        } => auth::auth_sign(data.as_bytes(), output, &auth_key_hex, auth_key_id),
+        Command::AuthSignEd25519 {
+            data,
+            output,
+            signing_key_hex,
+            key_id,
+        } => auth::auth_sign_ed25519(data.as_bytes(), output, &signing_key_hex, key_id),
+        Command::AuthVerifyEd25519 {
+            data,
+            signature,
+            public_key_hex,
+            key_id,
+        } => auth::auth_verify_ed25519(data.as_bytes(), signature, &public_key_hex, key_id),
+        Command::KeysetInspect { path } => auth::keyset_inspect(path),
+        Command::KeysetValidate {
+            path,
+            root_pubkey_hex,
+        } => auth::keyset_validate(path, root_pubkey_hex.as_deref()),
+        Command::KeysetSignEd25519 {
+            input,
+            output,
+            signing_key_hex,
+            signed_by,
+        } => auth::keyset_sign_ed25519(input, output, &signing_key_hex, &signed_by),
+        Command::KeysetVerify {
+            path,
+            root_pubkey_hex,
+        } => auth::keyset_verify(path, &root_pubkey_hex),
     }
 }
 
@@ -374,76 +550,139 @@ fn encoder(
     Encoder::new(config)
 }
 
-fn encode(
-    payload: &[u8],
+struct EncodeRequest<'a> {
+    payload: &'a [u8],
     output: PathBuf,
     profile: ProfileId,
     mode: Option<TransmissionMode>,
     ecc_level: Option<EccLevel>,
     format: FormatArg,
     sizing: RenderSizing,
-) -> Result<()> {
-    let encoded = encoder(profile, mode, ecc_level, sizing.geometry)
-        .encode_static(payload)
-        .context("failed to encode payload")?;
+    auth_key_hex: Option<&'a str>,
+    auth_key_id: u32,
+}
+
+fn encode(request: EncodeRequest<'_>) -> Result<()> {
+    let encoder = encoder(
+        request.profile,
+        request.mode,
+        request.ecc_level,
+        request.sizing.geometry,
+    );
+    let encoded = if let Some(key_hex) = request.auth_key_hex {
+        let key = auth::parse_auth_key_hex(key_hex)?;
+        encoder
+            .encode_static_authenticated(request.payload, &key, request.auth_key_id)
+            .context("failed to encode authenticated payload")?
+    } else {
+        encoder
+            .encode_static(request.payload)
+            .context("failed to encode payload")?
+    };
     let render_options = apply_fit(
         RenderOptions::for_descriptor(&encoded.descriptor),
         encoded.descriptor.width,
         encoded.descriptor.height,
-        sizing.fit,
+        request.sizing.fit,
     )?;
-    match format {
+    match request.format {
         FormatArg::Png => {
             let image = RasterRenderer::new(render_options)
                 .render(&encoded.matrix)
                 .context("failed to render PNG")?;
-            image.save(&output).with_context(|| {
-                format!("failed to save rendered image to {}", output.display())
+            image.save(&request.output).with_context(|| {
+                format!(
+                    "failed to save rendered image to {}",
+                    request.output.display()
+                )
             })?;
         }
         FormatArg::Svg => {
             let svg = SvgRenderer::new(render_options)
                 .render(&encoded.matrix)
                 .context("failed to render SVG")?;
-            fs::write(&output, svg)
-                .with_context(|| format!("failed to write SVG to {}", output.display()))?;
+            fs::write(&request.output, svg)
+                .with_context(|| format!("failed to write SVG to {}", request.output.display()))?;
         }
     }
     println!("{}", serde_json::to_string_pretty(&encoded.descriptor)?);
     Ok(())
 }
 
-fn decode(input: PathBuf, auto: bool) -> Result<()> {
+fn decode(
+    input: PathBuf,
+    auto: bool,
+    verify_key_hex: Option<&str>,
+    verify_key_id: u32,
+    verify_key_file: Option<PathBuf>,
+    detached_auth_file: Option<PathBuf>,
+) -> Result<()> {
     let image =
         image::open(&input).with_context(|| format!("failed to open image {}", input.display()))?;
+    let detached_signature = auth::load_detached_verification_input(detached_auth_file.as_ref())?;
     if auto {
         let auto_decoded = RasterDecoder::default()
             .decode_auto_with_info(&image)
             .context("failed to auto-decode GlyphNet image")?;
-        println!("{}", decode_json(&auto_decoded, None, None, None));
+        let mut payload = decode_json(&auto_decoded, None, None, None);
+        if let Some(result) = auth::verify_auth_payload(
+            &auto_decoded.decoded.frame.payload,
+            verify_key_hex,
+            verify_key_id,
+            verify_key_file.as_ref(),
+            detached_signature.as_ref(),
+        )? {
+            payload["auth"] = serde_json::json!({
+                "verified": result.verified,
+                "key_id": result.key_id,
+                "error": result.error,
+                "reason": result.reason
+            });
+        }
+        println!("{payload}");
     } else {
         let decoded = RasterDecoder::default()
             .decode(&image)
             .context("failed to decode GlyphNet image")?;
-        println!(
-            "{}",
-            serde_json::json!({
-                "stream_id": decoded.frame.header.stream_id,
-                "frame_index": decoded.frame.header.frame_index,
-                "frame_count": decoded.frame.header.frame_count,
-                "mode": decoded.frame.header.mode.to_string(),
-                "ecc": decoded.frame.header.ecc_level.to_string(),
-                "payload_utf8_lossy": String::from_utf8_lossy(&decoded.frame.payload),
-                "payload_len": decoded.frame.payload.len()
-            })
-        );
+        let mut payload = serde_json::json!({
+            "stream_id": decoded.frame.header.stream_id,
+            "frame_index": decoded.frame.header.frame_index,
+            "frame_count": decoded.frame.header.frame_count,
+            "mode": decoded.frame.header.mode.to_string(),
+            "ecc": decoded.frame.header.ecc_level.to_string(),
+            "payload_utf8_lossy": String::from_utf8_lossy(&decoded.frame.payload),
+            "payload_len": decoded.frame.payload.len()
+        });
+        if let Some(result) = auth::verify_auth_payload(
+            &decoded.frame.payload,
+            verify_key_hex,
+            verify_key_id,
+            verify_key_file.as_ref(),
+            detached_signature.as_ref(),
+        )? {
+            payload["auth"] = serde_json::json!({
+                "verified": result.verified,
+                "key_id": result.key_id,
+                "error": result.error,
+                "reason": result.reason
+            });
+        }
+        println!("{payload}");
     }
     Ok(())
 }
 
-fn scan(input: PathBuf, mode: TransmissionMode) -> Result<()> {
+fn scan(
+    input: PathBuf,
+    mode: TransmissionMode,
+    verify_key_hex: Option<&str>,
+    verify_key_id: u32,
+    verify_key_file: Option<PathBuf>,
+    detached_auth_file: Option<PathBuf>,
+) -> Result<()> {
     let image =
         image::open(&input).with_context(|| format!("failed to open image {}", input.display()))?;
+    let detached_signature = auth::load_detached_verification_input(detached_auth_file.as_ref())?;
     let scanned = scan_still(&image, mode).context("failed to scan image")?;
     let crop = scanned.crop.map(|region| {
         serde_json::json!({
@@ -487,9 +726,25 @@ fn scan(input: PathBuf, mode: TransmissionMode) -> Result<()> {
             "decode_attempts_micros": telemetry.timings.decode_attempts_micros
         }
     });
+    if let Some(result) = auth::verify_auth_payload(
+        &scanned.decoded.decoded.frame.payload,
+        verify_key_hex,
+        verify_key_id,
+        verify_key_file.as_ref(),
+        detached_signature.as_ref(),
+    )? {
+        payload["auth"] = serde_json::json!({
+            "verified": result.verified,
+            "key_id": result.key_id,
+            "error": result.error,
+            "reason": result.reason
+        });
+    }
     println!("{payload}");
     Ok(())
 }
+
+// Auth/keyset logic extracted to `auth` module.
 
 fn scan_burst(input_dir: PathBuf, mode: TransmissionMode) -> Result<()> {
     let mut scanner = Scanner::new(ScannerConfig {

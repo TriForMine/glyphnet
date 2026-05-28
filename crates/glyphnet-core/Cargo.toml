@@ -12,6 +12,7 @@ readme.workspace = true
 [dependencies]
 blake3.workspace = true
 crc32fast.workspace = true
+ed25519-dalek.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 

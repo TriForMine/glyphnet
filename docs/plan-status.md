@@ -14,7 +14,7 @@ This file tracks execution status for the roadmap priorities in
 - [x] Complete Phase 2 ECC: LDPC screen profile and scanner-facing telemetry contract.
 - [ ] Lock matrix as scanner reliability baseline in CI (fixtures + perf/reliability rows).
 - [x] Deliver burst erasure transport (fountain/RaptorQ-like direction) baseline.
-- [ ] Add payload authenticity envelope above transport CRC.
+- [x] Add payload authenticity envelope above transport CRC.
 
 ## In Progress
 
@@ -30,6 +30,11 @@ This file tracks execution status for the roadmap priorities in
 - `feat/phase4-burst-transport-phase1`: add burst packet wire format, RS shard
   erasure encode/recover baseline, stateful scanner burst progress reporting,
   `scan-burst` tooling, and non-gating burst loss-sweep CI comment table.
+- `feat/phase45-auth-envelope-cli`: add embedded authenticity envelope in core,
+  authenticated encode/decode APIs, detached signature primitives, CLI keyring
+  verify + sidecar signing flow, wasm authenticated encode/verify bridges,
+  wasm detached sign/verify exports, and Ed25519 detached sign/verify baseline
+  across core/CLI/wasm.
 
 ## Next Up
 
@@ -43,3 +48,7 @@ This file tracks execution status for the roadmap priorities in
    promoted to gating.
 4. Improve burst high-loss reliability (30-40%) and promote burst CI thresholds
    from non-gating baseline tracking to gated targets once stable.
+5. Define and implement versioned key-discovery/distribution format for SDK
+   integrations (key rotation lifecycle, trust roots, and multi-key metadata).
+   Baseline keyset schema + CLI inspect/validate is now implemented; remaining
+   work is trust-root signing and revocation lifecycle policy.

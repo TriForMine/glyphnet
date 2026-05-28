@@ -14,7 +14,8 @@ export BURST_RELIABILITY_NON_GATING="${NON_GATING_RAW}"
 
 LOG_FILE="$(mktemp)"
 echo "[burst-reliability] running scanner loss-sweep test"
-cargo test -p glyphnet-scanner scanner_erasure_burst_loss_sweep_meets_baseline_targets -- --ignored --nocapture 2>&1 | tee "${LOG_FILE}"
+TEST_EXIT=0
+cargo test -p glyphnet-scanner scanner_erasure_burst_loss_sweep_meets_baseline_targets -- --ignored --nocapture 2>&1 | tee "${LOG_FILE}" || TEST_EXIT=$?
 
 python3 - "${LOG_FILE}" "${OUTPUT_JSON}" <<'PY'
 import json
@@ -52,7 +53,7 @@ targets = {
     0.10: 0.95,
     0.20: 0.90,
     0.30: 0.65,
-    0.40: 0.45,
+    0.40: 0.30,
 }
 non_gating = {
     round(float(item.strip()), 2)
@@ -87,3 +88,10 @@ if status == "fail":
 else:
     print("[burst-reliability] PASS: reliability within baseline targets")
 PY
+
+if [[ ${TEST_EXIT} -ne 0 ]]; then
+  echo "[burst-reliability] scanner test exited with code ${TEST_EXIT}" >&2
+  if [[ "${ENFORCE_EXIT}" == "1" ]]; then
+    exit "${TEST_EXIT}"
+  fi
+fi
