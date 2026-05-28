@@ -4,6 +4,8 @@ const AUTH_MAGIC: [u8; 4] = *b"GAUT";
 const AUTH_VERSION: u8 = 1;
 const AUTH_TAG_LEN: usize = 16;
 const AUTH_HEADER_LEN: usize = 16;
+const DETACHED_AUTH_MAGIC: [u8; 4] = *b"GDSG";
+const DETACHED_AUTH_VERSION: u8 = 1;
 
 /// Embedded authenticity envelope metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -12,6 +14,17 @@ pub struct AuthEnvelopeHeader {
     pub key_id: u32,
     /// Raw payload length before envelope/tag.
     pub payload_len: u32,
+}
+
+/// Detached authenticity signature metadata and tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DetachedAuthSignature {
+    /// Key identifier used by sender to select verification key.
+    pub key_id: u32,
+    /// Raw payload length covered by this signature.
+    pub payload_len: u32,
+    /// Truncated keyed BLAKE3 tag.
+    pub tag: [u8; AUTH_TAG_LEN],
 }
 
 /// Build an embedded authenticity envelope using BLAKE3 keyed MAC.
@@ -66,6 +79,44 @@ where
     ))
 }
 
+/// Create a detached authenticity signature over the raw payload.
+pub fn sign_detached_payload(payload: &[u8], key: &[u8; 32], key_id: u32) -> DetachedAuthSignature {
+    let mut to_sign = Vec::with_capacity(10 + payload.len());
+    to_sign.extend_from_slice(&DETACHED_AUTH_MAGIC);
+    to_sign.push(DETACHED_AUTH_VERSION);
+    to_sign.push(0);
+    to_sign.extend_from_slice(&key_id.to_be_bytes());
+    to_sign.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    to_sign.extend_from_slice(payload);
+    DetachedAuthSignature {
+        key_id,
+        payload_len: payload.len() as u32,
+        tag: auth_tag(&to_sign, key),
+    }
+}
+
+/// Verify a detached authenticity signature over the raw payload.
+pub fn verify_detached_payload<F>(
+    payload: &[u8],
+    signature: &DetachedAuthSignature,
+    mut key_lookup: F,
+) -> Result<()>
+where
+    F: FnMut(u32) -> Option<[u8; 32]>,
+{
+    if signature.payload_len != payload.len() as u32 {
+        return Err(GlyphError::AuthenticityMismatch);
+    }
+    let Some(key) = key_lookup(signature.key_id) else {
+        return Err(GlyphError::UnknownAuthenticityKey(signature.key_id));
+    };
+    let expected = sign_detached_payload(payload, &key, signature.key_id);
+    if expected.tag != signature.tag {
+        return Err(GlyphError::AuthenticityMismatch);
+    }
+    Ok(())
+}
+
 fn auth_tag(bytes: &[u8], key: &[u8; 32]) -> [u8; AUTH_TAG_LEN] {
     let hash = blake3::keyed_hash(key, bytes);
     let mut out = [0u8; AUTH_TAG_LEN];
@@ -101,5 +152,24 @@ mod tests {
         let sealed = seal_payload(b"glyphnet-auth", &KEY_A, 9);
         let err = open_payload(&sealed, |_id| None).unwrap_err();
         assert!(matches!(err, GlyphError::UnknownAuthenticityKey(9)));
+    }
+
+    #[test]
+    fn detached_signature_roundtrip() {
+        let sig = sign_detached_payload(b"glyphnet-detached", &KEY_A, 5);
+        verify_detached_payload(b"glyphnet-detached", &sig, |id| {
+            if id == 5 { Some(KEY_A) } else { None }
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn detached_signature_rejects_wrong_key() {
+        let sig = sign_detached_payload(b"glyphnet-detached", &KEY_A, 5);
+        let err = verify_detached_payload(b"glyphnet-detached", &sig, |id| {
+            if id == 5 { Some(KEY_B) } else { None }
+        })
+        .unwrap_err();
+        assert!(matches!(err, GlyphError::AuthenticityMismatch));
     }
 }

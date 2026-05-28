@@ -1,10 +1,11 @@
-use std::{fs, path::PathBuf};
+use std::{collections::HashMap, fs, path::PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use glyphnet_core::{
-    EccLevel, ProfileId, SymbolGeometry, TransmissionMode, open_authenticated_payload,
-    profile_catalog, profile_spec,
+    DetachedAuthSignature, EccLevel, ProfileId, SymbolGeometry, TransmissionMode,
+    open_authenticated_payload, profile_catalog, profile_spec, sign_detached_payload,
+    verify_detached_payload,
 };
 use glyphnet_decode::{RasterDecoder, decode_authenticated_payload};
 use glyphnet_encode::{Encoder, EncoderConfig};
@@ -73,6 +74,12 @@ enum Command {
         /// Key id for the verification key.
         #[arg(long, default_value_t = 1)]
         verify_key_id: u32,
+        /// Optional verification keyring JSON file: [{ "key_id": 1, "key_hex": "..." }].
+        #[arg(long)]
+        verify_key_file: Option<PathBuf>,
+        /// Optional detached signature JSON file.
+        #[arg(long)]
+        detached_auth_file: Option<PathBuf>,
     },
     /// Scan an image, attempting coarse auto-crop before decoding.
     Scan {
@@ -87,6 +94,12 @@ enum Command {
         /// Key id for the verification key.
         #[arg(long, default_value_t = 1)]
         verify_key_id: u32,
+        /// Optional verification keyring JSON file: [{ "key_id": 1, "key_hex": "..." }].
+        #[arg(long)]
+        verify_key_file: Option<PathBuf>,
+        /// Optional detached signature JSON file.
+        #[arg(long)]
+        detached_auth_file: Option<PathBuf>,
     },
     /// Scan an ordered directory of frames as a burst session.
     ScanBurst {
@@ -151,6 +164,21 @@ enum Command {
     Profiles,
     /// Print benchmark targets and suggested regression commands as JSON.
     BenchPlan,
+    /// Create a detached authenticity signature sidecar JSON for payload data.
+    AuthSign {
+        /// Payload data.
+        #[arg(long)]
+        data: String,
+        /// Output detached signature JSON path.
+        #[arg(short, long)]
+        output: PathBuf,
+        /// 32-byte authentication key in hex (64 hex chars).
+        #[arg(long)]
+        auth_key_hex: String,
+        /// Key id attached to detached signature.
+        #[arg(long, default_value_t = 1)]
+        auth_key_id: u32,
+    },
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -256,13 +284,31 @@ fn main() -> Result<()> {
             auto,
             verify_key_hex,
             verify_key_id,
-        } => decode(input, auto, verify_key_hex.as_deref(), verify_key_id),
+            verify_key_file,
+            detached_auth_file,
+        } => decode(
+            input,
+            auto,
+            verify_key_hex.as_deref(),
+            verify_key_id,
+            verify_key_file,
+            detached_auth_file,
+        ),
         Command::Scan {
             input,
             mode,
             verify_key_hex,
             verify_key_id,
-        } => scan(input, mode.into(), verify_key_hex.as_deref(), verify_key_id),
+            verify_key_file,
+            detached_auth_file,
+        } => scan(
+            input,
+            mode.into(),
+            verify_key_hex.as_deref(),
+            verify_key_id,
+            verify_key_file,
+            detached_auth_file,
+        ),
         Command::ScanBurst { input_dir, mode } => scan_burst(input_dir, mode.into()),
         Command::Inspect {
             data,
@@ -304,6 +350,12 @@ fn main() -> Result<()> {
         }
         Command::Profiles => profiles(),
         Command::BenchPlan => bench_plan(),
+        Command::AuthSign {
+            data,
+            output,
+            auth_key_hex,
+            auth_key_id,
+        } => auth_sign(data.as_bytes(), output, &auth_key_hex, auth_key_id),
     }
 }
 
@@ -471,9 +523,12 @@ fn decode(
     auto: bool,
     verify_key_hex: Option<&str>,
     verify_key_id: u32,
+    verify_key_file: Option<PathBuf>,
+    detached_auth_file: Option<PathBuf>,
 ) -> Result<()> {
     let image =
         image::open(&input).with_context(|| format!("failed to open image {}", input.display()))?;
+    let detached_signature = load_detached_signature(detached_auth_file.as_ref())?;
     if auto {
         let auto_decoded = RasterDecoder::default()
             .decode_auto_with_info(&image)
@@ -483,6 +538,8 @@ fn decode(
             &auto_decoded.decoded.frame.payload,
             verify_key_hex,
             verify_key_id,
+            verify_key_file.as_ref(),
+            detached_signature.as_ref(),
         )? {
             payload["auth"] =
                 serde_json::json!({ "verified": verified, "key_id": key_id, "error": error });
@@ -501,9 +558,13 @@ fn decode(
             "payload_utf8_lossy": String::from_utf8_lossy(&decoded.frame.payload),
             "payload_len": decoded.frame.payload.len()
         });
-        if let Some((verified, key_id, error)) =
-            verify_auth_payload(&decoded.frame.payload, verify_key_hex, verify_key_id)?
-        {
+        if let Some((verified, key_id, error)) = verify_auth_payload(
+            &decoded.frame.payload,
+            verify_key_hex,
+            verify_key_id,
+            verify_key_file.as_ref(),
+            detached_signature.as_ref(),
+        )? {
             payload["auth"] =
                 serde_json::json!({ "verified": verified, "key_id": key_id, "error": error });
         }
@@ -517,9 +578,12 @@ fn scan(
     mode: TransmissionMode,
     verify_key_hex: Option<&str>,
     verify_key_id: u32,
+    verify_key_file: Option<PathBuf>,
+    detached_auth_file: Option<PathBuf>,
 ) -> Result<()> {
     let image =
         image::open(&input).with_context(|| format!("failed to open image {}", input.display()))?;
+    let detached_signature = load_detached_signature(detached_auth_file.as_ref())?;
     let scanned = scan_still(&image, mode).context("failed to scan image")?;
     let crop = scanned.crop.map(|region| {
         serde_json::json!({
@@ -567,6 +631,8 @@ fn scan(
         &scanned.decoded.decoded.frame.payload,
         verify_key_hex,
         verify_key_id,
+        verify_key_file.as_ref(),
+        detached_signature.as_ref(),
     )? {
         payload["auth"] = serde_json::json!({
             "verified": verified,
@@ -597,27 +663,107 @@ fn verify_auth_payload(
     payload: &[u8],
     verify_key_hex: Option<&str>,
     verify_key_id: u32,
+    verify_key_file: Option<&PathBuf>,
+    detached_signature: Option<&DetachedAuthSignature>,
 ) -> Result<Option<(bool, u32, Option<String>)>> {
+    if let Some(signature) = detached_signature {
+        let keyring = verification_keyring(verify_key_hex, verify_key_id, verify_key_file)?;
+        match verify_detached_payload(payload, signature, |id| keyring.get(&id).copied()) {
+            Ok(_) => return Ok(Some((true, signature.key_id, None))),
+            Err(error) => return Ok(Some((false, signature.key_id, Some(error.to_string())))),
+        }
+    }
     if open_authenticated_payload(payload, |_id| None).is_err() {
         return Ok(None);
     }
-    let Some(key_hex) = verify_key_hex else {
+    let keyring = verification_keyring(verify_key_hex, verify_key_id, verify_key_file)?;
+    if keyring.is_empty() {
         return Ok(Some((
             false,
             verify_key_id,
             Some("missing verification key".to_string()),
         )));
-    };
-    let key = parse_auth_key_hex(key_hex)?;
-    match decode_authenticated_payload(
-        payload,
-        |id| {
-            if id == verify_key_id { Some(key) } else { None }
-        },
-    ) {
+    }
+    match decode_authenticated_payload(payload, |id| keyring.get(&id).copied()) {
         Ok(_) => Ok(Some((true, verify_key_id, None))),
         Err(error) => Ok(Some((false, verify_key_id, Some(error.to_string())))),
     }
+}
+
+fn verification_keyring(
+    verify_key_hex: Option<&str>,
+    verify_key_id: u32,
+    verify_key_file: Option<&PathBuf>,
+) -> Result<HashMap<u32, [u8; 32]>> {
+    let mut keys = HashMap::new();
+    if let Some(path) = verify_key_file {
+        let loaded = load_verify_keys(path)?;
+        keys.extend(loaded);
+    }
+    if let Some(hex) = verify_key_hex {
+        keys.insert(verify_key_id, parse_auth_key_hex(hex)?);
+    }
+    Ok(keys)
+}
+
+fn load_verify_keys(path: &PathBuf) -> Result<HashMap<u32, [u8; 32]>> {
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("failed to read verify key file {}", path.display()))?;
+    let json: serde_json::Value = serde_json::from_str(&content)
+        .with_context(|| format!("invalid JSON in verify key file {}", path.display()))?;
+    let arr = json
+        .as_array()
+        .context("verify key file must be a JSON array")?;
+    let mut out = HashMap::new();
+    for item in arr {
+        let key_id = item
+            .get("key_id")
+            .and_then(serde_json::Value::as_u64)
+            .context("verify key item missing numeric key_id")? as u32;
+        let key_hex = item
+            .get("key_hex")
+            .and_then(serde_json::Value::as_str)
+            .context("verify key item missing string key_hex")?;
+        out.insert(key_id, parse_auth_key_hex(key_hex)?);
+    }
+    Ok(out)
+}
+
+fn load_detached_signature(path: Option<&PathBuf>) -> Result<Option<DetachedAuthSignature>> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("failed to read detached signature file {}", path.display()))?;
+    let json: serde_json::Value = serde_json::from_str(&content)
+        .with_context(|| format!("invalid JSON in detached signature file {}", path.display()))?;
+    let key_id = json
+        .get("key_id")
+        .and_then(serde_json::Value::as_u64)
+        .context("detached signature missing numeric key_id")? as u32;
+    let payload_len = json
+        .get("payload_len")
+        .and_then(serde_json::Value::as_u64)
+        .context("detached signature missing numeric payload_len")? as u32;
+    let tag_hex = json
+        .get("tag_hex")
+        .and_then(serde_json::Value::as_str)
+        .context("detached signature missing string tag_hex")?;
+    if tag_hex.len() != 32 {
+        bail!("detached signature tag_hex must be 32 hex chars");
+    }
+    let mut tag = [0u8; 16];
+    for (idx, slot) in tag.iter_mut().enumerate() {
+        let start = idx * 2;
+        let end = start + 2;
+        *slot = u8::from_str_radix(&tag_hex[start..end], 16)
+            .with_context(|| format!("invalid tag hex at bytes {}..{}", start, end))?;
+    }
+    Ok(Some(DetachedAuthSignature {
+        key_id,
+        payload_len,
+        tag,
+    }))
 }
 
 fn scan_burst(input_dir: PathBuf, mode: TransmissionMode) -> Result<()> {
@@ -810,5 +956,25 @@ fn bench_plan() -> Result<()> {
             }
         }))?
     );
+    Ok(())
+}
+
+fn auth_sign(payload: &[u8], output: PathBuf, auth_key_hex: &str, auth_key_id: u32) -> Result<()> {
+    let key = parse_auth_key_hex(auth_key_hex)?;
+    let sig = sign_detached_payload(payload, &key, auth_key_id);
+    let tag_hex = sig
+        .tag
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    fs::write(
+        &output,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "key_id": sig.key_id,
+            "payload_len": sig.payload_len,
+            "tag_hex": tag_hex
+        }))?,
+    )
+    .with_context(|| format!("failed to write detached signature to {}", output.display()))?;
     Ok(())
 }
