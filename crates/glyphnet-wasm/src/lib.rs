@@ -389,7 +389,9 @@ mod tests {
 
     #[test]
     fn native_scan_api_reports_recovery_and_telemetry_contract() {
-        let encoded = Encoder::default().encode_static(b"screen telemetry").unwrap();
+        let encoded = Encoder::default()
+            .encode_static(b"screen telemetry")
+            .unwrap();
         let image = glyphnet_render::RasterRenderer::default()
             .render(&encoded.matrix)
             .unwrap();
