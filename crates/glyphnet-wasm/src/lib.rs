@@ -1,6 +1,7 @@
 //! WebAssembly-facing API for GlyphNet.
 
 use glyphnet_core::{LayoutFamily, ProfileId, TransmissionMode, profile_spec};
+use glyphnet_decode::decode_authenticated_payload;
 use glyphnet_encode::{Encoder, EncoderConfig};
 use glyphnet_render::{RasterRenderer, RenderOptions, SvgRenderer};
 use glyphnet_scanner::{
@@ -17,10 +18,36 @@ pub fn descriptor_json(payload: &[u8]) -> Result<String, String> {
     serde_json::to_string(&encoded.descriptor).map_err(|error| error.to_string())
 }
 
+/// Encode bytes with authenticity envelope and return the symbol descriptor as JSON.
+pub fn descriptor_json_authenticated(
+    payload: &[u8],
+    auth_key: &[u8; 32],
+    key_id: u32,
+) -> Result<String, String> {
+    let encoded = Encoder::default()
+        .encode_static_authenticated(payload, auth_key, key_id)
+        .map_err(|error| error.to_string())?;
+    serde_json::to_string(&encoded.descriptor).map_err(|error| error.to_string())
+}
+
 /// Encode bytes and return an SVG document.
 pub fn encode_svg_string(payload: &[u8]) -> Result<String, String> {
     let encoded = Encoder::default()
         .encode_static(payload)
+        .map_err(|error| error.to_string())?;
+    SvgRenderer::default()
+        .render(&encoded.matrix)
+        .map_err(|error| error.to_string())
+}
+
+/// Encode bytes with authenticity envelope and return an SVG document.
+pub fn encode_svg_string_authenticated(
+    payload: &[u8],
+    auth_key: &[u8; 32],
+    key_id: u32,
+) -> Result<String, String> {
+    let encoded = Encoder::default()
+        .encode_static_authenticated(payload, auth_key, key_id)
         .map_err(|error| error.to_string())?;
     SvgRenderer::default()
         .render(&encoded.matrix)
@@ -72,6 +99,41 @@ pub fn encode_png_with_layout_geometry(
         ..EncoderConfig::default()
     })
     .encode_static(payload)
+    .map_err(|error| error.to_string())?;
+    let renderer = RasterRenderer::new(RenderOptions {
+        module_px,
+        quiet_zone_modules,
+        ..RenderOptions::default()
+    });
+    let image = renderer
+        .render(&encoded.matrix)
+        .map_err(|error| error.to_string())?;
+    let mut bytes = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut bytes)
+        .write_image(
+            image.as_raw(),
+            image.width(),
+            image.height(),
+            image::ColorType::Rgba8.into(),
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(bytes)
+}
+
+/// Encode bytes with authenticity envelope using explicit layout and geometry, returning PNG bytes.
+pub fn encode_png_with_layout_geometry_authenticated(
+    payload: &[u8],
+    auth_key: &[u8; 32],
+    key_id: u32,
+    layout: LayoutFamily,
+    module_px: u32,
+    quiet_zone_modules: u32,
+) -> Result<Vec<u8>, String> {
+    let encoded = Encoder::new(EncoderConfig {
+        layout,
+        ..EncoderConfig::default()
+    })
+    .encode_static_authenticated(payload, auth_key, key_id)
     .map_err(|error| error.to_string())?;
     let renderer = RasterRenderer::new(RenderOptions {
         module_px,
@@ -182,6 +244,84 @@ pub fn scan_rgba_json(
         }
         Err(failed) => failed_scan_json(failed).map_err(|error| error.to_string()),
     }
+}
+
+/// Scan RGBA pixels and verify an embedded authenticity envelope with a supplied key.
+pub fn scan_rgba_json_with_verification(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    mode: TransmissionMode,
+    verify_key: &[u8; 32],
+    verify_key_id: u32,
+) -> Result<String, String> {
+    let expected = width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| "image dimensions overflow".to_string())? as usize;
+    if rgba.len() != expected {
+        return Err(format!(
+            "invalid RGBA buffer length: expected {expected}, got {}",
+            rgba.len()
+        ));
+    }
+    let image = RgbaImage::from_raw(width, height, rgba.to_vec())
+        .ok_or_else(|| "failed to construct RGBA image".to_string())?;
+    let image = DynamicImage::ImageRgba8(image);
+    match scan_still_with_diagnostics(&image, mode) {
+        Ok(scanned) => {
+            let mut auth = serde_json::json!({
+                "verified": false,
+                "key_id": serde_json::Value::Null,
+                "error": serde_json::Value::Null
+            });
+            match decode_authenticated_payload(&scanned.decoded.decoded.frame.payload, |id| {
+                if id == verify_key_id {
+                    Some(*verify_key)
+                } else {
+                    None
+                }
+            }) {
+                Ok(payload) => {
+                    auth["verified"] = serde_json::json!(true);
+                    auth["key_id"] = serde_json::json!(verify_key_id);
+                    auth["error"] = serde_json::Value::Null;
+                    return serde_json::to_string_pretty(&serde_json::json!({
+                        "ok": true,
+                        "payload_utf8_lossy": String::from_utf8_lossy(&payload),
+                        "payload_len": payload.len(),
+                        "auth": auth
+                    }))
+                    .map_err(|error| error.to_string());
+                }
+                Err(error) => {
+                    auth["error"] = serde_json::json!(error.to_string());
+                }
+            }
+            serde_json::to_string_pretty(&serde_json::json!({
+                "ok": false,
+                "error": "auth verification failed",
+                "auth": auth
+            }))
+            .map_err(|error| error.to_string())
+        }
+        Err(failed) => failed_scan_json(failed).map_err(|error| error.to_string()),
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn parse_auth_key_hex(auth_key_hex: &str) -> Result<[u8; 32], String> {
+    if auth_key_hex.len() != 64 {
+        return Err("auth key must be 64 hex chars (32 bytes)".to_string());
+    }
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        let start = i * 2;
+        let end = start + 2;
+        *byte = u8::from_str_radix(&auth_key_hex[start..end], 16)
+            .map_err(|_| "auth key contains non-hex characters".to_string())?;
+    }
+    Ok(out)
 }
 
 /// Stateful burst scanner session for incremental frame ingest.
@@ -350,6 +490,19 @@ mod wasm {
         crate::descriptor_json(input.as_bytes()).map_err(|error| JsValue::from_str(&error))
     }
 
+    /// Encode a UTF-8 string with authenticity envelope and return symbol descriptor JSON.
+    #[wasm_bindgen(js_name = descriptorJsonAuthenticated)]
+    pub fn descriptor_json_authenticated(
+        input: &str,
+        auth_key_hex: &str,
+        key_id: u32,
+    ) -> Result<String, JsValue> {
+        let auth_key =
+            crate::parse_auth_key_hex(auth_key_hex).map_err(|error| JsValue::from_str(&error))?;
+        crate::descriptor_json_authenticated(input.as_bytes(), &auth_key, key_id)
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
     /// Encode a UTF-8 string into SVG using explicit geometry.
     #[wasm_bindgen(js_name = encodeSvgWithGeometry)]
     pub fn encode_svg_with_geometry(
@@ -358,6 +511,19 @@ mod wasm {
         quiet_zone_modules: u32,
     ) -> Result<String, JsValue> {
         crate::encode_svg_with_geometry(input.as_bytes(), module_px, quiet_zone_modules)
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
+    /// Encode a UTF-8 string with authenticity envelope into a GlyphNet SVG document.
+    #[wasm_bindgen(js_name = encodeSvgAuthenticated)]
+    pub fn encode_svg_authenticated(
+        input: &str,
+        auth_key_hex: &str,
+        key_id: u32,
+    ) -> Result<String, JsValue> {
+        let auth_key =
+            crate::parse_auth_key_hex(auth_key_hex).map_err(|error| JsValue::from_str(&error))?;
+        crate::encode_svg_string_authenticated(input.as_bytes(), &auth_key, key_id)
             .map_err(|error| JsValue::from_str(&error))
     }
 
@@ -390,6 +556,30 @@ mod wasm {
         .map_err(|error| JsValue::from_str(&error))
     }
 
+    /// Encode UTF-8 into PNG bytes using explicit layout/geometry and an authenticity envelope.
+    #[wasm_bindgen(js_name = encodePngWithLayoutGeometryAuthenticated)]
+    pub fn encode_png_with_layout_geometry_authenticated(
+        input: &str,
+        auth_key_hex: &str,
+        key_id: u32,
+        layout: &str,
+        module_px: u32,
+        quiet_zone_modules: u32,
+    ) -> Result<Vec<u8>, JsValue> {
+        let auth_key =
+            crate::parse_auth_key_hex(auth_key_hex).map_err(|error| JsValue::from_str(&error))?;
+        let layout = crate::layout_from_str(layout).map_err(|error| JsValue::from_str(&error))?;
+        crate::encode_png_with_layout_geometry_authenticated(
+            input.as_bytes(),
+            &auth_key,
+            key_id,
+            layout,
+            module_px,
+            quiet_zone_modules,
+        )
+        .map_err(|error| JsValue::from_str(&error))
+    }
+
     /// Scan browser ImageData RGBA bytes and return scanner diagnostics JSON.
     #[wasm_bindgen(js_name = scanRgbaJson)]
     pub fn scan_rgba_json(
@@ -400,6 +590,30 @@ mod wasm {
     ) -> Result<String, JsValue> {
         let mode = crate::mode_from_str(mode).map_err(|error| JsValue::from_str(&error))?;
         crate::scan_rgba_json(rgba, width, height, mode).map_err(|error| JsValue::from_str(&error))
+    }
+
+    /// Scan browser ImageData RGBA bytes and verify payload authenticity.
+    #[wasm_bindgen(js_name = scanRgbaJsonWithVerification)]
+    pub fn scan_rgba_json_with_verification(
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+        mode: &str,
+        verify_key_hex: &str,
+        verify_key_id: u32,
+    ) -> Result<String, JsValue> {
+        let mode = crate::mode_from_str(mode).map_err(|error| JsValue::from_str(&error))?;
+        let verify_key =
+            crate::parse_auth_key_hex(verify_key_hex).map_err(|error| JsValue::from_str(&error))?;
+        crate::scan_rgba_json_with_verification(
+            rgba,
+            width,
+            height,
+            mode,
+            &verify_key,
+            verify_key_id,
+        )
+        .map_err(|error| JsValue::from_str(&error))
     }
 
     /// Stateful burst scan session for incremental frame ingest.
@@ -565,5 +779,32 @@ mod tests {
         }
         assert!(final_json.contains(r#""complete": true"#));
         assert!(final_json.contains("burst-session"));
+    }
+
+    #[test]
+    fn native_authenticated_png_roundtrip_verifies() {
+        let key = [0x44u8; 32];
+        let png = encode_png_with_layout_geometry_authenticated(
+            b"wasm-auth",
+            &key,
+            99,
+            LayoutFamily::RibbonWeave,
+            4,
+            4,
+        )
+        .unwrap();
+        let image = image::load_from_memory(&png).unwrap().into_rgba8();
+        let json = scan_rgba_json_with_verification(
+            image.as_raw(),
+            image.width(),
+            image.height(),
+            TransmissionMode::Print,
+            &key,
+            99,
+        )
+        .unwrap();
+        assert!(json.contains(r#""ok": true"#));
+        assert!(json.contains(r#""verified": true"#));
+        assert!(json.contains("wasm-auth"));
     }
 }
