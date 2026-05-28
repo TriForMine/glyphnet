@@ -5,7 +5,11 @@ confidence-threshold = 0.9
 [advisories]
 unmaintained = "workspace"
 unsound = "all"
-ignore = []
+ignore = [
+  # Transitive via parking_lot 0.11 -> parking_lot_core 0.8 / instant 0.1.
+  # No safe upstream upgrade path is available in current dependency graph.
+  "RUSTSEC-2024-0384",
+]
 
 [bans]
 multiple-versions = "warn"
