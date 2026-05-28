@@ -456,6 +456,11 @@ fn scan(input: PathBuf, mode: TransmissionMode) -> Result<()> {
     payload["scan_telemetry"] = serde_json::json!({
         "candidate_count": telemetry.candidate_count,
         "failed_candidates": telemetry.failed_candidates,
+        "burst_progress": {
+            "frame_count": scanned.decoded.decoded.frame.header.frame_count,
+            "received_frames": 1,
+            "missing_frames": usize::from(scanned.decoded.decoded.frame.header.frame_count.saturating_sub(1))
+        },
         "timings": {
             "total_micros": telemetry.timings.total_micros,
             "full_frame_micros": telemetry.timings.full_frame_micros,

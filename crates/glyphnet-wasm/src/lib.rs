@@ -165,7 +165,12 @@ pub fn scan_rgba_json(
                 "timings": timings_json(scanned.timings),
                 "scan_telemetry": {
                     "candidate_count": telemetry.candidate_count,
-                    "failed_candidates": telemetry.failed_candidates
+                    "failed_candidates": telemetry.failed_candidates,
+                    "burst_progress": {
+                        "frame_count": scanned.decoded.decoded.frame.header.frame_count,
+                        "received_frames": 1,
+                        "missing_frames": usize::from(scanned.decoded.decoded.frame.header.frame_count.saturating_sub(1))
+                    }
                 },
                 "candidate_count": attempts.len(),
                 "attempts": attempts

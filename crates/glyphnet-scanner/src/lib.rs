@@ -101,8 +101,21 @@ pub struct ScanEvent {
     pub frame: Frame,
     /// Complete payload when a static symbol or full burst stream is available.
     pub complete_payload: Option<Vec<u8>>,
+    /// Burst collection progress for multi-frame streams.
+    pub burst_progress: BurstProgress,
     /// Capture timestamp for diagnostics.
     pub timestamp_micros: u64,
+}
+
+/// Burst receive progress snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BurstProgress {
+    /// Total expected frames in stream.
+    pub frame_count: u16,
+    /// Number of unique frames collected so far.
+    pub received_frames: usize,
+    /// Number of frames still missing.
+    pub missing_frames: usize,
 }
 
 /// Axis-aligned scan region in pixel coordinates.
@@ -145,19 +158,35 @@ impl Scanner {
     pub fn scan_frame(&mut self, frame: CameraFrame) -> Result<ScanEvent> {
         let decoded = self.decoder.decode(&frame.image)?;
         let protocol_frame = decoded.frame;
-        let complete_payload = if protocol_frame.header.frame_count == 1 {
-            Some(protocol_frame.payload.clone())
+        let (complete_payload, burst_progress) = if protocol_frame.header.frame_count == 1 {
+            (
+                Some(protocol_frame.payload.clone()),
+                BurstProgress {
+                    frame_count: 1,
+                    received_frames: 1,
+                    missing_frames: 0,
+                },
+            )
         } else {
             let assembler = self
                 .bursts
                 .entry(protocol_frame.header.stream_id)
                 .or_insert_with(|| BurstAssembler::new(protocol_frame.header.frame_count));
-            assembler.push(&protocol_frame)?
+            let complete = assembler.push(&protocol_frame)?;
+            (
+                complete,
+                BurstProgress {
+                    frame_count: assembler.frame_count,
+                    received_frames: assembler.received_count(),
+                    missing_frames: assembler.missing_count(),
+                },
+            )
         };
 
         Ok(ScanEvent {
             frame: protocol_frame,
             complete_payload,
+            burst_progress,
             timestamp_micros: frame.timestamp_micros,
         })
     }
