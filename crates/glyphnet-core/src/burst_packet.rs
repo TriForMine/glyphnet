@@ -30,16 +30,7 @@ pub struct BurstPacketHeader {
 
 impl BurstPacketHeader {
     /// Build and validate a burst packet header.
-    pub fn new(
-        sequence: u16,
-        packet_count: u16,
-        stream_id: u64,
-        flags: u8,
-        original_len: u32,
-        data_shards: u16,
-        payload_len: u16,
-        payload_crc: u32,
-    ) -> Result<Self> {
+    pub fn new(sequence: u16, packet_count: u16, stream_id: u64, payload_len: u16) -> Result<Self> {
         if packet_count == 0 || sequence >= packet_count {
             return Err(GlyphError::InvalidFrameIndex {
                 index: sequence,
@@ -51,11 +42,11 @@ impl BurstPacketHeader {
             sequence,
             packet_count,
             stream_id,
-            flags,
-            original_len,
-            data_shards,
+            flags: 0,
+            original_len: 0,
+            data_shards: 0,
             payload_len,
-            payload_crc,
+            payload_crc: 0,
         })
     }
 
@@ -100,16 +91,12 @@ impl BurstPacketHeader {
         let payload_len = u16::from_be_bytes([bytes[24], bytes[25]]);
         let payload_crc = u32::from_be_bytes([bytes[26], bytes[27], bytes[28], bytes[29]]);
 
-        Self::new(
-            sequence,
-            packet_count,
-            stream_id,
-            bytes[5],
-            original_len,
-            data_shards,
-            payload_len,
-            payload_crc,
-        )
+        let mut header = Self::new(sequence, packet_count, stream_id, payload_len)?;
+        header.flags = bytes[5];
+        header.original_len = original_len;
+        header.data_shards = data_shards;
+        header.payload_crc = payload_crc;
+        Ok(header)
     }
 }
 
@@ -136,16 +123,11 @@ impl BurstPacket {
         let payload_len = u16::try_from(payload.len())
             .map_err(|_| GlyphError::InvalidArgument("burst packet payload exceeds u16::MAX"))?;
         let payload_crc = crc32(&payload);
-        let header = BurstPacketHeader::new(
-            sequence,
-            packet_count,
-            stream_id,
-            flags,
-            original_len,
-            data_shards,
-            payload_len,
-            payload_crc,
-        )?;
+        let mut header = BurstPacketHeader::new(sequence, packet_count, stream_id, payload_len)?;
+        header.flags = flags;
+        header.original_len = original_len;
+        header.data_shards = data_shards;
+        header.payload_crc = payload_crc;
         Ok(Self { header, payload })
     }
 
@@ -206,7 +188,7 @@ mod tests {
 
     #[test]
     fn burst_packet_header_rejects_invalid_sequence() {
-        let err = BurstPacketHeader::new(2, 2, 5, 0, 8, 2, 1, 7).unwrap_err();
+        let err = BurstPacketHeader::new(2, 2, 5, 1).unwrap_err();
         assert!(matches!(err, GlyphError::InvalidFrameIndex { .. }));
     }
 }

@@ -859,7 +859,7 @@ mod tests {
         add_salt_pepper_noise, adjust_exposure, blur, place_on_canvas, resize, skew_x_on_white,
     };
     use image::{Rgba, RgbaImage};
-    use rand::{SeedableRng, rngs::StdRng};
+    use rand::{Rng, SeedableRng, rngs::StdRng};
 
     use super::*;
 
@@ -1117,6 +1117,72 @@ mod tests {
             }
         }
         assert_eq!(recovered, Some(payload));
+    }
+
+    #[test]
+    fn scanner_erasure_burst_loss_sweep_meets_baseline_targets() {
+        let payload = vec![0x5A; 512];
+        let encoder = Encoder::new(EncoderConfig {
+            mode: TransmissionMode::Burst,
+            ecc_level: EccLevel::High,
+            ..EncoderConfig::default()
+        });
+        let frames = encoder.encode_burst_erasure(&payload, 12).unwrap();
+        let mut rng = StdRng::seed_from_u64(0xB517_5EED);
+        let rates = [
+            (0.10f32, 0.80f32),
+            (0.20f32, 0.55f32),
+            (0.30f32, 0.10f32),
+            (0.40f32, 0.0f32),
+        ];
+
+        for (drop_rate, min_success) in rates {
+            let mut successes = 0usize;
+            let mut completion_frames = Vec::new();
+            let trials = 10usize;
+            for _ in 0..trials {
+                let mut scanner = Scanner::new(ScannerConfig {
+                    mode: TransmissionMode::Burst,
+                    max_frames: 120,
+                    ..ScannerConfig::default()
+                });
+                let mut complete_at = None;
+                for (index, encoded) in frames.iter().enumerate() {
+                    if rng.r#gen::<f32>() < drop_rate {
+                        continue;
+                    }
+                    let image = RasterRenderer::default().render(&encoded.matrix).unwrap();
+                    let event = scanner
+                        .scan_frame(CameraFrame {
+                            image: DynamicImage::ImageRgba8(image),
+                            timestamp_micros: index as u64,
+                        })
+                        .unwrap();
+                    if event.complete_payload.is_some() {
+                        complete_at = Some(index + 1);
+                        break;
+                    }
+                }
+                if let Some(done) = complete_at {
+                    successes += 1;
+                    completion_frames.push(done);
+                }
+            }
+
+            let success_rate = successes as f32 / trials as f32;
+            assert!(
+                success_rate >= min_success,
+                "drop_rate={drop_rate:.2} success_rate={success_rate:.2} expected>={min_success:.2}"
+            );
+            if !completion_frames.is_empty() {
+                completion_frames.sort_unstable();
+                let median = completion_frames[completion_frames.len() / 2];
+                assert!(
+                    median <= 64,
+                    "drop_rate={drop_rate:.2} median_frames_to_complete={median} exceeded 64"
+                );
+            }
+        }
     }
 
     #[test]

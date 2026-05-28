@@ -2,7 +2,9 @@ use std::{fs, path::PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
-use glyphnet_core::{EccLevel, ProfileId, SymbolGeometry, TransmissionMode, profile_catalog};
+use glyphnet_core::{
+    EccLevel, ProfileId, SymbolGeometry, TransmissionMode, profile_catalog, profile_spec,
+};
 use glyphnet_decode::RasterDecoder;
 use glyphnet_encode::{Encoder, EncoderConfig};
 use glyphnet_render::{RasterRenderer, RenderOptions, SvgRenderer};
@@ -110,6 +112,9 @@ enum Command {
         /// Maximum payload bytes per frame.
         #[arg(long, default_value_t = 512)]
         frame_payload: usize,
+        /// Data shard count for burst erasure coding.
+        #[arg(long)]
+        erasure_data_shards: Option<usize>,
         /// Explicit symbol width in modules.
         #[arg(long, value_name = "MODULES")]
         width_modules: Option<u16>,
@@ -248,6 +253,7 @@ fn main() -> Result<()> {
             output_dir,
             profile,
             frame_payload,
+            erasure_data_shards,
             width_modules,
             height_modules,
             fit_width_px,
@@ -259,6 +265,7 @@ fn main() -> Result<()> {
                 output_dir,
                 profile.into(),
                 frame_payload,
+                erasure_data_shards,
                 sizing,
             )
         }
@@ -619,6 +626,7 @@ fn burst(
     output_dir: PathBuf,
     profile: ProfileId,
     frame_payload: usize,
+    erasure_data_shards: Option<usize>,
     sizing: RenderSizing,
 ) -> Result<()> {
     fs::create_dir_all(&output_dir)
@@ -628,8 +636,12 @@ fn burst(
     config.max_frame_payload = frame_payload;
     config.geometry = sizing.geometry;
     let encoder = Encoder::new(config);
+    let default_shards = profile_spec(profile)
+        .burst_data_shards
+        .map(usize::from)
+        .unwrap_or(12);
     let frames = encoder
-        .encode_burst(payload)
+        .encode_burst_erasure(payload, erasure_data_shards.unwrap_or(default_shards))
         .context("failed to encode burst")?;
     for frame in frames {
         let render_options = apply_fit(

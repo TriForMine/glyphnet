@@ -102,6 +102,10 @@ pub struct ProfileSpec {
     pub max_frame_payload: usize,
     /// Suggested display frame rate for animated profiles.
     pub target_fps: Option<u16>,
+    /// Default number of data shards for burst erasure coding.
+    pub burst_data_shards: Option<u16>,
+    /// Default maximum frame window to attempt burst completion.
+    pub burst_max_decode_window: Option<u16>,
     /// Short implementation note.
     pub note: &'static str,
     /// Benchmark target.
@@ -129,6 +133,8 @@ const PROFILE_CATALOG: [ProfileSpec; 5] = [
         ecc_level: EccLevel::High,
         max_frame_payload: 512,
         target_fps: None,
+        burst_data_shards: None,
+        burst_max_decode_window: None,
         note: "Default print profile; continuous ribbon strokes avoid QR/Data Matrix confusion.",
         benchmark: BenchmarkTarget {
             payload_bytes: 256,
@@ -147,6 +153,8 @@ const PROFILE_CATALOG: [ProfileSpec; 5] = [
         ecc_level: EccLevel::Medium,
         max_frame_payload: 1024,
         target_fps: Some(30),
+        burst_data_shards: None,
+        burst_max_decode_window: None,
         note: "Color-calibrated screen profile with interleaved colored ribbon lanes.",
         benchmark: BenchmarkTarget {
             payload_bytes: 1024,
@@ -165,6 +173,8 @@ const PROFILE_CATALOG: [ProfileSpec; 5] = [
         ecc_level: EccLevel::Adaptive,
         max_frame_payload: 1400,
         target_fps: Some(60),
+        burst_data_shards: Some(12),
+        burst_max_decode_window: Some(120),
         note: "Animated high-throughput profile for video/display optical streams.",
         benchmark: BenchmarkTarget {
             payload_bytes: 64 * 1024,
@@ -183,6 +193,8 @@ const PROFILE_CATALOG: [ProfileSpec; 5] = [
         ecc_level: EccLevel::High,
         max_frame_payload: 512,
         target_fps: None,
+        burst_data_shards: None,
+        burst_max_decode_window: None,
         note: "Experimental robust print profile with off-corner halo anchors.",
         benchmark: BenchmarkTarget {
             payload_bytes: 384,
@@ -201,6 +213,8 @@ const PROFILE_CATALOG: [ProfileSpec; 5] = [
         ecc_level: EccLevel::High,
         max_frame_payload: 512,
         target_fps: None,
+        burst_data_shards: None,
+        burst_max_decode_window: None,
         note: "Square matrix baseline used only for compatibility and comparative benchmarks.",
         benchmark: BenchmarkTarget {
             payload_bytes: 256,

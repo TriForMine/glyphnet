@@ -1,6 +1,6 @@
 //! WebAssembly-facing API for GlyphNet.
 
-use glyphnet_core::{LayoutFamily, TransmissionMode};
+use glyphnet_core::{LayoutFamily, ProfileId, TransmissionMode, profile_spec};
 use glyphnet_encode::{Encoder, EncoderConfig};
 use glyphnet_render::{RasterRenderer, RenderOptions, SvgRenderer};
 use glyphnet_scanner::{
@@ -194,9 +194,19 @@ pub struct BurstScanSession {
 impl BurstScanSession {
     /// Create a new burst scan session.
     pub fn new(mode: TransmissionMode) -> Self {
+        Self::new_with_config(mode, None)
+    }
+
+    /// Create a new burst scan session with optional max decode window.
+    pub fn new_with_config(mode: TransmissionMode, max_frames: Option<usize>) -> Self {
+        let default_window = profile_spec(ProfileId::PulseBurst)
+            .burst_max_decode_window
+            .map(usize::from)
+            .unwrap_or(120);
         Self {
             scanner: Scanner::new(ScannerConfig {
                 mode,
+                max_frames: max_frames.unwrap_or(default_window),
                 ..ScannerConfig::default()
             }),
             frame_counter: 0,
@@ -406,6 +416,15 @@ mod wasm {
             let mode = crate::mode_from_str(mode).map_err(|error| JsValue::from_str(&error))?;
             Ok(Self {
                 inner: crate::BurstScanSession::new(mode),
+            })
+        }
+
+        /// Create a session with explicit max frame window.
+        #[wasm_bindgen(js_name = withConfig)]
+        pub fn with_config(mode: &str, max_frames: u32) -> Result<WasmBurstScanSession, JsValue> {
+            let mode = crate::mode_from_str(mode).map_err(|error| JsValue::from_str(&error))?;
+            Ok(Self {
+                inner: crate::BurstScanSession::new_with_config(mode, Some(max_frames as usize)),
             })
         }
 
