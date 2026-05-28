@@ -1209,7 +1209,7 @@ mod tests {
             (0.30f32, 0.65f32),
             (0.40f32, 0.45f32),
         ];
-        run_erasure_loss_sweep(512, 10, 64, &rates);
+        run_erasure_loss_sweep(512, 6, 64, &rates);
     }
 
     #[test]

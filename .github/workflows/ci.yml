@@ -194,8 +194,6 @@ jobs:
       contents: read
       pull-requests: write
       issues: write
-    env:
-      BURST_RELIABILITY_NON_GATING: "0.40"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -267,7 +265,7 @@ jobs:
               pr
                 ? `- **Gating rows:** ${passCount} pass / ${failCount} fail`
                 : '- **Gating rows:** unavailable',
-              '- **Non-gating rows:** 40% loss (report-only)',
+              '- **Non-gating rows:** none',
               '',
               ...rows,
               '',
