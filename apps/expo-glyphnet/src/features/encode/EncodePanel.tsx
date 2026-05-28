@@ -1,11 +1,13 @@
 import { useMemo, useState } from "react";
 
 import { scannerAdapter } from "@/adapters/scanner";
+import { Image } from "@/tw/image";
 import { Pressable, Text, TextInput, View } from "@/tw";
 
 export function EncodePanel() {
   const [payload, setPayload] = useState("hello glyphnet");
   const [svgPreview, setSvgPreview] = useState("");
+  const [encodeError, setEncodeError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   const payloadBytes = useMemo(() => new TextEncoder().encode(payload).length, [payload]);
@@ -13,8 +15,20 @@ export function EncodePanel() {
   const runEncode = async () => {
     setLoading(true);
     try {
+      setEncodeError(null);
       const svg = await scannerAdapter.encodeSvg(payload);
-      setSvgPreview(svg);
+      if (svg.trim().startsWith("<svg")) {
+        setSvgPreview(svg);
+      } else {
+        try {
+          const parsed = JSON.parse(svg) as { error?: string };
+          setSvgPreview("");
+          setEncodeError(parsed.error ?? "encode_failed");
+        } catch {
+          setSvgPreview("");
+          setEncodeError("encode_failed");
+        }
+      }
     } finally {
       setLoading(false);
     }
@@ -54,11 +68,18 @@ export function EncodePanel() {
         <Text className="text-xs font-semibold uppercase tracking-wide text-slate-400">
           SVG output
         </Text>
-        <Text selectable className="mt-2 font-mono text-xs leading-5 text-slate-100">
-          {svgPreview || "No output yet"}
-        </Text>
+        {svgPreview ? (
+          <Image
+            source={{ uri: `data:image/svg+xml;utf8,${encodeURIComponent(svgPreview)}` }}
+            contentFit="contain"
+            style={{ width: "100%", height: 220, marginTop: 10, borderRadius: 12 }}
+          />
+        ) : (
+          <Text selectable className="mt-2 font-mono text-xs leading-5 text-slate-100">
+            {encodeError ?? "No output yet"}
+          </Text>
+        )}
       </View>
     </View>
   );
 }
-

@@ -21,6 +21,8 @@ struct ScanStillRequest {
     height: Option<u32>,
     #[serde(rename = "rgbaBase64")]
     rgba_base64: Option<String>,
+    #[serde(rename = "imageBase64")]
+    image_base64: Option<String>,
 }
 
 fn make_java_string(env: JNIEnv<'_>, value: &str) -> jstring {
@@ -131,73 +133,102 @@ pub extern "system" fn Java_expo_modules_glyphnetscanner_GlyphNetNativeBridge_sc
     let verify_key_provided = parsed.verify_key_hex.is_some();
     let verify_key_id = parsed.verify_key_id;
 
-    let width = match parsed.width {
-        Some(v) => v,
-        None => {
-            let err = error_json(mode, verify_key_provided, verify_key_id, "missing_width");
-            return make_java_string(env, &err);
+    let image = if let Some(image_base64) = parsed.image_base64 {
+        let bytes = match base64::engine::general_purpose::STANDARD.decode(image_base64.as_bytes())
+        {
+            Ok(v) => v,
+            Err(error) => {
+                let err = error_json(
+                    mode,
+                    verify_key_provided,
+                    verify_key_id,
+                    &format!("invalid_image_base64: {error}"),
+                );
+                return make_java_string(env, &err);
+            }
+        };
+
+        match image::load_from_memory(&bytes) {
+            Ok(v) => v,
+            Err(error) => {
+                let err = error_json(
+                    mode,
+                    verify_key_provided,
+                    verify_key_id,
+                    &format!("invalid_image_data: {error}"),
+                );
+                return make_java_string(env, &err);
+            }
         }
-    };
-    let height = match parsed.height {
-        Some(v) => v,
-        None => {
-            let err = error_json(mode, verify_key_provided, verify_key_id, "missing_height");
-            return make_java_string(env, &err);
-        }
-    };
-    let rgba_base64 = match parsed.rgba_base64 {
-        Some(v) => v,
-        None => {
+    } else {
+        let width = match parsed.width {
+            Some(v) => v,
+            None => {
+                let err = error_json(mode, verify_key_provided, verify_key_id, "missing_width");
+                return make_java_string(env, &err);
+            }
+        };
+        let height = match parsed.height {
+            Some(v) => v,
+            None => {
+                let err = error_json(mode, verify_key_provided, verify_key_id, "missing_height");
+                return make_java_string(env, &err);
+            }
+        };
+        let rgba_base64 = match parsed.rgba_base64 {
+            Some(v) => v,
+            None => {
+                let err = error_json(
+                    mode,
+                    verify_key_provided,
+                    verify_key_id,
+                    "missing_rgba_base64",
+                );
+                return make_java_string(env, &err);
+            }
+        };
+
+        let rgba = match base64::engine::general_purpose::STANDARD.decode(rgba_base64.as_bytes()) {
+            Ok(v) => v,
+            Err(error) => {
+                let err = error_json(
+                    mode,
+                    verify_key_provided,
+                    verify_key_id,
+                    &format!("invalid_rgba_base64: {error}"),
+                );
+                return make_java_string(env, &err);
+            }
+        };
+
+        let expected = width
+            .checked_mul(height)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .unwrap_or(0) as usize;
+        if rgba.len() != expected {
             let err = error_json(
                 mode,
                 verify_key_provided,
                 verify_key_id,
-                "missing_rgba_base64",
+                &format!(
+                    "invalid_rgba_length: expected {expected}, got {}",
+                    rgba.len()
+                ),
             );
             return make_java_string(env, &err);
         }
-    };
 
-    let rgba = match base64::engine::general_purpose::STANDARD.decode(rgba_base64.as_bytes()) {
-        Ok(v) => v,
-        Err(error) => {
-            let err = error_json(
-                mode,
-                verify_key_provided,
-                verify_key_id,
-                &format!("invalid_rgba_base64: {error}"),
-            );
-            return make_java_string(env, &err);
-        }
-    };
-
-    let expected = width
-        .checked_mul(height)
-        .and_then(|pixels| pixels.checked_mul(4))
-        .unwrap_or(0) as usize;
-    if rgba.len() != expected {
-        let err = error_json(
-            mode,
-            verify_key_provided,
-            verify_key_id,
-            &format!(
-                "invalid_rgba_length: expected {expected}, got {}",
-                rgba.len()
-            ),
-        );
-        return make_java_string(env, &err);
-    }
-
-    let image = match RgbaImage::from_raw(width, height, rgba) {
-        Some(v) => DynamicImage::ImageRgba8(v),
-        None => {
-            let err = error_json(
-                mode,
-                verify_key_provided,
-                verify_key_id,
-                "failed_to_construct_rgba_image",
-            );
-            return make_java_string(env, &err);
+        match RgbaImage::from_raw(width, height, rgba) {
+            Some(v) => DynamicImage::ImageRgba8(v),
+            None => {
+                let err = error_json(
+                    mode,
+                    verify_key_provided,
+                    verify_key_id,
+                    "failed_to_construct_rgba_image",
+                );
+                return make_java_string(env, &err);
+            }
         }
     };
 

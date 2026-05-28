@@ -29,6 +29,10 @@ export interface ScanRequest {
   mode: ScanMode;
   verifyKeyHex?: string;
   verifyKeyId?: number;
+  imageBase64?: string;
+  width?: number;
+  height?: number;
+  rgbaBase64?: string;
 }
 
 export interface ScannerAdapter {
