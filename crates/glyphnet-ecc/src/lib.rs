@@ -42,6 +42,12 @@ pub enum EccScheme {
     Parity,
     /// Reed-Solomon shard parity for print-mode robustness.
     ReedSolomon,
+    /// LDPC-style profile wiring for screen-mode payloads.
+    ///
+    /// Current implementation keeps parity-compatible semantics while the
+    /// dedicated LDPC codec is integrated.
+    #[cfg(feature = "ldpc")]
+    Ldpc,
 }
 
 /// Recovery strategy used by ECC repair.
@@ -270,8 +276,19 @@ impl BlockCode for ReedSolomonCode {
 pub const fn scheme_for_mode(mode: TransmissionMode, _level: EccLevel) -> EccScheme {
     match mode {
         TransmissionMode::Print => EccScheme::ReedSolomon,
-        TransmissionMode::Screen | TransmissionMode::Burst => EccScheme::Parity,
+        TransmissionMode::Screen => screen_scheme(),
+        TransmissionMode::Burst => EccScheme::Parity,
     }
+}
+
+#[cfg(feature = "ldpc")]
+const fn screen_scheme() -> EccScheme {
+    EccScheme::Ldpc
+}
+
+#[cfg(not(feature = "ldpc"))]
+const fn screen_scheme() -> EccScheme {
+    EccScheme::Parity
 }
 
 /// Interleave stride policy by mode.
@@ -299,6 +316,11 @@ pub fn encode_for_mode(mode: TransmissionMode, level: EccLevel, wire: &[u8]) -> 
                 // byte-shard Reed-Solomon limits.
                 ParityCode::from_level(level, wire.len()).encode(wire)
             }
+        }
+        #[cfg(feature = "ldpc")]
+        EccScheme::Ldpc => {
+            // Compatibility fallback until the dedicated LDPC codec lands.
+            ParityCode::from_level(level, wire.len()).encode(wire)
         }
     };
     let data_len = wire.len();
@@ -334,17 +356,23 @@ pub fn verify_for_mode(
     } else {
         encoded.to_vec()
     };
-    match mode {
-        TransmissionMode::Print => {
+    match scheme_for_mode(mode, level) {
+        EccScheme::ReedSolomon => {
             // Backward compatibility: accept legacy parity-encoded print fixtures
             // while migrating new print encodes to Reed-Solomon.
             ReedSolomonCode::from_level(level, data_len).verify(&normalized, data_len)
                 || ParityCode::from_level(level, data_len).verify(&normalized, data_len)
         }
-        TransmissionMode::Screen | TransmissionMode::Burst => {
+        EccScheme::Parity => {
             let parity = ParityCode::from_level(level, data_len);
             // Backward compatibility: accept both current interleaved parity
             // layout and legacy non-interleaved parity layout.
+            parity.verify(&normalized, data_len) || parity.verify(encoded, data_len)
+        }
+        #[cfg(feature = "ldpc")]
+        EccScheme::Ldpc => {
+            let parity = ParityCode::from_level(level, data_len);
+            // Compatibility fallback until the dedicated LDPC codec lands.
             parity.verify(&normalized, data_len) || parity.verify(encoded, data_len)
         }
     }
@@ -792,6 +820,20 @@ mod tests {
         assert_eq!(
             interleave_stride_for_mode(TransmissionMode::Burst, EccLevel::High),
             8
+        );
+    }
+
+    #[test]
+    fn screen_scheme_matches_feature_gate() {
+        #[cfg(feature = "ldpc")]
+        assert_eq!(
+            scheme_for_mode(TransmissionMode::Screen, EccLevel::High),
+            EccScheme::Ldpc
+        );
+        #[cfg(not(feature = "ldpc"))]
+        assert_eq!(
+            scheme_for_mode(TransmissionMode::Screen, EccLevel::High),
+            EccScheme::Parity
         );
     }
 
