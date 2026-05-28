@@ -19,3 +19,21 @@ Dependency order:
 3. `glyphnet-encode`, `glyphnet-render`, `glyphnet-cv`
 4. `glyphnet-decode`
 5. `glyphnet-scanner`, `glyphnet-wasm`, `glyphnet-cli`, `glyphnet-testkit`
+
+## Browser SDK (Phase 5.1 Preview)
+
+`@glyphnet/browser` is currently an experimental preview package.
+
+Release checklist:
+
+1. Run browser SDK CI checks:
+   - `npm ci` in `sdk/browser`
+   - `npm run typecheck`
+   - `npm run build`
+   - `npm run pack:dry-run`
+2. Verify `dist/` and `pkg/` are included in dry-run pack output.
+3. Bump `sdk/browser/package.json` version.
+4. Tag and publish preview release with an explicit pre-release tag, for example:
+   `npm publish --tag next`.
+5. Promote to `latest` only after scanner/perf/reliability gates are stable for
+   the targeted SDK API surface.

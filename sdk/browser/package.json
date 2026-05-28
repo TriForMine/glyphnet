@@ -20,6 +20,7 @@
     "build:wasm": "wasm-pack build ../../crates/glyphnet-wasm --target web --out-dir ../../sdk/browser/pkg",
     "build:ts": "tsc -p tsconfig.json",
     "build": "npm run build:wasm && npm run build:ts",
+    "pack:dry-run": "npm pack --dry-run",
     "typecheck": "tsc --noEmit",
     "prepack": "npm run build"
   },

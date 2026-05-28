@@ -1,6 +1,7 @@
 # Browser SDK
 
 The browser SDK is expected to wrap `glyphnet-wasm`.
+Current maturity target: Phase 5.1 experimental preview (`@glyphnet/browser`).
 
 Planned capabilities:
 
