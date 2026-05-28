@@ -17,12 +17,12 @@
     }
   },
   "scripts": {
-    "build:wasm": "wasm-pack build ../../crates/glyphnet-wasm --target web --out-dir ../../sdk/browser/pkg",
+    "build:wasm": "wasm-pack build ../../crates/glyphnet-wasm --target web --out-dir ../../sdk/browser/pkg && node -e \"try{require('fs').unlinkSync('pkg/.gitignore')}catch(e){}\"",
     "build:ts": "tsc -p tsconfig.json",
-    "build": "npm run build:wasm && npm run build:ts",
-    "pack:dry-run": "npm pack --dry-run",
+    "build": "bun run build:wasm && bun run build:ts",
+    "pack:dry-run": "npm pack --dry-run --ignore-scripts",
     "typecheck": "tsc --noEmit",
-    "prepack": "npm run build"
+    "prepack": "bun run build"
   },
   "devDependencies": {
     "typescript": "^5.0.0"

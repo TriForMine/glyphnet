@@ -300,19 +300,17 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
+      - uses: oven-sh/setup-bun@v2
       - uses: jetli/wasm-pack-action@v0.4.0
       - name: Install browser SDK deps
         working-directory: sdk/browser
-        run: npm ci
+        run: bun install --frozen-lockfile
       - name: Typecheck browser SDK
         working-directory: sdk/browser
-        run: npm run typecheck
+        run: bun run typecheck
       - name: Build browser SDK package
         working-directory: sdk/browser
-        run: npm run build
+        run: bun run build
       - name: Dry-run npm pack
         working-directory: sdk/browser
-        run: npm run pack:dry-run
+        run: bun run pack:dry-run
