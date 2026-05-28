@@ -12,6 +12,11 @@ pub(crate) fn decode_candidate(
     candidate: crate::detectors::ScanCandidate,
 ) -> std::result::Result<AutoDecodedSymbol, DecodeError> {
     let region = candidate.region;
+    if matches!(candidate.layout_hint, Some(LayoutFamily::Matrix))
+        && let Ok(decoded) = decode_exact_matrix_candidate(image, region)
+    {
+        return Ok(decoded);
+    }
     if matches!(candidate.stage, "signature-window" | "coarse-grid") {
         if let Ok(decoded) = decode_exact_ribbon_candidate(image, region) {
             return Ok(decoded);
@@ -51,6 +56,61 @@ pub(crate) fn decode_candidate(
         }
     }
     decoder.decode_auto_with_info(image)
+}
+
+fn decode_exact_matrix_candidate(
+    image: &DynamicImage,
+    region: ScanRegion,
+) -> std::result::Result<AutoDecodedSymbol, DecodeError> {
+    let module_candidates = matrix_module_px_candidates(region);
+    if module_candidates.is_empty() {
+        return Err(DecodeError::AutoDetectFailed);
+    }
+
+    for module_px in module_candidates {
+        for threshold in [160, 192, 224] {
+            let exact = RasterDecoder::new(DecodeOptions {
+                module_px,
+                quiet_zone_modules: 4,
+                threshold,
+                layout: LayoutFamily::Matrix,
+            });
+            if let Ok(decoded) = exact.decode(image) {
+                return Ok(AutoDecodedSymbol {
+                    decoded,
+                    info: glyphnet_decode::AutoDecodeInfo {
+                        module_px,
+                        quiet_zone_modules: 4,
+                        threshold,
+                        layout: LayoutFamily::Matrix,
+                    },
+                });
+            }
+        }
+    }
+
+    Err(DecodeError::AutoDetectFailed)
+}
+
+fn matrix_module_px_candidates(region: ScanRegion) -> Vec<u32> {
+    let max_dim = region.width.min(region.height);
+    if max_dim < 64 {
+        return Vec::new();
+    }
+    let mut candidates = Vec::new();
+    for module_px in 2..=24 {
+        if region.width % module_px != 0 || region.height % module_px != 0 {
+            continue;
+        }
+        let width_modules = region.width / module_px;
+        let height_modules = region.height / module_px;
+        if width_modules != height_modules || width_modules < 29 {
+            continue;
+        }
+        candidates.push(module_px);
+    }
+    candidates.sort_unstable_by(|a, b| b.cmp(a));
+    candidates
 }
 
 fn decode_exact_ribbon_candidate(

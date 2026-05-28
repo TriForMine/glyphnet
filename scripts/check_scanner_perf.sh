@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Enforce scanner latency regression policy against RibbonPrint decode budget.
+# Enforce scanner latency regression policy against profile-specific decode budgets.
 # We gate on Criterion's median estimate because CI hosts can produce occasional
 # long-tail outliers; median is more stable across runs while still reflecting
 # typical scanner latency shifts caused by regressions.
@@ -86,16 +86,25 @@ non_gating = {
 }
 
 src = profile_path.read_text()
-match = re.search(
+match_ribbon = re.search(
     r"ProfileId::RibbonPrint(?s:.*?)max_decode_ms:\s*([0-9]+(?:\.[0-9]+)?)",
     src,
 )
-if not match:
+match_matrix = re.search(
+    r"ProfileId::MatrixCompat(?s:.*?)max_decode_ms:\s*([0-9]+(?:\.[0-9]+)?)",
+    src,
+)
+if not match_ribbon:
     print("[scanner-perf] ERROR: could not locate RibbonPrint benchmark.max_decode_ms", file=sys.stderr)
     sys.exit(2)
+if not match_matrix:
+    print("[scanner-perf] ERROR: could not locate MatrixCompat benchmark.max_decode_ms", file=sys.stderr)
+    sys.exit(2)
 
-budget_ms = float(match.group(1))
-allowed_ms = budget_ms * (1.0 + tolerance_pct / 100.0)
+ribbon_budget_ms = float(match_ribbon.group(1))
+matrix_budget_ms = float(match_matrix.group(1))
+ribbon_allowed_ms = ribbon_budget_ms * (1.0 + tolerance_pct / 100.0)
+matrix_allowed_ms = matrix_budget_ms * (1.0 + tolerance_pct / 100.0)
 cases = []
 overall_status = "pass"
 
@@ -104,29 +113,53 @@ for bench_name in bench_names:
     est = json.loads(est_path.read_text())
     median_ns = float(est["median"]["point_estimate"])
     median_ms = median_ns / 1_000_000.0
+    profile_id = "MatrixCompat" if "matrix" in bench_name else "RibbonPrint"
+    budget_ms = matrix_budget_ms if profile_id == "MatrixCompat" else ribbon_budget_ms
+    allowed_ms = matrix_allowed_ms if profile_id == "MatrixCompat" else ribbon_allowed_ms
     status = "pass" if median_ms <= allowed_ms else "fail"
     gating = bench_name not in non_gating
     if status == "fail" and gating:
         overall_status = "fail"
     cases.append({
         "bench_name": bench_name,
+        "profile_id": profile_id,
         "status": status,
         "gating": gating,
+        "budget_ms": budget_ms,
+        "allowed_ms": allowed_ms,
         "median_ms": median_ms,
     })
     gate_label = "gating" if gating else "non-gating"
-    print(f"[scanner-perf] {bench_name}: {median_ms:.3f} ms ({status}, {gate_label})")
+    print(
+        f"[scanner-perf] {bench_name}: {median_ms:.3f} ms ({status}, {gate_label}, {profile_id})"
+    )
 
-print(f"[scanner-perf] profile budget:  {budget_ms:.3f} ms (RibbonPrint.benchmark.max_decode_ms)")
-print(f"[scanner-perf] allowed max:     {allowed_ms:.3f} ms (with {tolerance_pct:.1f}% tolerance)")
+print(
+    f"[scanner-perf] RibbonPrint budget:  {ribbon_budget_ms:.3f} ms "
+    "(RibbonPrint.benchmark.max_decode_ms)"
+)
+print(
+    f"[scanner-perf] RibbonPrint allowed: {ribbon_allowed_ms:.3f} ms "
+    f"(with {tolerance_pct:.1f}% tolerance)"
+)
+print(
+    f"[scanner-perf] MatrixCompat budget: {matrix_budget_ms:.3f} ms "
+    "(MatrixCompat.benchmark.max_decode_ms)"
+)
+print(
+    f"[scanner-perf] MatrixCompat allowed: {matrix_allowed_ms:.3f} ms "
+    f"(with {tolerance_pct:.1f}% tolerance)"
+)
 
 if output_json:
     out_path = pathlib.Path(output_json)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "status": overall_status,
-        "budget_ms": budget_ms,
-        "allowed_ms": allowed_ms,
+        "ribbon_budget_ms": ribbon_budget_ms,
+        "ribbon_allowed_ms": ribbon_allowed_ms,
+        "matrix_budget_ms": matrix_budget_ms,
+        "matrix_allowed_ms": matrix_allowed_ms,
         "tolerance_pct": tolerance_pct,
         "cases": cases,
     }

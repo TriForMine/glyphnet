@@ -88,6 +88,13 @@ jobs:
             const matrixGatingCases = matrixCases.filter(c => c.gating !== false);
             const matrixPassCount = matrixGatingCases.filter(c => c.status === 'pass').length;
             const matrixFailCount = matrixGatingCases.filter(c => c.status === 'fail').length;
+            const ribbonBenchNames = benchNames.filter(name => !name.includes('matrix'));
+            const ribbonCases = ribbonBenchNames
+              .map(name => prMap.get(name))
+              .filter(Boolean);
+            const ribbonGatingCases = ribbonCases.filter(c => c.gating !== false);
+            const ribbonPassCount = ribbonGatingCases.filter(c => c.status === 'pass').length;
+            const ribbonFailCount = ribbonGatingCases.filter(c => c.status === 'fail').length;
             const overallEmoji = pr ? (pr.status === 'pass' ? '✅' : '⚠️') : 'ℹ️';
             const marker = '<!-- scanner-perf-comment -->';
             const rows = benchNames.length === 0
@@ -109,7 +116,8 @@ jobs:
                     const deltaCell = delta == null ? '-' : delta.toFixed(3);
                     const deltaPctCell = deltaPct == null ? '-' : `${deltaPct.toFixed(2)}%`;
                     const gateCell = p && p.gating === false ? 'No' : 'Yes';
-                    return `| ${name} | ${gateCell} | ${prCell} | ${baseCell} | ${deltaCell} | ${deltaPctCell} |`;
+                    const profile = p?.profile_id || b?.profile_id || (name.includes('matrix') ? 'MatrixCompat' : 'RibbonPrint');
+                    return `| ${name} (${profile}) | ${gateCell} | ${prCell} | ${baseCell} | ${deltaCell} | ${deltaPctCell} |`;
                   })
                 ];
             const body = [
@@ -120,11 +128,17 @@ jobs:
                 ? `${overallEmoji} **PR gate status:** ${pr.status.toUpperCase()}`
                 : '⚠️ **PR gate status:** unavailable (PR benchmark did not produce target/scanner-perf/pr.json)',
               pr
-                ? `- **Profile budget:** ${pr.budget_ms.toFixed(3)} ms`
-                : '- **Profile budget:** unavailable',
+                ? `- **Ribbon budget:** ${pr.ribbon_budget_ms.toFixed(3)} ms (allowed ${pr.ribbon_allowed_ms.toFixed(3)} ms)`
+                : '- **Ribbon budget:** unavailable',
               pr
-                ? `- **Allowed (budget + ${pr.tolerance_pct.toFixed(1)}%):** ${pr.allowed_ms.toFixed(3)} ms`
-                : '- **Allowed threshold:** unavailable',
+                ? `- **Matrix budget:** ${pr.matrix_budget_ms.toFixed(3)} ms (allowed ${pr.matrix_allowed_ms.toFixed(3)} ms)`
+                : '- **Matrix budget:** unavailable',
+              pr
+                ? `- **Tolerance:** ${pr.tolerance_pct.toFixed(1)}%`
+                : '- **Tolerance:** unavailable',
+              ribbonBenchNames.length > 0
+                ? `- **Ribbon gating benches:** ${ribbonPassCount} pass / ${ribbonFailCount} fail`
+                : '- **Ribbon gating benches:** unavailable',
               matrixBenchNames.length > 0
                 ? `- **Matrix gating benches:** ${matrixPassCount} pass / ${matrixFailCount} fail`
                 : '- **Matrix gating benches:** unavailable',
@@ -151,7 +165,8 @@ jobs:
                       const deltaCell = delta == null ? '-' : delta.toFixed(3);
                       const deltaPctCell = deltaPct == null ? '-' : `${deltaPct.toFixed(2)}%`;
                       const gateCell = p && p.gating === false ? 'No' : 'Yes';
-                      return `| ${name} | ${gateCell} | ${prCell} | ${baseCell} | ${deltaCell} | ${deltaPctCell} |`;
+                      const profile = p?.profile_id || b?.profile_id || 'MatrixCompat';
+                      return `| ${name} (${profile}) | ${gateCell} | ${prCell} | ${baseCell} | ${deltaCell} | ${deltaPctCell} |`;
                     }).join('\n'),
                   ].join('\n'),
               '',

@@ -507,13 +507,15 @@ fn prioritize_matrix_candidates(regions: &mut [ScanCandidate]) {
         return;
     }
     regions.sort_by_key(|candidate| {
-        if matches!(
+        if candidate.detector == CandidateDetector::GeneratedContent {
+            0u8
+        } else if matches!(
             candidate.layout_hint,
             Some(glyphnet_core::LayoutFamily::Matrix)
         ) {
-            0u8
-        } else {
             1u8
+        } else {
+            2u8
         }
     });
 }

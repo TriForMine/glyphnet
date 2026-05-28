@@ -62,9 +62,9 @@ pub(crate) fn still_scan_candidates(
     } else if robust {
         MAX_MATRIX_CANDIDATES
     } else if large_image {
-        4
+        3
     } else {
-        8
+        4
     };
     let max_ribbon = if robust && large_image {
         10
@@ -431,32 +431,27 @@ fn matrix_candidates(
 
 fn matrix_finders(binary: &GrayImage) -> Vec<MatrixFinder> {
     let mut finders = Vec::new();
-    for y in (0..binary.height()).step_by(2) {
-        let mut runs = [0u32; 5];
-        let mut run_color_dark = pixel_is_dark(binary, 0, y);
-        let mut run_count = 0usize;
-        for x in 0..binary.width() {
-            let dark = pixel_is_dark(binary, x, y);
-            if dark == run_color_dark {
-                run_count += 1;
-                continue;
-            }
-            shift_finder_runs(&mut runs, run_count as u32);
-            if run_color_dark && matrix_finder_run_ratio(runs) {
-                let total_width = runs.iter().sum::<u32>();
-                let module_px = ((total_width as f32 / 7.0).round() as u32).clamp(2, 24);
-                let center_x = x.saturating_sub(runs[4] + runs[3] + runs[2] / 2);
-                let center_y = y;
-                let finder_x = center_x.saturating_sub((7 * module_px) / 2);
-                let finder_y = center_y.saturating_sub((7 * module_px) / 2);
-                verify_and_push_matrix_finder(binary, &mut finders, finder_x, finder_y, module_px);
-            }
-            run_color_dark = dark;
-            run_count = 1;
+    let area = binary.width().saturating_mul(binary.height());
+    if area > 300_000 {
+        scan_matrix_finders_runs(binary, &mut finders, 4);
+        if finders.len() < 6 {
+            scan_matrix_finders_runs(binary, &mut finders, 2);
         }
+    } else {
+        scan_matrix_finders_runs(binary, &mut finders, 2);
+    }
+
+    if finders.len() >= 12 {
+        finders.truncate(24);
+        return finders;
     }
 
     matrix_grid_template_finders(binary, &mut finders);
+
+    if finders.len() >= 12 {
+        finders.truncate(24);
+        return finders;
+    }
 
     for component in dark_components(binary).into_iter().take(128) {
         let width = component.bounds.width;
@@ -487,6 +482,33 @@ fn matrix_finders(binary: &GrayImage) -> Vec<MatrixFinder> {
     }
     finders.truncate(96);
     finders
+}
+
+fn scan_matrix_finders_runs(binary: &GrayImage, finders: &mut Vec<MatrixFinder>, row_step: usize) {
+    for y in (0..binary.height()).step_by(row_step.max(1)) {
+        let mut runs = [0u32; 5];
+        let mut run_color_dark = pixel_is_dark(binary, 0, y);
+        let mut run_count = 0usize;
+        for x in 0..binary.width() {
+            let dark = pixel_is_dark(binary, x, y);
+            if dark == run_color_dark {
+                run_count += 1;
+                continue;
+            }
+            shift_finder_runs(&mut runs, run_count as u32);
+            if run_color_dark && matrix_finder_run_ratio(runs) {
+                let total_width = runs.iter().sum::<u32>();
+                let module_px = ((total_width as f32 / 7.0).round() as u32).clamp(2, 24);
+                let center_x = x.saturating_sub(runs[4] + runs[3] + runs[2] / 2);
+                let center_y = y;
+                let finder_x = center_x.saturating_sub((7 * module_px) / 2);
+                let finder_y = center_y.saturating_sub((7 * module_px) / 2);
+                verify_and_push_matrix_finder(binary, finders, finder_x, finder_y, module_px);
+            }
+            run_color_dark = dark;
+            run_count = 1;
+        }
+    }
 }
 
 fn matrix_grid_template_finders(binary: &GrayImage, finders: &mut Vec<MatrixFinder>) {
