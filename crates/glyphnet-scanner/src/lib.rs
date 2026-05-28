@@ -37,7 +37,7 @@ use candidates::{
 use decode_paths::decode_candidate;
 pub use detectors::CandidateDetector;
 use rectification::{scan_quad_candidates as build_quad_candidates, should_try_quad_rectification};
-pub use types::{FailedStillScan, ScanAttempt, ScanTimings, StillScanResult};
+pub use types::{FailedStillScan, ScanAttempt, ScanTelemetry, ScanTimings, StillScanResult};
 
 /// Result type for scanner operations.
 pub type Result<T> = std::result::Result<T, ScannerError>;

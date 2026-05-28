@@ -19,6 +19,8 @@ This file tracks execution status for the roadmap priorities in
 
 - `feat/testkit-corpus-integrity-check`: add default fixture-manifest loading
   and integrity checks for corpus file paths.
+- `feat/phase2-ecc-telemetry`: expose scanner-facing ECC recovery and
+  candidate-attempt telemetry contract across scanner/CLI/WASM surfaces.
 
 ## Next Up
 

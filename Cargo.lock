@@ -710,6 +710,7 @@ dependencies = [
  "glyphnet-core",
  "glyphnet-cv",
  "glyphnet-decode",
+ "glyphnet-ecc",
  "glyphnet-encode",
  "glyphnet-render",
  "glyphnet-testkit",

@@ -112,6 +112,7 @@ pub fn scan_rgba_json(
     let image = DynamicImage::ImageRgba8(image);
     match scan_still_with_diagnostics(&image, mode) {
         Ok(scanned) => {
+            let telemetry = scanned.telemetry();
             let crop = scanned.crop.map(|region| {
                 serde_json::json!({
                     "x": region.x,
@@ -150,10 +151,22 @@ pub fn scan_rgba_json(
                     "threshold": scanned.decoded.info.threshold,
                     "layout": format!("{:?}", scanned.decoded.info.layout)
                 },
+                "recovery": {
+                    "attempted": scanned.decoded.decoded.recovery.attempted,
+                    "recovered": scanned.decoded.decoded.recovery.recovered,
+                    "attempts": scanned.decoded.decoded.recovery.attempts,
+                    "method": format!("{:?}", scanned.decoded.decoded.recovery.method),
+                    "suspect_count": scanned.decoded.decoded.recovery.suspect_count,
+                    "max_attempts_exceeded": scanned.decoded.decoded.recovery.max_attempts_exceeded
+                },
                 "crop": crop,
                 "quad": quad,
                 "warp": warp,
                 "timings": timings_json(scanned.timings),
+                "scan_telemetry": {
+                    "candidate_count": telemetry.candidate_count,
+                    "failed_candidates": telemetry.failed_candidates
+                },
                 "candidate_count": attempts.len(),
                 "attempts": attempts
             }))
