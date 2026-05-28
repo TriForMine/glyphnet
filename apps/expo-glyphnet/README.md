@@ -67,3 +67,20 @@ GitHub Actions workflow `android-jni.yml` builds Android JNI `.so` files from
 It uploads an artifact named `glyphnet-android-jni-libs` with the `jniLibs`
 folder structure ready to copy into
 `modules/glyphnet-scanner/android/src/main/jniLibs`.
+
+## EAS integration for JNI artifacts
+
+EAS uses `eas-build-pre-install` hook (`scripts/eas-fetch-jni-libs.sh`) to fetch
+the latest successful `android-jni.yml` artifact and install it before Gradle.
+
+Required EAS secret:
+
+- `GLYPHNET_GITHUB_TOKEN` with `actions:read` permission on this repository.
+
+The build profiles in `eas.json` already set:
+
+- `GLYPHNET_FETCH_JNI_ARTIFACT=1`
+- `GLYPHNET_GITHUB_OWNER`
+- `GLYPHNET_GITHUB_REPO`
+- `GLYPHNET_JNI_WORKFLOW_FILE`
+- `GLYPHNET_JNI_ARTIFACT_NAME`

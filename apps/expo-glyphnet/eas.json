@@ -8,19 +8,34 @@
       "developmentClient": true,
       "distribution": "internal",
       "env": {
-        "GLYPHNET_BUILD_JNI": "0"
+        "GLYPHNET_BUILD_JNI": "0",
+        "GLYPHNET_FETCH_JNI_ARTIFACT": "1",
+        "GLYPHNET_GITHUB_OWNER": "TriForMine",
+        "GLYPHNET_GITHUB_REPO": "glyphnet",
+        "GLYPHNET_JNI_WORKFLOW_FILE": "android-jni.yml",
+        "GLYPHNET_JNI_ARTIFACT_NAME": "glyphnet-android-jni-libs"
       }
     },
     "preview": {
       "distribution": "internal",
       "env": {
-        "GLYPHNET_BUILD_JNI": "0"
+        "GLYPHNET_BUILD_JNI": "0",
+        "GLYPHNET_FETCH_JNI_ARTIFACT": "1",
+        "GLYPHNET_GITHUB_OWNER": "TriForMine",
+        "GLYPHNET_GITHUB_REPO": "glyphnet",
+        "GLYPHNET_JNI_WORKFLOW_FILE": "android-jni.yml",
+        "GLYPHNET_JNI_ARTIFACT_NAME": "glyphnet-android-jni-libs"
       }
     },
     "production": {
       "autoIncrement": true,
       "env": {
-        "GLYPHNET_BUILD_JNI": "0"
+        "GLYPHNET_BUILD_JNI": "0",
+        "GLYPHNET_FETCH_JNI_ARTIFACT": "1",
+        "GLYPHNET_GITHUB_OWNER": "TriForMine",
+        "GLYPHNET_GITHUB_REPO": "glyphnet",
+        "GLYPHNET_JNI_WORKFLOW_FILE": "android-jni.yml",
+        "GLYPHNET_JNI_ARTIFACT_NAME": "glyphnet-android-jni-libs"
       }
     }
   },
