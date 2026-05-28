@@ -1,11 +1,13 @@
 import { useState } from "react";
 import { Button, StyleSheet, TextInput, View } from "react-native";
+import { CameraView, useCameraPermissions } from "expo-camera";
 
 import { scannerAdapter } from "@/adapters/scanner";
 import { ThemedText } from "@/components/themed-text";
 import { ThemedView } from "@/components/themed-view";
 
 export function ScanPanel() {
+  const [permission, requestPermission] = useCameraPermissions();
   const [mode, setMode] = useState("print");
   const [verifyKeyHex, setVerifyKeyHex] = useState("");
   const [result, setResult] = useState("No scan yet");
@@ -28,6 +30,14 @@ export function ScanPanel() {
   return (
     <ThemedView type="backgroundElement" style={styles.card}>
       <ThemedText type="subtitle">Scan</ThemedText>
+      {!permission?.granted ? (
+        <View style={styles.permissionRow}>
+          <ThemedText type="small">Camera permission is required for live scan.</ThemedText>
+          <Button title="Allow Camera" onPress={requestPermission} />
+        </View>
+      ) : (
+        <CameraView style={styles.camera} facing="back" />
+      )}
       <TextInput
         value={mode}
         onChangeText={setMode}
@@ -56,6 +66,16 @@ const styles = StyleSheet.create({
     gap: 8,
     borderRadius: 14,
     padding: 12,
+  },
+  permissionRow: {
+    gap: 8,
+  },
+  camera: {
+    width: "100%",
+    height: 180,
+    borderRadius: 10,
+    overflow: "hidden",
+    backgroundColor: "#d6deea",
   },
   input: {
     borderWidth: 1,
