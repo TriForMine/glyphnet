@@ -298,13 +298,13 @@ fn minimum_burst_repair_shards(data_shards: usize, level: EccLevel) -> usize {
     let numer = match level {
         EccLevel::Low => 1usize,
         EccLevel::Medium => 1usize,
-        EccLevel::High => 2usize,
+        EccLevel::High => 3usize,
         EccLevel::Adaptive => 1usize,
     };
     let denom = match level {
         EccLevel::Low => 3usize,
         EccLevel::Medium => 2usize,
-        EccLevel::High => 3usize,
+        EccLevel::High => 4usize,
         EccLevel::Adaptive => 1usize,
     };
     ((data_shards * numer).div_ceil(denom)).max(1)
@@ -455,6 +455,6 @@ mod tests {
         let data_shards = usize::from(first.header.data_shards);
         let packet_count = usize::from(first.header.packet_count);
         let repair_shards = packet_count.saturating_sub(data_shards);
-        assert!(repair_shards >= (data_shards * 2).div_ceil(3));
+        assert!(repair_shards >= (data_shards * 3).div_ceil(4));
     }
 }
