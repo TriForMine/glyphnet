@@ -1,53 +1,35 @@
-import { StyleSheet } from "react-native";
+import { ScanPanel } from "../features/scan/ScanPanel";
+import { Text, View } from "../tw";
+import { ScrollView } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
-import { ThemedText } from "@/components/themed-text";
-import { ThemedView } from "@/components/themed-view";
-import { BottomTabInset, MaxContentWidth, Spacing } from "@/constants/theme";
-import { EncodePanel } from "@/features/encode/EncodePanel";
-import { ScanPanel } from "@/features/scan/ScanPanel";
-
-export default function HomeScreen() {
+export default function ScanScreen() {
   return (
-    <ThemedView style={styles.container}>
-      <SafeAreaView style={styles.safeArea}>
-        <ThemedView style={styles.heroSection}>
-          <ThemedText type="title" style={styles.title}>
-            GlyphNet Mobile
-          </ThemedText>
-          <ThemedText type="small">
-            Expo SDK 56 shell with pluggable scanner adapter.
-          </ThemedText>
-        </ThemedView>
-        <ScanPanel />
-        <EncodePanel />
-      </SafeAreaView>
-    </ThemedView>
+    <SafeAreaView style={{ flex: 1 }} edges={["top"]}>
+      <View className="flex-1 bg-slate-50 dark:bg-neutral-950">
+        <View className="px-5 pt-4 pb-3">
+          <View className="rounded-2xl bg-white/90 px-4 py-3 dark:bg-neutral-900">
+            <Text className="text-[12px] font-semibold uppercase tracking-[2px] text-sky-600 dark:text-sky-400">
+              GlyphNet Mobile
+            </Text>
+            <Text className="mt-1 text-2xl font-semibold text-slate-900 dark:text-neutral-100">
+              Scanner
+            </Text>
+            <Text className="mt-1 text-sm text-slate-500 dark:text-neutral-400">
+              Frame the symbol, scan quickly, and validate authenticity.
+            </Text>
+          </View>
+        </View>
+
+        <ScrollView
+          style={{ flex: 1 }}
+          contentInsetAdjustmentBehavior="automatic"
+          contentContainerStyle={{ paddingHorizontal: 20, paddingBottom: 24 }}
+          showsVerticalScrollIndicator={false}
+        >
+          <ScanPanel />
+        </ScrollView>
+      </View>
+    </SafeAreaView>
   );
 }
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    justifyContent: 'center',
-    flexDirection: 'row',
-  },
-  safeArea: {
-    flex: 1,
-    paddingHorizontal: Spacing.four,
-    alignItems: 'center',
-    gap: Spacing.three,
-    paddingBottom: BottomTabInset + Spacing.three,
-    maxWidth: MaxContentWidth,
-  },
-  heroSection: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: Spacing.four,
-    paddingTop: Spacing.three,
-    gap: Spacing.one,
-  },
-  title: {
-    textAlign: 'center',
-  },
-});

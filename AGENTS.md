@@ -11,6 +11,9 @@
 - If unexpected unrelated modifications appear, stop and ask before proceeding.
 - Keep edits minimal and local to the task.
 - Favor native project conventions over introducing new patterns.
+- When working under `apps/expo-glyphnet`, apply local instructions first:
+  - `apps/expo-glyphnet/AGENTS.md`
+  - relevant Expo skills in `apps/expo-glyphnet/.agents/skills/`
 
 ## Git Rules
 
@@ -81,6 +84,18 @@
   - `docs/sdk/browser.md`
   - roadmap/strategy docs if phase scope changes
 - Reflect actual state (done/in-progress/next) with concrete wording.
+- For Expo/mobile changes, follow versioned Expo guidance from:
+  - `apps/expo-glyphnet/AGENTS.md` (Expo v56 docs requirement)
+  - `apps/expo-glyphnet/.agents/skills/` references used by the touched area
+
+## Expo Skills
+
+- For `apps/expo-glyphnet`, use and cite the applicable local skills before edits:
+  - `building-native-ui` for routes, tabs, styling, responsiveness, and interaction patterns
+  - `expo-module` when creating/changing native bridges or Expo modules
+  - `expo-dev-client` when native code requires a dev build path
+  - `expo-deployment` / `eas-update-insights` when release/update workflow is touched
+  - `expo-tailwind-setup` only if styling/tooling scope explicitly requires it
 
 ## CI/Release Rules
 

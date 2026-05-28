@@ -1,0 +1,9 @@
+{
+  "platforms": ["android", "apple"],
+  "apple": {
+    "modules": ["GlyphNetScannerModule"]
+  },
+  "android": {
+    "modules": ["expo.modules.glyphnetscanner.GlyphNetScannerModule"]
+  }
+}

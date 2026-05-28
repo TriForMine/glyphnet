@@ -11,7 +11,9 @@ Current status:
 - Expo Router + TypeScript base.
 - Home screen replaced with GlyphNet scan/encode shell.
 - Pluggable scanner adapter contract under `src/adapters/scanner`.
-- Mock adapter active; Phase 5.2 will replace it with native Android bridge.
+- Expo native module scaffold active under `modules/glyphnet-scanner`.
+- Android JNI-ready bridge wrapper is in place (`GlyphNetNativeBridge`), with
+  fallback responses until Rust `.so` is linked.
 
 ## Run
 
@@ -23,5 +25,6 @@ bun run start
 
 ## Next integration step
 
-- Implement adapter backed by Android native module (Expo module/JNI into Rust)
-  and keep `src/features/*` UI unchanged.
+- Implement Rust JNI exports for `scanStillNative` and `encodeSvgNative` and
+  package `libglyphnet_scanner_bridge.so` into Android build.
+- Replace fallback responses with real Rust-backed scan/decode results.

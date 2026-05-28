@@ -1,23 +1,32 @@
-import { useState } from "react";
-import { Button, StyleSheet, TextInput, View } from "react-native";
 import { CameraView, useCameraPermissions } from "expo-camera";
+import { useMemo, useState } from "react";
 
 import { scannerAdapter } from "@/adapters/scanner";
-import { ThemedText } from "@/components/themed-text";
-import { ThemedView } from "@/components/themed-view";
+import { Pressable, Text, TextInput, View } from "@/tw";
+
+const MODES = ["print", "screen", "burst"] as const;
 
 export function ScanPanel() {
   const [permission, requestPermission] = useCameraPermissions();
-  const [mode, setMode] = useState("print");
+  const [mode, setMode] = useState<(typeof MODES)[number]>("print");
   const [verifyKeyHex, setVerifyKeyHex] = useState("");
   const [result, setResult] = useState("No scan yet");
   const [loading, setLoading] = useState(false);
+
+  const statusLabel = useMemo(() => {
+    if (!permission) {
+      return "Checking camera permission...";
+    }
+    return permission.granted
+      ? "Camera ready"
+      : "Camera access required for live scanning";
+  }, [permission]);
 
   const runScan = async () => {
     setLoading(true);
     try {
       const json = await scannerAdapter.scanStill({
-        mode: mode as "print" | "screen" | "burst",
+        mode,
         verifyKeyHex: verifyKeyHex || undefined,
         verifyKeyId: 1,
       });
@@ -28,66 +37,83 @@ export function ScanPanel() {
   };
 
   return (
-    <ThemedView type="backgroundElement" style={styles.card}>
-      <ThemedText type="subtitle">Scan</ThemedText>
-      {!permission?.granted ? (
-        <View style={styles.permissionRow}>
-          <ThemedText type="small">Camera permission is required for live scan.</ThemedText>
-          <Button title="Allow Camera" onPress={requestPermission} />
+    <View className="gap-3">
+      <View className="overflow-hidden rounded-3xl bg-white p-4 dark:bg-neutral-900">
+        <Text className="text-sm font-medium text-slate-500 dark:text-neutral-400">
+          Live Preview
+        </Text>
+        <View className="mt-3 h-56 overflow-hidden rounded-2xl bg-slate-200 dark:bg-neutral-800">
+          {permission?.granted ? (
+            <CameraView style={{ width: "100%", height: "100%" }} facing="back" />
+          ) : (
+            <View className="flex-1 items-center justify-center px-6">
+              <Text className="text-center text-sm text-slate-600 dark:text-neutral-300">
+                {statusLabel}
+              </Text>
+              <Pressable
+                onPress={requestPermission}
+                className="mt-4 rounded-xl bg-sky-600 px-4 py-2 active:opacity-80"
+              >
+                <Text className="text-sm font-semibold text-white">Allow Camera</Text>
+              </Pressable>
+            </View>
+          )}
         </View>
-      ) : (
-        <CameraView style={styles.camera} facing="back" />
-      )}
-      <TextInput
-        value={mode}
-        onChangeText={setMode}
-        autoCapitalize="none"
-        style={styles.input}
-        placeholder="mode: print|screen|burst"
-      />
-      <TextInput
-        value={verifyKeyHex}
-        onChangeText={setVerifyKeyHex}
-        autoCapitalize="none"
-        style={styles.input}
-        placeholder="optional verify key hex"
-      />
-      <Button title={loading ? "Scanning..." : "Mock Scan"} disabled={loading} onPress={runScan} />
-      <ThemedText type="small" style={styles.output}>
-        {result}
-      </ThemedText>
-    </ThemedView>
+      </View>
+
+      <View className="rounded-3xl bg-white p-4 dark:bg-neutral-900">
+        <Text className="text-sm font-medium text-slate-500 dark:text-neutral-400">
+          Mode
+        </Text>
+        <View className="mt-3 flex-row gap-2">
+          {MODES.map((candidate) => (
+            <Pressable
+              key={candidate}
+              onPress={() => setMode(candidate)}
+              className={`flex-1 rounded-xl border px-3 py-2 ${
+                mode === candidate
+                  ? "border-sky-400 bg-sky-100 dark:border-sky-500 dark:bg-sky-900/40"
+                  : "border-slate-200 bg-slate-100 dark:border-neutral-700 dark:bg-neutral-800"
+              }`}
+            >
+              <Text className="text-center text-xs font-semibold uppercase tracking-wide text-slate-800 dark:text-neutral-100">
+                {candidate}
+              </Text>
+            </Pressable>
+          ))}
+        </View>
+
+        <Text className="mt-4 text-sm font-medium text-slate-500 dark:text-neutral-400">
+          Verification key (optional)
+        </Text>
+        <TextInput
+          value={verifyKeyHex}
+          onChangeText={setVerifyKeyHex}
+          autoCapitalize="none"
+          placeholder="hex public key"
+          placeholderTextColor="#64748b"
+          className="mt-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 text-slate-900 dark:border-neutral-700 dark:bg-neutral-800 dark:text-neutral-100"
+        />
+
+        <Pressable
+          onPress={runScan}
+          disabled={loading}
+          className="mt-4 items-center rounded-xl bg-sky-600 px-4 py-3 active:opacity-80 disabled:opacity-60"
+        >
+          <Text className="text-base font-semibold text-white">
+            {loading ? "Scanning..." : "Scan Still"}
+          </Text>
+        </Pressable>
+      </View>
+
+      <View className="rounded-3xl bg-slate-900 p-4 dark:bg-black">
+        <Text className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+          Result
+        </Text>
+        <Text selectable className="mt-2 font-mono text-xs leading-5 text-slate-100">
+          {result}
+        </Text>
+      </View>
+    </View>
   );
 }
-
-const styles = StyleSheet.create({
-  card: {
-    width: "100%",
-    gap: 8,
-    borderRadius: 14,
-    padding: 12,
-  },
-  permissionRow: {
-    gap: 8,
-  },
-  camera: {
-    width: "100%",
-    height: 180,
-    borderRadius: 10,
-    overflow: "hidden",
-    backgroundColor: "#d6deea",
-  },
-  input: {
-    borderWidth: 1,
-    borderColor: "#c8d4e7",
-    borderRadius: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    color: "#112035",
-    backgroundColor: "#ffffff",
-  },
-  output: {
-    marginTop: 4,
-    fontFamily: "monospace",
-  },
-});
