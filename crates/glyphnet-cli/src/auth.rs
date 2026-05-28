@@ -290,7 +290,10 @@ fn reason_from_error_text(text: &str) -> &'static str {
     }
 }
 
-fn error_result_text<E: std::fmt::Display>(key_id: Option<u32>, error: E) -> AuthVerificationResult {
+fn error_result_text<E: std::fmt::Display>(
+    key_id: Option<u32>,
+    error: E,
+) -> AuthVerificationResult {
     let text = error.to_string();
     AuthVerificationResult {
         verified: false,
@@ -699,4 +702,79 @@ pub(crate) fn keyset_verify(path: PathBuf, root_pubkey_hex: &str) -> Result<()> 
     verify_keyset_signature(&json, root_pubkey_hex)?;
     println!("{}", serde_json::json!({ "ok": true, "verified": true }));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use glyphnet_core::seal_authenticated_payload;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_temp_path(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("glyphnet-{prefix}-{nanos}.json"))
+    }
+
+    fn write_verify_key_file(content: &str) -> PathBuf {
+        let path = unique_temp_path("verify-keys");
+        fs::write(&path, content).unwrap();
+        path
+    }
+
+    #[test]
+    fn verify_auth_payload_reports_missing_verification_key_reason() {
+        let key = [0x11u8; 32];
+        let payload = seal_authenticated_payload(b"auth", &key, 7);
+        let result = verify_auth_payload(&payload, None, 7, None, None)
+            .unwrap()
+            .unwrap();
+        assert!(!result.verified);
+        assert_eq!(
+            result.reason,
+            Some(AuthVerifyReason::MissingVerificationKey.as_str())
+        );
+    }
+
+    #[test]
+    fn verify_auth_payload_reports_unknown_key_id_reason() {
+        let key = [0x11u8; 32];
+        let payload = seal_authenticated_payload(b"auth", &key, 7);
+        let wrong = [0x22u8; 32];
+        let wrong_hex = wrong.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let result = verify_auth_payload(&payload, Some(&wrong_hex), 1, None, None)
+            .unwrap()
+            .unwrap();
+        assert!(!result.verified);
+        assert_eq!(result.reason, Some(AuthVerifyReason::UnknownKeyId.as_str()));
+    }
+
+    #[test]
+    fn verify_auth_payload_reports_auth_mismatch_reason() {
+        let key = [0x11u8; 32];
+        let payload = seal_authenticated_payload(b"auth", &key, 7);
+        let wrong = [0x22u8; 32];
+        let wrong_hex = wrong.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let result = verify_auth_payload(&payload, Some(&wrong_hex), 7, None, None)
+            .unwrap()
+            .unwrap();
+        assert!(!result.verified);
+        assert_eq!(result.reason, Some(AuthVerifyReason::AuthMismatch.as_str()));
+    }
+
+    #[test]
+    fn verify_key_file_parses_not_before_and_not_after_windows() {
+        let key = [0x11u8; 32];
+        let key_hex = key.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let path = write_verify_key_file(&format!(
+            r#"[{{"key_id":7,"key_hex":"{key_hex}","not_before":"2999-01-01T00:00:00Z","not_after":"3000-01-01T00:00:00Z"}}]"#
+        ));
+        let keyring = load_verify_keys(&path).unwrap();
+        let _ = fs::remove_file(path);
+        let validity = keyring.validity_by_key_id.get(&7).unwrap();
+        assert!(validity.not_before.is_some());
+        assert!(validity.not_after.is_some());
+    }
 }

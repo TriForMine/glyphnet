@@ -1011,4 +1011,41 @@ mod tests {
         let result = auth::verify_detached_auth_json(b"detached-unknown", &sig, keyring).unwrap();
         assert!(result.contains(r#""reason": "unknown_key_id""#));
     }
+
+    #[test]
+    fn native_detached_auth_reports_auth_mismatch_reason() {
+        let key = [0x33; 32];
+        let sig = auth::sign_detached_auth_json(b"detached-mismatch", &key, 11).unwrap();
+        let keyring = r#"[{"key_id":11,"key_hex":"4444444444444444444444444444444444444444444444444444444444444444"}]"#;
+        let result = auth::verify_detached_auth_json(b"detached-mismatch", &sig, keyring).unwrap();
+        assert!(result.contains(r#""reason": "auth_mismatch""#));
+    }
+
+    #[test]
+    fn native_detached_auth_reports_not_yet_valid_reason() {
+        let key = [0x33; 32];
+        let sig = auth::sign_detached_auth_json(b"detached-future", &key, 11).unwrap();
+        let keyring = r#"[{"key_id":11,"key_hex":"3333333333333333333333333333333333333333333333333333333333333333","not_before":"2999-01-01T00:00:00Z"}]"#;
+        let result = auth::verify_detached_auth_json(b"detached-future", &sig, keyring).unwrap();
+        assert!(result.contains(r#""reason": "key_not_yet_valid""#));
+    }
+
+    #[test]
+    fn native_detached_auth_reports_expired_reason() {
+        let key = [0x33; 32];
+        let sig = auth::sign_detached_auth_json(b"detached-expired", &key, 11).unwrap();
+        let keyring = r#"[{"key_id":11,"key_hex":"3333333333333333333333333333333333333333333333333333333333333333","not_after":"2000-01-01T00:00:00Z"}]"#;
+        let result = auth::verify_detached_auth_json(b"detached-expired", &sig, keyring).unwrap();
+        assert!(result.contains(r#""reason": "key_expired""#));
+    }
+
+    #[test]
+    fn native_verify_payload_reports_missing_verification_key_reason() {
+        let key = [0x33; 32];
+        let payload = glyphnet_core::seal_authenticated_payload(b"auth-missing-key", &key, 3);
+        let result = auth::verify_payload_with_optional_key(&payload, None, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(result["reason"], "missing_verification_key");
+    }
 }
