@@ -13,10 +13,11 @@ by QR scanners.
 
 The repository is intentionally practical: the current implementation provides
 an end-to-end static encode-render-decode path, burst frame construction,
-scanner orchestration, parity-based reference ECC, and protocol validation
-hooks. The architecture leaves clear extension points for LDPC, fountain codes,
-RaptorQ-like erasure recovery, color modulation, GPU sampling, radial and
-hexagonal layouts, AR/VR scanners, and adaptive bitrate burst transfers.
+scanner orchestration, parity and Reed-Solomon-backed burst erasure baseline,
+and protocol validation hooks. The architecture leaves clear extension points
+for stronger fountain/RaptorQ-like policies, color modulation, GPU sampling,
+radial and hexagonal layouts, AR/VR scanners, and adaptive bitrate burst
+transfers.
 
 ## Status
 
@@ -103,11 +104,10 @@ can be recovered by smartphones and webcams.
 
 ### Burst Mode
 
-Burst mode transmits animated frame sequences. Its default geometry is a
-wide temporal strip optimized for video display and camera tracking. It adds
-frame indexes, stream identifiers, temporal synchronization, burst assembly, and
-future hooks for adaptive bitrate, temporal modulation, optical-flow tracking, and
-fountain/RaptorQ-like recovery under dropped frames.
+Burst mode transmits animated frame sequences. Its default geometry is a wide
+temporal strip optimized for video display and camera tracking. It adds frame
+indexes, stream identifiers, temporal synchronization, burst assembly, and
+erasure-shard recovery from partial frame sets under dropped frames.
 
 ## Quick Start
 
@@ -121,6 +121,7 @@ cargo run -p glyphnet-cli -- decode hello.png
 cargo run -p glyphnet-cli -- decode --auto hello.png
 cargo run -p glyphnet-cli -- scan --mode print hello.png
 cargo run -p glyphnet-cli -- burst --profile pulse-burst --data "large payload" --output-dir burst_frames
+cargo run -p glyphnet-cli -- scan-burst --mode burst burst_frames
 ```
 
 `decode --auto` infers module size, quiet zone, layout family, and threshold
@@ -149,6 +150,8 @@ tracked scenarios and rationale comments.
 - `RibbonWeave` claims should be scoped to wide-format/aesthetic scenarios.
 - Performance and success-rate claims should be reported as PR-vs-base deltas on
   versioned fixtures (synthetic, real captures, and hard negatives).
+- Burst reliability claims should include loss-sweep rows (`10/20/30/40%`
+  frame drop) with success-rate and completion metrics.
 
 ## Engineering Workflow
 

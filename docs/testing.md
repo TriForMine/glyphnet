@@ -59,3 +59,14 @@ cargo fuzz run frame_decode
 The reference implementation must produce stable bytes, matrix dimensions, and
 module placement for the same config and payload. Any randomized strategy must
 take an explicit seed and record it in the descriptor or test output.
+
+## Burst Reliability CI
+
+- Burst reliability is tracked with a loss-sweep test at `10/20/30/40%` frame
+  drop rates.
+- CI extracts and reports per-rate metrics:
+  - success rate
+  - median frames-to-complete
+  - median completion latency
+- Current status: non-gating baseline report on PRs while burst redundancy
+  strategy is tuned for higher loss.

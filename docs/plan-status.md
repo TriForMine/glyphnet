@@ -13,7 +13,7 @@ This file tracks execution status for the roadmap priorities in
   scaffold.
 - [x] Complete Phase 2 ECC: LDPC screen profile and scanner-facing telemetry contract.
 - [ ] Lock matrix as scanner reliability baseline in CI (fixtures + perf/reliability rows).
-- [ ] Deliver burst erasure transport (fountain/RaptorQ-like direction).
+- [x] Deliver burst erasure transport (fountain/RaptorQ-like direction) baseline.
 - [ ] Add payload authenticity envelope above transport CRC.
 
 ## In Progress
@@ -27,6 +27,9 @@ This file tracks execution status for the roadmap priorities in
   candidate-priority ordering, and matrix visibility in scanner perf CI
   reporting. Matrix full-canvas benchmark remains non-gating until
   `feat/matrix-fastpath-phase1` lands ROI/multi-scale acceleration.
+- `feat/phase4-burst-transport-phase1`: add burst packet wire format, RS shard
+  erasure encode/recover baseline, stateful scanner burst progress reporting,
+  `scan-burst` tooling, and non-gating burst loss-sweep CI comment table.
 
 ## Next Up
 
@@ -38,3 +41,5 @@ This file tracks execution status for the roadmap priorities in
 3. Implement `feat/matrix-fastpath-phase1`:
    downscaled/ROI-first matrix detection so a realistic matrix benchmark can be
    promoted to gating.
+4. Improve burst high-loss reliability (30-40%) and promote burst CI thresholds
+   from non-gating baseline tracking to gated targets once stable.
