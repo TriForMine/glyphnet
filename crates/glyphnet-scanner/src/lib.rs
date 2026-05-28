@@ -235,7 +235,6 @@ fn scan_still_with_diagnostics_inner(
         }
         timings.full_frame_micros = elapsed_micros(stage);
     }
-
     let profile = VisionProfile::for_mode(mode);
     let stage = scan_instant_now();
     let gray = grayscale(image).map_err(|error| failed_cv(error, timings, started))?;
