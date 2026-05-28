@@ -4,6 +4,7 @@
 //! wire format, symbol matrix model, mode descriptors, and layout invariants
 //! shared by encoders, decoders, renderers, scanners, and SDK bindings.
 
+pub mod auth;
 pub mod bitstream;
 pub mod burst_packet;
 pub mod descriptor;
@@ -15,6 +16,10 @@ pub mod matrix;
 pub mod mode;
 pub mod profile;
 
+pub use auth::{
+    AuthEnvelopeHeader, open_payload as open_authenticated_payload,
+    seal_payload as seal_authenticated_payload,
+};
 pub use burst_packet::{
     BURST_PACKET_HEADER_LEN, BURST_PACKET_MAGIC, BURST_PACKET_VERSION, BurstPacket,
     BurstPacketHeader,

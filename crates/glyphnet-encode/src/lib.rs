@@ -4,7 +4,7 @@ use blake3::Hash;
 use glyphnet_core::{
     BurstPacket, Capability, CapabilitySet, ColorEncoding, EccLevel, Frame, GlyphError,
     LayoutFamily, ProfileId, ProtocolVersion, SymbolDescriptor, SymbolGeometry, SymbolMatrix,
-    TransmissionMode, bitstream, choose_symbol_geometry, profile_spec,
+    TransmissionMode, bitstream, choose_symbol_geometry, profile_spec, seal_authenticated_payload,
 };
 use glyphnet_ecc::{BurstErasureCodec, EccError, encode_for_mode};
 use thiserror::Error;
@@ -127,6 +127,17 @@ impl Encoder {
     /// Encode a complete static symbol.
     pub fn encode_static(&self, payload: &[u8]) -> Result<EncodedSymbol> {
         self.encode_frame(payload, 0, 1, stream_id(payload), self.config.mode)
+    }
+
+    /// Encode a static symbol with an embedded authenticity envelope.
+    pub fn encode_static_authenticated(
+        &self,
+        payload: &[u8],
+        key: &[u8; 32],
+        key_id: u32,
+    ) -> Result<EncodedSymbol> {
+        let sealed = seal_authenticated_payload(payload, key, key_id);
+        self.encode_frame(&sealed, 0, 1, stream_id(payload), self.config.mode)
     }
 
     /// Encode a single frame with explicit burst metadata.
