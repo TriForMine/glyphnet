@@ -1139,6 +1139,7 @@ mod tests {
         for (drop_rate, min_success) in rates {
             let mut successes = 0usize;
             let mut completion_frames = Vec::new();
+            let mut completion_millis = Vec::new();
             let trials = 10usize;
             for _ in 0..trials {
                 let mut scanner = Scanner::new(ScannerConfig {
@@ -1146,6 +1147,7 @@ mod tests {
                     max_frames: 120,
                     ..ScannerConfig::default()
                 });
+                let trial_started = Instant::now();
                 let mut complete_at = None;
                 for (index, encoded) in frames.iter().enumerate() {
                     if rng.r#gen::<f32>() < drop_rate {
@@ -1166,6 +1168,7 @@ mod tests {
                 if let Some(done) = complete_at {
                     successes += 1;
                     completion_frames.push(done);
+                    completion_millis.push(trial_started.elapsed().as_millis() as u64);
                 }
             }
 
@@ -1177,9 +1180,18 @@ mod tests {
             if !completion_frames.is_empty() {
                 completion_frames.sort_unstable();
                 let median = completion_frames[completion_frames.len() / 2];
+                completion_millis.sort_unstable();
+                let median_ms = completion_millis[completion_millis.len() / 2];
+                eprintln!(
+                    "[burst-reliability] drop_rate={drop_rate:.2} success_rate={success_rate:.3} median_frames={median} median_completion_ms={median_ms}"
+                );
                 assert!(
                     median <= 64,
                     "drop_rate={drop_rate:.2} median_frames_to_complete={median} exceeded 64"
+                );
+            } else {
+                eprintln!(
+                    "[burst-reliability] drop_rate={drop_rate:.2} success_rate={success_rate:.3} median_frames=- median_completion_ms=-"
                 );
             }
         }
