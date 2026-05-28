@@ -100,7 +100,7 @@ jobs:
             const rows = benchNames.length === 0
               ? ['| Benchmark | Gating | PR median (ms) | Base median (ms) | Delta (ms) | Delta % |',
                  '|---|:---:|---:|---:|---:|---:|',
-                 '| unavailable | - | - | - | - |']
+                 '| unavailable | - | - | - | - | - |']
               : [
                   '| Benchmark | Gating | PR median (ms) | Base median (ms) | Delta (ms) | Delta % |',
                   '|---|:---:|---:|---:|---:|---:|',
@@ -119,6 +119,31 @@ jobs:
                     const profile = p?.profile_id || b?.profile_id || (name.includes('matrix') ? 'MatrixCompat' : 'RibbonPrint');
                     return `| ${name} (${profile}) | ${gateCell} | ${prCell} | ${baseCell} | ${deltaCell} | ${deltaPctCell} |`;
                   })
+                ];
+            const matrixRows = matrixBenchNames.length === 0
+              ? [
+                  '| Benchmark | Gating | PR median (ms) | Base median (ms) | Delta (ms) | Delta % |',
+                  '|---|:---:|---:|---:|---:|---:|',
+                  '| unavailable | - | - | - | - | - |',
+                ]
+              : [
+                  '| Benchmark | Gating | PR median (ms) | Base median (ms) | Delta (ms) | Delta % |',
+                  '|---|:---:|---:|---:|---:|---:|',
+                  ...matrixBenchNames.map(name => {
+                    const p = prMap.get(name);
+                    const b = baseMap.get(name);
+                    const prMs = p ? p.median_ms : null;
+                    const baseMs = b ? b.median_ms : null;
+                    const delta = (prMs != null && baseMs != null) ? (prMs - baseMs) : null;
+                    const deltaPct = (delta != null && baseMs !== 0) ? (delta / baseMs) * 100 : null;
+                    const prCell = prMs == null ? '-' : prMs.toFixed(3);
+                    const baseCell = baseMs == null ? '-' : baseMs.toFixed(3);
+                    const deltaCell = delta == null ? '-' : delta.toFixed(3);
+                    const deltaPctCell = deltaPct == null ? '-' : `${deltaPct.toFixed(2)}%`;
+                    const gateCell = p && p.gating === false ? 'No' : 'Yes';
+                    const profile = p?.profile_id || b?.profile_id || 'MatrixCompat';
+                    return `| ${name} (${profile}) | ${gateCell} | ${prCell} | ${baseCell} | ${deltaCell} | ${deltaPctCell} |`;
+                  }),
                 ];
             const body = [
               marker,
@@ -147,28 +172,8 @@ jobs:
               rows[1],
               ...rows.slice(2),
               '',
-              matrixBenchNames.length > 0 ? '### Matrix subset' : '### Matrix subset',
-              matrixBenchNames.length === 0
-                ? '_No matrix benchmark rows were produced in this run._'
-                : [
-                    '| Benchmark | Gating | PR median (ms) | Base median (ms) | Delta (ms) | Delta % |',
-                    '|---|:---:|---:|---:|---:|---:|',
-                    ...matrixBenchNames.map(name => {
-                      const p = prMap.get(name);
-                      const b = baseMap.get(name);
-                      const prMs = p ? p.median_ms : null;
-                      const baseMs = b ? b.median_ms : null;
-                      const delta = (prMs != null && baseMs != null) ? (prMs - baseMs) : null;
-                      const deltaPct = (delta != null && baseMs !== 0) ? (delta / baseMs) * 100 : null;
-                      const prCell = prMs == null ? '-' : prMs.toFixed(3);
-                      const baseCell = baseMs == null ? '-' : baseMs.toFixed(3);
-                      const deltaCell = delta == null ? '-' : delta.toFixed(3);
-                      const deltaPctCell = deltaPct == null ? '-' : `${deltaPct.toFixed(2)}%`;
-                      const gateCell = p && p.gating === false ? 'No' : 'Yes';
-                      const profile = p?.profile_id || b?.profile_id || 'MatrixCompat';
-                      return `| ${name} (${profile}) | ${gateCell} | ${prCell} | ${baseCell} | ${deltaCell} | ${deltaPctCell} |`;
-                    }).join('\n'),
-                  ].join('\n'),
+              '### Matrix subset',
+              ...matrixRows,
               '',
             ].join('\n');
 

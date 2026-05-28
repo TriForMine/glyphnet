@@ -23,6 +23,10 @@ This file tracks execution status for the roadmap priorities in
 - `feat/phase2-ecc-telemetry`: complete Phase 2 baseline with scanner-facing
   ECC telemetry contract, feature-gated screen LDPC path, and regression/bench
   coverage.
+- `feat/matrix-baseline-lock-phase1`: add matrix reliability tests, matrix
+  candidate-priority ordering, and matrix visibility in scanner perf CI
+  reporting. Matrix full-canvas benchmark remains non-gating until
+  `feat/matrix-fastpath-phase1` lands ROI/multi-scale acceleration.
 
 ## Next Up
 
@@ -31,4 +35,6 @@ This file tracks execution status for the roadmap priorities in
 2. Lock matrix as scanner reliability baseline in CI:
    add matrix-first scan path checks, real matrix fixtures, and matrix-specific
    perf/reliability gate rows.
-3. Deliver burst erasure transport (fountain/RaptorQ-like direction).
+3. Implement `feat/matrix-fastpath-phase1`:
+   downscaled/ROI-first matrix detection so a realistic matrix benchmark can be
+   promoted to gating.
