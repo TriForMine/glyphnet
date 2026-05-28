@@ -36,6 +36,7 @@ use candidates::{
 };
 use decode_paths::decode_candidate;
 pub use detectors::CandidateDetector;
+use detectors::ScanCandidate;
 use rectification::{scan_quad_candidates as build_quad_candidates, should_try_quad_rectification};
 pub use types::{FailedStillScan, ScanAttempt, ScanTelemetry, ScanTimings, StillScanResult};
 
@@ -299,7 +300,8 @@ fn scan_still_with_diagnostics_inner(
     let mut attempts = Vec::new();
     let padding = profile.min_anchor_px.max(8);
     let stage = scan_instant_now();
-    let regions = still_scan_candidates(image, &binary, profile, padding, robust);
+    let mut regions = still_scan_candidates(image, &binary, profile, padding, robust);
+    prioritize_matrix_candidates(&mut regions);
     timings.candidate_micros = elapsed_micros(stage);
 
     let decode_started = scan_instant_now();
@@ -492,6 +494,30 @@ fn scan_still_with_diagnostics_inner(
         attempts,
         timings,
     })
+}
+
+fn prioritize_matrix_candidates(regions: &mut [ScanCandidate]) {
+    let has_matrix_hint = regions.iter().any(|candidate| {
+        matches!(
+            candidate.layout_hint,
+            Some(glyphnet_core::LayoutFamily::Matrix)
+        )
+    });
+    if !has_matrix_hint {
+        return;
+    }
+    regions.sort_by_key(|candidate| {
+        if candidate.detector == CandidateDetector::GeneratedContent {
+            0u8
+        } else if matches!(
+            candidate.layout_hint,
+            Some(glyphnet_core::LayoutFamily::Matrix)
+        ) {
+            1u8
+        } else {
+            2u8
+        }
+    });
 }
 
 fn decode_resampled_full_frame(
@@ -893,11 +919,10 @@ mod tests {
         assert_eq!(result.decoded.info.layout, LayoutFamily::Matrix);
         assert!(
             result.quad.is_some()
-                || result
-                    .attempts
-                    .iter()
-                    .any(|attempt| attempt.detector
-                        == CandidateDetector::GeneratedContent.as_str())
+                || result.attempts.iter().any(|attempt| {
+                    attempt.detector == CandidateDetector::GeneratedContent.as_str()
+                        || attempt.detector == CandidateDetector::Matrix.as_str()
+                })
         );
     }
 
@@ -917,6 +942,63 @@ mod tests {
                 .iter()
                 .any(|attempt| attempt.stage == "matrix-finders")
         );
+    }
+
+    #[test]
+    fn scan_still_prioritizes_matrix_candidates_when_available() {
+        let payload = b"matrix ordering";
+        let symbol = rendered_sample_with_layout(payload, 4, LayoutFamily::Matrix);
+        let mut canvas = RgbaImage::from_pixel(960, 360, Rgba([255, 255, 255, 255]));
+        add_matrix_canvas_clutter(&mut canvas);
+        image::imageops::overlay(&mut canvas, &symbol, 128, 56);
+        let image = DynamicImage::ImageRgba8(canvas);
+        let result = scan_still_with_diagnostics(&image, TransmissionMode::Print).unwrap();
+        assert_eq!(result.decoded.decoded.frame.payload, payload);
+        let first = result
+            .attempts
+            .first()
+            .expect("matrix scan should record at least one attempt");
+        assert_eq!(first.layout_hint, Some(LayoutFamily::Matrix));
+    }
+
+    #[test]
+    fn scan_still_decodes_resized_matrix_canvas() {
+        let payload = b"matrix resized";
+        let symbol = rendered_sample_with_layout(payload, 4, LayoutFamily::Matrix);
+        let resized = resize(&symbol, symbol.width() / 2, symbol.height() / 2);
+        let image = sample_canvas_with_symbol(&resized, 132, 72);
+        let result = assert_scan_payload(&image, payload);
+        assert_eq!(result.decoded.info.layout, LayoutFamily::Matrix);
+    }
+
+    #[test]
+    fn scan_still_decodes_mild_skewed_matrix_canvas() {
+        let payload = b"matrix skew";
+        let symbol = rendered_sample_with_layout(payload, 5, LayoutFamily::Matrix);
+        let canvas = place_on_canvas(&symbol, 30, 24, Rgba([255, 255, 255, 255]));
+        let skewed = skew_x_on_white(&canvas, 4, -4);
+        let result =
+            scan_still_robust(&DynamicImage::ImageRgba8(skewed), TransmissionMode::Print).unwrap();
+        assert_eq!(result.decoded.decoded.frame.payload, payload);
+        assert_eq!(result.decoded.info.layout, LayoutFamily::Matrix);
+    }
+
+    #[test]
+    fn scan_still_decodes_matrix_canvas_with_light_ui_clutter() {
+        let payload = b"matrix ui";
+        let symbol = rendered_sample_with_layout(payload, 4, LayoutFamily::Matrix);
+        let mut canvas = RgbaImage::from_pixel(640, 280, Rgba([248, 248, 248, 255]));
+        for x in 0..canvas.width() {
+            canvas.put_pixel(x, 26, Rgba([232, 236, 234, 255]));
+            canvas.put_pixel(x, 244, Rgba([232, 236, 234, 255]));
+        }
+        for y in 18..260 {
+            canvas.put_pixel(18, y, Rgba([220, 226, 223, 255]));
+            canvas.put_pixel(612, y, Rgba([220, 226, 223, 255]));
+        }
+        image::imageops::overlay(&mut canvas, &symbol, 140, 58);
+        let result = assert_scan_payload(&DynamicImage::ImageRgba8(canvas), payload);
+        assert_eq!(result.decoded.info.layout, LayoutFamily::Matrix);
     }
 
     #[test]

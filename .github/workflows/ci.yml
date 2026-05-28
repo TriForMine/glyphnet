@@ -51,7 +51,7 @@ jobs:
       - name: Check PR branch perf gate
         if: github.event_name == 'pull_request'
         continue-on-error: true
-        run: SCANNER_BENCH_NAMES=scan_generated_ribbon_canvas_small,scan_generated_ribbon_canvas_medium,scan_generated_ribbon_canvas_large,scan_real_debugger_screenshot SCANNER_BENCH_NON_GATING=scan_real_debugger_screenshot SCANNER_BENCH_OUTPUT_JSON=target/scanner-perf/pr.json scripts/check_scanner_perf.sh
+        run: SCANNER_BENCH_NAMES=scan_generated_ribbon_canvas_small,scan_generated_ribbon_canvas_medium,scan_generated_ribbon_canvas_large,scan_generated_matrix_canvas,scan_real_debugger_screenshot SCANNER_BENCH_NON_GATING=scan_real_debugger_screenshot SCANNER_BENCH_OUTPUT_JSON=target/scanner-perf/pr.json scripts/check_scanner_perf.sh
 
       - name: Capture base benchmark metrics
         if: always() && github.event_name == 'pull_request'
@@ -61,7 +61,7 @@ jobs:
           mkdir -p /tmp/glyphnet-base/scripts
           cp scripts/check_scanner_perf.sh /tmp/glyphnet-base/scripts/check_scanner_perf.sh
           cd /tmp/glyphnet-base
-          SCANNER_BENCH_NAMES=scan_generated_ribbon_canvas_small,scan_generated_ribbon_canvas_medium,scan_generated_ribbon_canvas_large,scan_real_debugger_screenshot SCANNER_BENCH_NON_GATING=scan_real_debugger_screenshot SCANNER_BENCH_OUTPUT_JSON=target/scanner-perf/base.json ./scripts/check_scanner_perf.sh --no-fail
+          SCANNER_BENCH_NAMES=scan_generated_ribbon_canvas_small,scan_generated_ribbon_canvas_medium,scan_generated_ribbon_canvas_large,scan_generated_matrix_canvas,scan_real_debugger_screenshot SCANNER_BENCH_NON_GATING=scan_real_debugger_screenshot SCANNER_BENCH_OUTPUT_JSON=target/scanner-perf/base.json ./scripts/check_scanner_perf.sh --no-fail
 
       - name: Comment benchmark comparison on PR
         if: always() && github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork
@@ -81,15 +81,29 @@ jobs:
             const prMap = toMap(pr);
             const baseMap = toMap(base);
             const benchNames = Array.from(new Set([...prMap.keys(), ...baseMap.keys()]));
+            const matrixBenchNames = benchNames.filter(name => name.includes('matrix'));
+            const matrixCases = matrixBenchNames
+              .map(name => prMap.get(name))
+              .filter(Boolean);
+            const matrixGatingCases = matrixCases.filter(c => c.gating !== false);
+            const matrixPassCount = matrixGatingCases.filter(c => c.status === 'pass').length;
+            const matrixFailCount = matrixGatingCases.filter(c => c.status === 'fail').length;
+            const ribbonBenchNames = benchNames.filter(name => !name.includes('matrix'));
+            const ribbonCases = ribbonBenchNames
+              .map(name => prMap.get(name))
+              .filter(Boolean);
+            const ribbonGatingCases = ribbonCases.filter(c => c.gating !== false);
+            const ribbonPassCount = ribbonGatingCases.filter(c => c.status === 'pass').length;
+            const ribbonFailCount = ribbonGatingCases.filter(c => c.status === 'fail').length;
             const overallEmoji = pr ? (pr.status === 'pass' ? '✅' : '⚠️') : 'ℹ️';
             const marker = '<!-- scanner-perf-comment -->';
             const rows = benchNames.length === 0
-              ? ['| Benchmark | PR median (ms) | Base median (ms) | Delta (ms) | Delta % |',
-                 '|---|---:|---:|---:|---:|',
-                 '| unavailable | - | - | - | - |']
+              ? ['| Benchmark | Gating | PR median (ms) | Base median (ms) | Delta (ms) | Delta % |',
+                 '|---|:---:|---:|---:|---:|---:|',
+                 '| unavailable | - | - | - | - | - |']
               : [
-                  '| Benchmark | PR median (ms) | Base median (ms) | Delta (ms) | Delta % |',
-                  '|---|---:|---:|---:|---:|',
+                  '| Benchmark | Gating | PR median (ms) | Base median (ms) | Delta (ms) | Delta % |',
+                  '|---|:---:|---:|---:|---:|---:|',
                   ...benchNames.map(name => {
                     const p = prMap.get(name);
                     const b = baseMap.get(name);
@@ -102,26 +116,64 @@ jobs:
                     const deltaCell = delta == null ? '-' : delta.toFixed(3);
                     const deltaPctCell = deltaPct == null ? '-' : `${deltaPct.toFixed(2)}%`;
                     const gateCell = p && p.gating === false ? 'No' : 'Yes';
-                    return `| ${name} | ${gateCell} | ${prCell} | ${baseCell} | ${deltaCell} | ${deltaPctCell} |`;
+                    const profile = p?.profile_id || b?.profile_id || (name.includes('matrix') ? 'MatrixCompat' : 'RibbonPrint');
+                    return `| ${name} (${profile}) | ${gateCell} | ${prCell} | ${baseCell} | ${deltaCell} | ${deltaPctCell} |`;
                   })
+                ];
+            const matrixRows = matrixBenchNames.length === 0
+              ? [
+                  '| Benchmark | Gating | PR median (ms) | Base median (ms) | Delta (ms) | Delta % |',
+                  '|---|:---:|---:|---:|---:|---:|',
+                  '| unavailable | - | - | - | - | - |',
+                ]
+              : [
+                  '| Benchmark | Gating | PR median (ms) | Base median (ms) | Delta (ms) | Delta % |',
+                  '|---|:---:|---:|---:|---:|---:|',
+                  ...matrixBenchNames.map(name => {
+                    const p = prMap.get(name);
+                    const b = baseMap.get(name);
+                    const prMs = p ? p.median_ms : null;
+                    const baseMs = b ? b.median_ms : null;
+                    const delta = (prMs != null && baseMs != null) ? (prMs - baseMs) : null;
+                    const deltaPct = (delta != null && baseMs !== 0) ? (delta / baseMs) * 100 : null;
+                    const prCell = prMs == null ? '-' : prMs.toFixed(3);
+                    const baseCell = baseMs == null ? '-' : baseMs.toFixed(3);
+                    const deltaCell = delta == null ? '-' : delta.toFixed(3);
+                    const deltaPctCell = deltaPct == null ? '-' : `${deltaPct.toFixed(2)}%`;
+                    const gateCell = p && p.gating === false ? 'No' : 'Yes';
+                    const profile = p?.profile_id || b?.profile_id || 'MatrixCompat';
+                    return `| ${name} (${profile}) | ${gateCell} | ${prCell} | ${baseCell} | ${deltaCell} | ${deltaPctCell} |`;
+                  }),
                 ];
             const body = [
               marker,
-              '## Scanner perf (RibbonPrint fixtures)',
+              '## Scanner perf (ribbon + matrix fixtures)',
               '',
               pr
                 ? `${overallEmoji} **PR gate status:** ${pr.status.toUpperCase()}`
                 : '⚠️ **PR gate status:** unavailable (PR benchmark did not produce target/scanner-perf/pr.json)',
               pr
-                ? `- **Profile budget:** ${pr.budget_ms.toFixed(3)} ms`
-                : '- **Profile budget:** unavailable',
+                ? `- **Ribbon budget:** ${pr.ribbon_budget_ms.toFixed(3)} ms (allowed ${pr.ribbon_allowed_ms.toFixed(3)} ms)`
+                : '- **Ribbon budget:** unavailable',
               pr
-                ? `- **Allowed (budget + ${pr.tolerance_pct.toFixed(1)}%):** ${pr.allowed_ms.toFixed(3)} ms`
-                : '- **Allowed threshold:** unavailable',
+                ? `- **Matrix budget:** ${pr.matrix_budget_ms.toFixed(3)} ms (allowed ${pr.matrix_allowed_ms.toFixed(3)} ms)`
+                : '- **Matrix budget:** unavailable',
+              pr
+                ? `- **Tolerance:** ${pr.tolerance_pct.toFixed(1)}%`
+                : '- **Tolerance:** unavailable',
+              ribbonBenchNames.length > 0
+                ? `- **Ribbon gating benches:** ${ribbonPassCount} pass / ${ribbonFailCount} fail`
+                : '- **Ribbon gating benches:** unavailable',
+              matrixBenchNames.length > 0
+                ? `- **Matrix gating benches:** ${matrixPassCount} pass / ${matrixFailCount} fail`
+                : '- **Matrix gating benches:** unavailable',
               '',
-              rows[0].replace('| Benchmark | PR median (ms) | Base median (ms) | Delta (ms) | Delta % |', '| Benchmark | Gating | PR median (ms) | Base median (ms) | Delta (ms) | Delta % |'),
-              rows[1].replace('|---|---:|---:|---:|---:|', '|---|:---:|---:|---:|---:|---:|'),
+              rows[0],
+              rows[1],
               ...rows.slice(2),
+              '',
+              '### Matrix subset',
+              ...matrixRows,
               '',
             ].join('\n');
 
