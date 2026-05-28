@@ -1,5 +1,5 @@
 import { CameraView, useCameraPermissions } from "expo-camera";
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 
 import { scannerAdapter } from "@/adapters/scanner";
 import { Pressable, Text, TextInput, View } from "@/tw";
@@ -7,6 +7,7 @@ import { Pressable, Text, TextInput, View } from "@/tw";
 const MODES = ["print", "screen", "burst"] as const;
 
 export function ScanPanel() {
+  const cameraRef = useRef<any>(null);
   const [permission, requestPermission] = useCameraPermissions();
   const [mode, setMode] = useState<(typeof MODES)[number]>("print");
   const [verifyKeyHex, setVerifyKeyHex] = useState("");
@@ -25,10 +26,23 @@ export function ScanPanel() {
   const runScan = async () => {
     setLoading(true);
     try {
+      if (!cameraRef.current?.takePictureAsync) {
+        setResult("Camera capture is not ready yet.");
+        return;
+      }
+      const shot = await cameraRef.current.takePictureAsync({
+        base64: true,
+        quality: 0.9,
+      });
+      if (!shot?.base64) {
+        setResult("Failed to capture image from camera.");
+        return;
+      }
       const json = await scannerAdapter.scanStill({
         mode,
         verifyKeyHex: verifyKeyHex || undefined,
         verifyKeyId: 1,
+        imageBase64: shot.base64,
       });
       setResult(JSON.stringify(json, null, 2));
     } finally {
@@ -44,7 +58,11 @@ export function ScanPanel() {
         </Text>
         <View className="mt-3 h-56 overflow-hidden rounded-2xl bg-slate-200 dark:bg-neutral-800">
           {permission?.granted ? (
-            <CameraView style={{ width: "100%", height: "100%" }} facing="back" />
+            <CameraView
+              ref={cameraRef}
+              style={{ width: "100%", height: "100%" }}
+              facing="back"
+            />
           ) : (
             <View className="flex-1 items-center justify-center px-6">
               <Text className="text-center text-sm text-slate-600 dark:text-neutral-300">
