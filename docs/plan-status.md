@@ -12,6 +12,7 @@ This file tracks execution status for the roadmap priorities in
 - [x] Publish a versioned fixture corpus (synthetic + real + hard negatives)
   scaffold.
 - [x] Complete Phase 2 ECC: LDPC screen profile and scanner-facing telemetry contract.
+- [ ] Lock matrix as scanner reliability baseline in CI (fixtures + perf/reliability rows).
 - [ ] Deliver burst erasure transport (fountain/RaptorQ-like direction).
 - [ ] Add payload authenticity envelope above transport CRC.
 
@@ -27,5 +28,7 @@ This file tracks execution status for the roadmap priorities in
 
 1. Keep scanner performance gate enforceable while converging to profile
    budgets.
-2. Deliver burst erasure transport (fountain/RaptorQ-like direction).
-3. Add payload authenticity envelope above transport CRC.
+2. Lock matrix as scanner reliability baseline in CI:
+   add matrix-first scan path checks, real matrix fixtures, and matrix-specific
+   perf/reliability gate rows.
+3. Deliver burst erasure transport (fountain/RaptorQ-like direction).
