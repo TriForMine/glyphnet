@@ -271,7 +271,15 @@ impl Encoder {
         let mut frames = Vec::with_capacity(shards.shards.len());
         for (index, shard) in shards.shards.into_iter().enumerate() {
             let flags = if index >= data_shards { 0b0000_0001 } else { 0 };
-            let packet = BurstPacket::new(index as u16, packet_count, stream_id, flags, shard)?;
+            let packet = BurstPacket::new(
+                index as u16,
+                packet_count,
+                stream_id,
+                flags,
+                payload.len() as u32,
+                data_shards as u16,
+                shard,
+            )?;
             frames.push(self.encode_frame(
                 &packet.encode(),
                 index as u16,

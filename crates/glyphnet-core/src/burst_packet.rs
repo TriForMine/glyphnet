@@ -5,7 +5,7 @@ pub const BURST_PACKET_MAGIC: [u8; 4] = *b"GBPK";
 /// Supported burst packet wire version.
 pub const BURST_PACKET_VERSION: u8 = 1;
 /// Fixed packet header length in bytes.
-pub const BURST_PACKET_HEADER_LEN: usize = 24;
+pub const BURST_PACKET_HEADER_LEN: usize = 32;
 
 /// Metadata header for burst transport packets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,6 +18,10 @@ pub struct BurstPacketHeader {
     pub stream_id: u64,
     /// Flags reserved for transport signaling.
     pub flags: u8,
+    /// Original burst payload length.
+    pub original_len: u32,
+    /// Number of data shards in this burst shard set.
+    pub data_shards: u16,
     /// Payload length in bytes.
     pub payload_len: u16,
     /// CRC-32 of payload bytes.
@@ -31,6 +35,8 @@ impl BurstPacketHeader {
         packet_count: u16,
         stream_id: u64,
         flags: u8,
+        original_len: u32,
+        data_shards: u16,
         payload_len: u16,
         payload_crc: u32,
     ) -> Result<Self> {
@@ -46,6 +52,8 @@ impl BurstPacketHeader {
             packet_count,
             stream_id,
             flags,
+            original_len,
+            data_shards,
             payload_len,
             payload_crc,
         })
@@ -60,8 +68,10 @@ impl BurstPacketHeader {
         out[6..8].copy_from_slice(&self.sequence.to_be_bytes());
         out[8..10].copy_from_slice(&self.packet_count.to_be_bytes());
         out[10..18].copy_from_slice(&self.stream_id.to_be_bytes());
-        out[18..20].copy_from_slice(&self.payload_len.to_be_bytes());
-        out[20..24].copy_from_slice(&self.payload_crc.to_be_bytes());
+        out[18..22].copy_from_slice(&self.original_len.to_be_bytes());
+        out[22..24].copy_from_slice(&self.data_shards.to_be_bytes());
+        out[24..26].copy_from_slice(&self.payload_len.to_be_bytes());
+        out[26..30].copy_from_slice(&self.payload_crc.to_be_bytes());
         out
     }
 
@@ -85,14 +95,18 @@ impl BurstPacketHeader {
         let stream_id = u64::from_be_bytes([
             bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15], bytes[16], bytes[17],
         ]);
-        let payload_len = u16::from_be_bytes([bytes[18], bytes[19]]);
-        let payload_crc = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
+        let original_len = u32::from_be_bytes([bytes[18], bytes[19], bytes[20], bytes[21]]);
+        let data_shards = u16::from_be_bytes([bytes[22], bytes[23]]);
+        let payload_len = u16::from_be_bytes([bytes[24], bytes[25]]);
+        let payload_crc = u32::from_be_bytes([bytes[26], bytes[27], bytes[28], bytes[29]]);
 
         Self::new(
             sequence,
             packet_count,
             stream_id,
             bytes[5],
+            original_len,
+            data_shards,
             payload_len,
             payload_crc,
         )
@@ -115,6 +129,8 @@ impl BurstPacket {
         packet_count: u16,
         stream_id: u64,
         flags: u8,
+        original_len: u32,
+        data_shards: u16,
         payload: Vec<u8>,
     ) -> Result<Self> {
         let payload_len = u16::try_from(payload.len())
@@ -125,6 +141,8 @@ impl BurstPacket {
             packet_count,
             stream_id,
             flags,
+            original_len,
+            data_shards,
             payload_len,
             payload_crc,
         )?;
@@ -163,7 +181,7 @@ mod tests {
 
     #[test]
     fn burst_packet_roundtrip_is_stable() {
-        let packet = BurstPacket::new(1, 3, 9, 0b0000_0011, b"hello".to_vec()).unwrap();
+        let packet = BurstPacket::new(1, 3, 9, 0b0000_0011, 5, 2, b"hello".to_vec()).unwrap();
         assert_eq!(BurstPacket::decode(&packet.encode()).unwrap(), packet);
     }
 
@@ -175,7 +193,7 @@ mod tests {
 
     #[test]
     fn burst_packet_decode_rejects_payload_crc_mismatch() {
-        let mut encoded = BurstPacket::new(0, 1, 42, 0, vec![1, 2, 3, 4])
+        let mut encoded = BurstPacket::new(0, 1, 42, 0, 4, 1, vec![1, 2, 3, 4])
             .unwrap()
             .encode();
         let last = encoded.last_mut().unwrap();
@@ -188,7 +206,7 @@ mod tests {
 
     #[test]
     fn burst_packet_header_rejects_invalid_sequence() {
-        let err = BurstPacketHeader::new(2, 2, 5, 0, 1, 7).unwrap_err();
+        let err = BurstPacketHeader::new(2, 2, 5, 0, 8, 2, 1, 7).unwrap_err();
         assert!(matches!(err, GlyphError::InvalidFrameIndex { .. }));
     }
 }
