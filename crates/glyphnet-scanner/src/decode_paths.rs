@@ -254,18 +254,33 @@ fn decode_shifted_no_quiet_luma(
                 }
                 if !fractional_header_precheck(
                     &integral,
-                    origin_x,
-                    origin_y,
-                    scale,
-                    scale,
+                    FractionalSampleParams {
+                        origin_x_modules: origin_x,
+                        origin_y_modules: origin_y,
+                        scale_x: scale,
+                        scale_y: scale,
+                        symbol_height: SYMBOL_HEIGHT,
+                        vertical_warp: 0.0,
+                    },
                     128,
-                    SYMBOL_HEIGHT,
-                    0.0,
                 ) {
                     continue;
                 }
                 if let Ok(decoded) = decode_fractional_with_params(
-                    &integral, origin_x, origin_y, scale, scale, 128, 0, false, 0.0,
+                    &integral,
+                    FractionalDecodeParams {
+                        sample: FractionalSampleParams {
+                            origin_x_modules: origin_x,
+                            origin_y_modules: origin_y,
+                            scale_x: scale,
+                            scale_y: scale,
+                            symbol_height: SYMBOL_HEIGHT,
+                            vertical_warp: 0.0,
+                        },
+                        threshold: 128,
+                        quiet_zone_modules: 0,
+                        allow_recovery: false,
+                    },
                 ) {
                     return Ok(decoded);
                 }
@@ -355,9 +370,9 @@ fn estimate_ribbon_totem_quad(binary: &GrayImage) -> Option<Quad> {
     }
     debug_log_decode(format!("perspective groups: {:?}", groups));
 
-    let left_zone_max = width / 4;
-    let right_zone_min = width.saturating_mul(3) / 4;
-    let min_separation = width.saturating_mul(2) / 3;
+    let left_zone_max = width.saturating_mul(2) / 5;
+    let right_zone_min = width.saturating_mul(3) / 5;
+    let min_separation = width / 2;
     let edge_left = groups
         .iter()
         .copied()
@@ -1046,13 +1061,15 @@ fn decode_fractional_ribbon_candidate_with_mode(
                                 for &threshold in &thresholds {
                                     if !fractional_header_precheck(
                                         &integral,
-                                        origin_x,
-                                        origin_y,
-                                        scale_x,
-                                        scale_y,
+                                        FractionalSampleParams {
+                                            origin_x_modules: origin_x,
+                                            origin_y_modules: origin_y,
+                                            scale_x,
+                                            scale_y,
+                                            symbol_height: SYMBOL_HEIGHT,
+                                            vertical_warp,
+                                        },
                                         threshold,
-                                        SYMBOL_HEIGHT,
-                                        vertical_warp,
                                     ) {
                                         continue;
                                     }
@@ -1062,14 +1079,19 @@ fn decode_fractional_ribbon_candidate_with_mode(
                                     }
                                     if let Ok(decoded) = decode_fractional_with_params(
                                         &integral,
-                                        origin_x,
-                                        origin_y,
-                                        scale_x,
-                                        scale_y,
-                                        threshold,
-                                        4,
-                                        !fast_mode,
-                                        vertical_warp,
+                                        FractionalDecodeParams {
+                                            sample: FractionalSampleParams {
+                                                origin_x_modules: origin_x,
+                                                origin_y_modules: origin_y,
+                                                scale_x,
+                                                scale_y,
+                                                symbol_height: SYMBOL_HEIGHT,
+                                                vertical_warp,
+                                            },
+                                            threshold,
+                                            quiet_zone_modules: 4,
+                                            allow_recovery: !fast_mode,
+                                        },
                                     ) {
                                         return Ok(decoded);
                                     }
@@ -1170,13 +1192,15 @@ fn decode_fractional_ribbon_no_quiet(
                                 for &threshold in &thresholds {
                                     if !fractional_header_precheck(
                                         &integral,
-                                        origin_x,
-                                        origin_y,
-                                        scale_x,
-                                        scale_y,
+                                        FractionalSampleParams {
+                                            origin_x_modules: origin_x,
+                                            origin_y_modules: origin_y,
+                                            scale_x,
+                                            scale_y,
+                                            symbol_height: SYMBOL_HEIGHT,
+                                            vertical_warp,
+                                        },
                                         threshold,
-                                        SYMBOL_HEIGHT,
-                                        vertical_warp,
                                     ) {
                                         continue;
                                     }
@@ -1186,14 +1210,19 @@ fn decode_fractional_ribbon_no_quiet(
                                     }
                                     if let Ok(decoded) = decode_fractional_with_params(
                                         &integral,
-                                        origin_x,
-                                        origin_y,
-                                        scale_x,
-                                        scale_y,
-                                        threshold,
-                                        0,
-                                        !fast_mode,
-                                        vertical_warp,
+                                        FractionalDecodeParams {
+                                            sample: FractionalSampleParams {
+                                                origin_x_modules: origin_x,
+                                                origin_y_modules: origin_y,
+                                                scale_x,
+                                                scale_y,
+                                                symbol_height: SYMBOL_HEIGHT,
+                                                vertical_warp,
+                                            },
+                                            threshold,
+                                            quiet_zone_modules: 0,
+                                            allow_recovery: !fast_mode,
+                                        },
                                     ) {
                                         return Ok(decoded);
                                     }
@@ -1250,15 +1279,28 @@ fn module_shifts(radius: i32) -> impl Iterator<Item = f32> {
     (-radius * 2..=radius * 2).map(|value| value as f32 * 0.5)
 }
 
-fn fractional_header_precheck(
-    integral: &IntegralGray,
+#[derive(Clone, Copy)]
+struct FractionalSampleParams {
     origin_x_modules: f32,
     origin_y_modules: f32,
     scale_x: f32,
     scale_y: f32,
-    threshold: u8,
     symbol_height: u16,
     vertical_warp: f32,
+}
+
+#[derive(Clone, Copy)]
+struct FractionalDecodeParams {
+    sample: FractionalSampleParams,
+    threshold: u8,
+    quiet_zone_modules: u32,
+    allow_recovery: bool,
+}
+
+fn fractional_header_precheck(
+    integral: &IntegralGray,
+    sample: FractionalSampleParams,
+    threshold: u8,
 ) -> bool {
     const SYMBOL_WIDTH: u16 = 96;
     const SYMBOL_HEIGHT: u16 = 36;
@@ -1275,17 +1317,7 @@ fn fractional_header_precheck(
             ) {
                 continue;
             }
-            let avg = fractional_module_luma_projected(
-                integral,
-                origin_x_modules,
-                origin_y_modules,
-                x,
-                y,
-                scale_x,
-                scale_y,
-                symbol_height,
-                vertical_warp,
-            );
+            let avg = fractional_module_luma_projected(integral, x, y, sample);
             bits.push(avg < threshold);
             if bits.len() == HEADER_LEN * 8 {
                 break 'rows;
@@ -1319,14 +1351,7 @@ fn fractional_grid_fits(
 
 fn decode_fractional_with_params(
     integral: &IntegralGray,
-    origin_x_modules: f32,
-    origin_y_modules: f32,
-    scale_x: f32,
-    scale_y: f32,
-    threshold: u8,
-    quiet_zone_modules: u32,
-    allow_recovery: bool,
-    vertical_warp: f32,
+    params: FractionalDecodeParams,
 ) -> std::result::Result<AutoDecodedSymbol, DecodeError> {
     const SYMBOL_WIDTH: u16 = 96;
     const SYMBOL_HEIGHT: u16 = 36;
@@ -1345,32 +1370,22 @@ fn decode_fractional_with_params(
                 matrix.set(x, y, cell)?;
                 continue;
             }
-            let avg = fractional_module_luma_projected(
-                integral,
-                origin_x_modules,
-                origin_y_modules,
-                x,
-                y,
-                scale_x,
-                scale_y,
-                SYMBOL_HEIGHT,
-                vertical_warp,
-            );
-            matrix.set(x, y, Cell::Data(avg < threshold))?;
+            let avg = fractional_module_luma_projected(integral, x, y, params.sample);
+            matrix.set(x, y, Cell::Data(avg < params.threshold))?;
         }
     }
     debug_dump_module_grid(
-        &format!("fractional_modules_warp_{vertical_warp:.2}"),
+        &format!("fractional_modules_warp_{:.2}", params.sample.vertical_warp),
         &matrix,
     );
 
     let info = AutoDecodeInfo {
-        module_px: scale_x.round().max(1.0) as u32,
-        quiet_zone_modules,
-        threshold,
+        module_px: params.sample.scale_x.round().max(1.0) as u32,
+        quiet_zone_modules: params.quiet_zone_modules,
+        threshold: params.threshold,
         layout: LayoutFamily::RibbonWeave,
     };
-    if !allow_recovery {
+    if !params.allow_recovery {
         return auto_decoded_from_crc_valid_matrix(matrix, info);
     }
     let decoded = decode_matrix(&matrix)?;
@@ -1526,25 +1541,20 @@ fn fractional_module_luma(
 
 fn fractional_module_luma_projected(
     integral: &IntegralGray,
-    origin_x_modules: f32,
-    origin_y_modules: f32,
     module_x: u16,
     module_y: u16,
-    scale_x: f32,
-    scale_y: f32,
-    symbol_height: u16,
-    vertical_warp: f32,
+    sample: FractionalSampleParams,
 ) -> u8 {
     let local_y = f32::from(module_y);
-    let height = f32::from(symbol_height).max(1.0);
+    let height = f32::from(sample.symbol_height).max(1.0);
     let t = local_y / height;
-    let warped_y = local_y + vertical_warp * t * (1.0 - t) * height;
+    let warped_y = local_y + sample.vertical_warp * t * (1.0 - t) * height;
     fractional_module_luma(
         integral,
-        origin_x_modules + f32::from(module_x),
-        origin_y_modules + warped_y,
-        scale_x,
-        scale_y,
+        sample.origin_x_modules + f32::from(module_x),
+        sample.origin_y_modules + warped_y,
+        sample.scale_x,
+        sample.scale_y,
     )
 }
 
