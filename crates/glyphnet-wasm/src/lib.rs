@@ -968,6 +968,25 @@ mod tests {
     }
 
     #[test]
+    fn native_scan_verification_reports_unsigned_reason() {
+        let encoded = Encoder::default().encode_static(b"unsigned").unwrap();
+        let image = glyphnet_render::RasterRenderer::default()
+            .render(&encoded.matrix)
+            .unwrap();
+        let verify_key = [0x11; 32];
+        let json = scan_rgba_json_with_verification(
+            image.as_raw(),
+            image.width(),
+            image.height(),
+            TransmissionMode::Print,
+            &verify_key,
+            1,
+        )
+        .unwrap();
+        assert!(json.contains(r#""reason": "unsigned_payload""#));
+    }
+
+    #[test]
     fn native_detached_ed25519_signature_roundtrip() {
         let signing_key = [0xA5u8; 32];
         let signature = auth::sign_detached_ed25519_json(b"ed25519-ok", &signing_key, 21).unwrap();
@@ -982,5 +1001,14 @@ mod tests {
         let result =
             auth::verify_detached_ed25519_json(b"ed25519-ok", &signature, &keyring).unwrap();
         assert!(result.contains(r#""verified": true"#));
+    }
+
+    #[test]
+    fn native_detached_auth_reports_unknown_key_reason() {
+        let key = [0x33; 32];
+        let sig = auth::sign_detached_auth_json(b"detached-unknown", &key, 9).unwrap();
+        let keyring = r#"[{"key_id":1,"key_hex":"3333333333333333333333333333333333333333333333333333333333333333"}]"#;
+        let result = auth::verify_detached_auth_json(b"detached-unknown", &sig, keyring).unwrap();
+        assert!(result.contains(r#""reason": "unknown_key_id""#));
     }
 }
