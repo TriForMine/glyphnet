@@ -22,7 +22,12 @@ fountain = []
 raptorq = []
 
 [dev-dependencies]
+criterion.workspace = true
 proptest.workspace = true
+
+[[bench]]
+name = "ecc"
+harness = false
 
 [lints]
 workspace = true

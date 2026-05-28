@@ -465,4 +465,45 @@ mod tests {
         assert_eq!(decoded.recovery.method, RecoveryMethod::ReedSolomonPair);
         assert!(decoded.recovery.recovered);
     }
+
+    #[cfg(feature = "ldpc")]
+    #[test]
+    fn decode_matrix_recovers_screen_ldpc_parity_tail_corruption() {
+        let encoded = Encoder::new(EncoderConfig {
+            mode: glyphnet_core::TransmissionMode::Screen,
+            ..EncoderConfig::default()
+        })
+        .encode_static(b"recover-screen-ldpc-tail")
+        .unwrap();
+        let mut matrix = encoded.matrix.clone();
+        let mut bytes = encoded.codewords.clone();
+        let corrupt_index = bytes.len() - 1;
+        bytes[corrupt_index] ^= 0x01;
+        let bits = bitstream::bytes_to_bits(&bytes);
+        matrix.write_data_bits(bits);
+
+        let decoded = decode_matrix(&matrix).unwrap();
+        assert_eq!(decoded.frame.payload, b"recover-screen-ldpc-tail");
+        assert_eq!(decoded.recovery.method, RecoveryMethod::ParityTailRebuild);
+        assert!(decoded.recovery.recovered);
+    }
+
+    #[cfg(feature = "ldpc")]
+    #[test]
+    fn decode_matrix_rejects_unrecoverable_screen_ldpc_single_byte_corruption() {
+        let encoded = Encoder::new(EncoderConfig {
+            mode: glyphnet_core::TransmissionMode::Screen,
+            ..EncoderConfig::default()
+        })
+        .encode_static(b"recover-screen-ldpc-byte")
+        .unwrap();
+        let mut matrix = encoded.matrix.clone();
+        let mut bits = bitstream::bytes_to_bits(&encoded.codewords);
+        let bit_index = HEADER_LEN * 8 + 15;
+        bits[bit_index] = !bits[bit_index];
+        matrix.write_data_bits(bits);
+
+        let err = decode_matrix_with_suspects(&matrix, &[bit_index / 8]).unwrap_err();
+        assert!(matches!(err, DecodeError::EccMismatch));
+    }
 }

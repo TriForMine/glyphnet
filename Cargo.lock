@@ -675,6 +675,7 @@ dependencies = [
 name = "glyphnet-ecc"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "glyphnet-core",
  "proptest",
  "reed-solomon-erasure",

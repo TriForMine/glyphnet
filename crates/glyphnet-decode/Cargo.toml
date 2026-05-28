@@ -20,6 +20,7 @@ default = ["raster"]
 raster = []
 simd = []
 gpu = []
+ldpc = ["glyphnet-ecc/ldpc"]
 
 [dev-dependencies]
 glyphnet-encode = { path = "../glyphnet-encode", version = "0.1.0" }
