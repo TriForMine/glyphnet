@@ -188,12 +188,14 @@ jobs:
             }
 
   burst-reliability:
-    name: burst reliability (non-gating)
+    name: burst reliability
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: write
       issues: write
+    env:
+      BURST_RELIABILITY_NON_GATING: "0.30,0.40"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -233,13 +235,13 @@ jobs:
             const marker = '<!-- burst-reliability-comment -->';
             const rows = keys.length === 0
               ? [
-                  '| Drop rate | PR success | Base success | Delta | PR median frames | Base median frames |',
-                  '|---:|---:|---:|---:|---:|---:|',
-                  '| - | - | - | - | - | - |'
+                  '| Drop rate | Gating | PR success | Base success | Delta | PR median frames | Base median frames |',
+                  '|---:|:---:|---:|---:|---:|---:|---:|',
+                  '| - | - | - | - | - | - | - |'
                 ]
               : [
-                  '| Drop rate | PR success | Base success | Delta | PR median frames | Base median frames |',
-                  '|---:|---:|---:|---:|---:|---:|',
+                  '| Drop rate | Gating | PR success | Base success | Delta | PR median frames | Base median frames |',
+                  '|---:|:---:|---:|---:|---:|---:|---:|',
                   ...keys.map(k => {
                     const p = prMap.get(k);
                     const b = baseMap.get(k);
@@ -248,16 +250,24 @@ jobs:
                     const delta = (ps != null && bs != null) ? (ps - bs) : null;
                     const pFrames = p?.median_frames ?? '-';
                     const bFrames = b?.median_frames ?? '-';
-                    return `| ${(Number(k) * 100).toFixed(0)}% | ${ps == null ? '-' : ps.toFixed(1) + '%'} | ${bs == null ? '-' : bs.toFixed(1) + '%'} | ${delta == null ? '-' : delta.toFixed(1) + 'pp'} | ${pFrames} | ${bFrames} |`;
+                    const gating = p ? (p.gating !== false ? 'Yes' : 'No') : (b && b.gating !== false ? 'Yes' : 'No');
+                    return `| ${(Number(k) * 100).toFixed(0)}% | ${gating} | ${ps == null ? '-' : ps.toFixed(1) + '%'} | ${bs == null ? '-' : bs.toFixed(1) + '%'} | ${delta == null ? '-' : delta.toFixed(1) + 'pp'} | ${pFrames} | ${bFrames} |`;
                   })
                 ];
+            const gatingCases = (pr?.cases || []).filter(c => c.gating !== false);
+            const passCount = gatingCases.filter(c => c.status === 'pass').length;
+            const failCount = gatingCases.filter(c => c.status === 'fail').length;
             const body = [
               marker,
               '## Burst reliability (loss sweep)',
               '',
               pr
-                ? `${pr.status === 'pass' ? '✅' : '⚠️'} **PR status:** ${pr.status.toUpperCase()} (non-gating)`
+                ? `${pr.status === 'pass' ? '✅' : '⚠️'} **PR gate status:** ${pr.status.toUpperCase()}`
                 : '⚠️ **PR status:** unavailable',
+              pr
+                ? `- **Gating rows:** ${passCount} pass / ${failCount} fail`
+                : '- **Gating rows:** unavailable',
+              '- **Non-gating rows:** 30% and 40% loss (report-only)',
               '',
               ...rows,
               '',

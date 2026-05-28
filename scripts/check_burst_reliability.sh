@@ -9,6 +9,8 @@ export BURST_RELIABILITY_ENFORCE_EXIT="${ENFORCE_EXIT}"
 
 OUTPUT_JSON="${BURST_RELIABILITY_OUTPUT_JSON:-target/burst-reliability/pr.json}"
 mkdir -p "$(dirname "${OUTPUT_JSON}")"
+NON_GATING_RAW="${BURST_RELIABILITY_NON_GATING:-0.30,0.40}"
+export BURST_RELIABILITY_NON_GATING="${NON_GATING_RAW}"
 
 LOG_FILE="$(mktemp)"
 echo "[burst-reliability] running scanner loss-sweep test"
@@ -52,15 +54,24 @@ targets = {
     0.30: 0.65,
     0.40: 0.45,
 }
+non_gating = {
+    round(float(item.strip()), 2)
+    for item in os.environ.get("BURST_RELIABILITY_NON_GATING", "").split(",")
+    if item.strip()
+}
 status = "pass"
 for case in cases:
-    threshold = targets.get(round(case["drop_rate"], 2), 0.0)
+    drop_key = round(case["drop_rate"], 2)
+    threshold = targets.get(drop_key, 0.0)
+    gating = drop_key not in non_gating
+    case["gating"] = gating
     case["target_success_rate"] = threshold
     case["status"] = "pass" if case["success_rate"] >= threshold else "fail"
+    gate_label = "gating" if gating else "non-gating"
     print(
-        f"[burst-reliability] drop_rate={case['drop_rate']:.2f} success={case['success_rate']:.3f} target={threshold:.3f} ({case['status']})"
+        f"[burst-reliability] drop_rate={case['drop_rate']:.2f} success={case['success_rate']:.3f} target={threshold:.3f} ({case['status']}, {gate_label})"
     )
-    if case["status"] == "fail":
+    if case["status"] == "fail" and gating:
         status = "fail"
 
 payload = {
