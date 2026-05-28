@@ -2,6 +2,7 @@
 
 use glyphnet_core::{
     Cell, Frame, GlyphError, LayoutFamily, Result as CoreResult, SymbolMatrix, layout,
+    open_authenticated_payload,
 };
 use glyphnet_ecc::RecoveryTelemetry;
 use image::{DynamicImage, GrayImage};
@@ -336,6 +337,15 @@ pub fn decode_wire_prefix(bytes: &[u8]) -> CoreResult<Frame> {
     Frame::decode(bytes)
 }
 
+/// Verify and unwrap an authenticated payload envelope.
+pub fn decode_authenticated_payload<F>(payload: &[u8], key_lookup: F) -> Result<Vec<u8>>
+where
+    F: FnMut(u32) -> Option<[u8; 32]>,
+{
+    let (_, raw) = open_authenticated_payload(payload, key_lookup)?;
+    Ok(raw)
+}
+
 #[cfg(test)]
 mod tests {
     use glyphnet_core::{HEADER_LEN, ProfileId, bitstream};
@@ -464,6 +474,23 @@ mod tests {
         assert_eq!(decoded.frame.payload, b"recover-print-rs-two");
         assert_eq!(decoded.recovery.method, RecoveryMethod::ReedSolomonPair);
         assert!(decoded.recovery.recovered);
+    }
+
+    #[test]
+    fn authenticated_payload_roundtrips_with_key_lookup() {
+        let key = [0x11u8; 32];
+        let encoded = Encoder::default()
+            .encode_static_authenticated(b"auth-payload", &key, 77)
+            .unwrap();
+        let image = RasterRenderer::default().render(&encoded.matrix).unwrap();
+        let decoded = RasterDecoder::default()
+            .decode(&DynamicImage::ImageRgba8(image))
+            .unwrap();
+        let payload = decode_authenticated_payload(&decoded.frame.payload, |id| {
+            if id == 77 { Some(key) } else { None }
+        })
+        .unwrap();
+        assert_eq!(payload, b"auth-payload");
     }
 
     #[cfg(feature = "ldpc")]

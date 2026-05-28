@@ -47,4 +47,13 @@ pub enum GlyphError {
     /// A caller provided an invalid argument.
     #[error("invalid argument: {0}")]
     InvalidArgument(&'static str),
+    /// Authenticated payload envelope magic/version did not match.
+    #[error("invalid authenticity envelope")]
+    InvalidAuthenticityEnvelope,
+    /// No verification key was available for the envelope key id.
+    #[error("unknown authenticity key id {0}")]
+    UnknownAuthenticityKey(u32),
+    /// Authenticity tag verification failed.
+    #[error("authenticity tag mismatch")]
+    AuthenticityMismatch,
 }
