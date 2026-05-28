@@ -134,7 +134,8 @@ pub extern "system" fn Java_expo_modules_glyphnetscanner_GlyphNetNativeBridge_sc
     let verify_key_id = parsed.verify_key_id;
 
     let image = if let Some(image_base64) = parsed.image_base64 {
-        let bytes = match base64::engine::general_purpose::STANDARD.decode(image_base64.as_bytes()) {
+        let bytes = match base64::engine::general_purpose::STANDARD.decode(image_base64.as_bytes())
+        {
             Ok(v) => v,
             Err(error) => {
                 let err = error_json(
