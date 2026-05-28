@@ -12,6 +12,7 @@ use glyphnet_decode::{RasterDecoder, decode_authenticated_payload};
 use glyphnet_encode::{Encoder, EncoderConfig};
 use glyphnet_render::{RasterRenderer, RenderOptions, SvgRenderer};
 use glyphnet_scanner::{CameraFrame, Scanner, ScannerConfig, scan_still};
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 #[derive(Debug, Parser)]
 #[command(name = "glyphnet")]
@@ -219,6 +220,31 @@ enum Command {
     KeysetValidate {
         /// Keyset JSON path.
         path: PathBuf,
+        /// Optional trusted root public key (hex) to enforce keyset signature verification.
+        #[arg(long)]
+        root_pubkey_hex: Option<String>,
+    },
+    /// Sign a keyset JSON using detached Ed25519 signature metadata.
+    KeysetSignEd25519 {
+        /// Input keyset JSON path.
+        input: PathBuf,
+        /// Output keyset JSON path.
+        #[arg(short, long)]
+        output: PathBuf,
+        /// 32-byte Ed25519 signing key in hex (64 hex chars).
+        #[arg(long)]
+        signing_key_hex: String,
+        /// Signer identity label.
+        #[arg(long, default_value = "root")]
+        signed_by: String,
+    },
+    /// Verify a signed keyset JSON with trusted root public key.
+    KeysetVerify {
+        /// Keyset JSON path.
+        path: PathBuf,
+        /// 32-byte trusted root Ed25519 public key in hex (64 hex chars).
+        #[arg(long)]
+        root_pubkey_hex: String,
     },
 }
 
@@ -410,7 +436,20 @@ fn main() -> Result<()> {
             key_id,
         } => auth_verify_ed25519(data.as_bytes(), signature, &public_key_hex, key_id),
         Command::KeysetInspect { path } => keyset_inspect(path),
-        Command::KeysetValidate { path } => keyset_validate(path),
+        Command::KeysetValidate {
+            path,
+            root_pubkey_hex,
+        } => keyset_validate(path, root_pubkey_hex.as_deref()),
+        Command::KeysetSignEd25519 {
+            input,
+            output,
+            signing_key_hex,
+            signed_by,
+        } => keyset_sign_ed25519(input, output, &signing_key_hex, &signed_by),
+        Command::KeysetVerify {
+            path,
+            root_pubkey_hex,
+        } => keyset_verify(path, &root_pubkey_hex),
     }
 }
 
@@ -870,12 +909,21 @@ fn validate_keyset_json(json: &serde_json::Value) -> Result<()> {
     json.get("issuer")
         .and_then(serde_json::Value::as_str)
         .context("keyset missing string issuer")?;
-    json.get("created_at")
+    let created_at = json
+        .get("created_at")
         .and_then(serde_json::Value::as_str)
         .context("keyset missing string created_at")?;
-    json.get("expires_at")
+    let expires_at = json
+        .get("expires_at")
         .and_then(serde_json::Value::as_str)
         .context("keyset missing string expires_at")?;
+    let created = OffsetDateTime::parse(created_at, &Rfc3339)
+        .context("keyset created_at must be RFC3339 UTC")?;
+    let expires = OffsetDateTime::parse(expires_at, &Rfc3339)
+        .context("keyset expires_at must be RFC3339 UTC")?;
+    if expires <= created {
+        bail!("keyset expires_at must be after created_at");
+    }
     let keys = json
         .get("keys")
         .and_then(serde_json::Value::as_array)
@@ -909,6 +957,77 @@ fn validate_keyset_json(json: &serde_json::Value) -> Result<()> {
             _ => bail!("unsupported key algorithm {alg}"),
         }
     }
+    Ok(())
+}
+
+fn keyset_payload_for_signature(json: &serde_json::Value) -> Result<Vec<u8>> {
+    let version = json
+        .get("version")
+        .cloned()
+        .context("keyset missing version")?;
+    let issuer = json
+        .get("issuer")
+        .cloned()
+        .context("keyset missing issuer")?;
+    let created_at = json
+        .get("created_at")
+        .cloned()
+        .context("keyset missing created_at")?;
+    let expires_at = json
+        .get("expires_at")
+        .cloned()
+        .context("keyset missing expires_at")?;
+    let keys = json.get("keys").cloned().context("keyset missing keys")?;
+    serde_json::to_vec(&serde_json::json!({
+        "version": version,
+        "issuer": issuer,
+        "created_at": created_at,
+        "expires_at": expires_at,
+        "keys": keys
+    }))
+    .context("failed to serialize keyset payload for signature")
+}
+
+fn parse_signature_hex(signature_hex: &str) -> Result<[u8; 64]> {
+    if signature_hex.len() != 128 {
+        bail!("keyset signature_hex must be 128 hex chars");
+    }
+    let mut signature = [0u8; 64];
+    for (idx, slot) in signature.iter_mut().enumerate() {
+        let start = idx * 2;
+        let end = start + 2;
+        *slot = u8::from_str_radix(&signature_hex[start..end], 16)
+            .with_context(|| format!("invalid signature hex at bytes {}..{}", start, end))?;
+    }
+    Ok(signature)
+}
+
+fn verify_keyset_signature(json: &serde_json::Value, root_pubkey_hex: &str) -> Result<()> {
+    let sig = json
+        .get("signature")
+        .and_then(serde_json::Value::as_object)
+        .context("keyset missing signature object")?;
+    let signature_alg = sig
+        .get("signature_alg")
+        .and_then(serde_json::Value::as_str)
+        .context("keyset signature missing signature_alg")?;
+    if signature_alg != "ed25519" {
+        bail!("unsupported keyset signature_alg {signature_alg}");
+    }
+    let signature_hex = sig
+        .get("signature_hex")
+        .and_then(serde_json::Value::as_str)
+        .context("keyset signature missing signature_hex")?;
+    let signature = parse_signature_hex(signature_hex)?;
+    let public_key = parse_public_key_hex(root_pubkey_hex)?;
+    let payload = keyset_payload_for_signature(json)?;
+    let detached = DetachedEd25519Signature {
+        key_id: 0,
+        payload_len: payload.len() as u32,
+        signature,
+    };
+    verify_detached_payload_ed25519(&payload, &detached, |_id| Some(public_key))
+        .map_err(anyhow::Error::from)?;
     Ok(())
 }
 
@@ -1301,9 +1420,67 @@ fn keyset_inspect(path: PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn keyset_validate(path: PathBuf) -> Result<()> {
+fn keyset_validate(path: PathBuf, root_pubkey_hex: Option<&str>) -> Result<()> {
     let json = load_keyset_json(&path)?;
     validate_keyset_json(&json)?;
+    let now = OffsetDateTime::now_utc();
+    let created = OffsetDateTime::parse(
+        json.get("created_at")
+            .and_then(serde_json::Value::as_str)
+            .context("keyset missing string created_at")?,
+        &Rfc3339,
+    )
+    .context("keyset created_at must be RFC3339 UTC")?;
+    let expires = OffsetDateTime::parse(
+        json.get("expires_at")
+            .and_then(serde_json::Value::as_str)
+            .context("keyset missing string expires_at")?,
+        &Rfc3339,
+    )
+    .context("keyset expires_at must be RFC3339 UTC")?;
+    if now < created {
+        bail!("keyset not yet valid (created_at is in the future)");
+    }
+    if now > expires {
+        bail!("keyset expired");
+    }
+    if let Some(root_pubkey_hex) = root_pubkey_hex {
+        verify_keyset_signature(&json, root_pubkey_hex)?;
+    }
     println!("{}", serde_json::json!({ "ok": true, "valid": true }));
+    Ok(())
+}
+
+fn keyset_sign_ed25519(
+    input: PathBuf,
+    output: PathBuf,
+    signing_key_hex: &str,
+    signed_by: &str,
+) -> Result<()> {
+    let mut json = load_keyset_json(&input)?;
+    validate_keyset_json(&json)?;
+    let payload = keyset_payload_for_signature(&json)?;
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&parse_auth_key_hex(signing_key_hex)?);
+    let signature = sign_detached_payload_ed25519(&payload, &signing_key, 0);
+    let signature_hex = signature
+        .signature
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    json["signature"] = serde_json::json!({
+        "signature_alg": "ed25519",
+        "signed_by": signed_by,
+        "signature_hex": signature_hex
+    });
+    fs::write(&output, serde_json::to_string_pretty(&json)?)
+        .with_context(|| format!("failed to write signed keyset {}", output.display()))?;
+    Ok(())
+}
+
+fn keyset_verify(path: PathBuf, root_pubkey_hex: &str) -> Result<()> {
+    let json = load_keyset_json(&path)?;
+    validate_keyset_json(&json)?;
+    verify_keyset_signature(&json, root_pubkey_hex)?;
+    println!("{}", serde_json::json!({ "ok": true, "verified": true }));
     Ok(())
 }

@@ -24,6 +24,7 @@ glyphnet-scanner = { path = "../glyphnet-scanner", version = "0.1.0" }
 image.workspace = true
 ed25519-dalek.workspace = true
 serde_json.workspace = true
+time.workspace = true
 
 [lints]
 workspace = true
