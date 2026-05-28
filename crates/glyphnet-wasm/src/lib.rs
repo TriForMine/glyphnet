@@ -371,20 +371,55 @@ fn parse_detached_signature_json(signature_json: &str) -> Result<DetachedAuthSig
 fn parse_keyring_json(keyring_json: &str) -> Result<HashMap<u32, [u8; 32]>, String> {
     let json: serde_json::Value =
         serde_json::from_str(keyring_json).map_err(|error| error.to_string())?;
-    let arr = json
-        .as_array()
-        .ok_or_else(|| "keyring must be a JSON array".to_string())?;
     let mut out = HashMap::new();
-    for item in arr {
+    if let Some(arr) = json.as_array() {
+        for item in arr {
+            let key_id = item
+                .get("key_id")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| "keyring item missing numeric key_id".to_string())?
+                as u32;
+            let key_hex = item
+                .get("key_hex")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "keyring item missing string key_hex".to_string())?;
+            out.insert(key_id, parse_auth_key_hex(key_hex)?);
+        }
+        return Ok(out);
+    }
+
+    let version = json
+        .get("version")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| "keyring missing numeric version".to_string())?;
+    if version != 1 {
+        return Err(format!("unsupported keyring version {version}"));
+    }
+    let keys = json
+        .get("keys")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "keyring missing keys array".to_string())?;
+    for item in keys {
         let key_id = item
             .get("key_id")
             .and_then(serde_json::Value::as_u64)
             .ok_or_else(|| "keyring item missing numeric key_id".to_string())?
             as u32;
-        let key_hex = item
-            .get("key_hex")
+        let alg = item
+            .get("alg")
             .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| "keyring item missing string key_hex".to_string())?;
+            .ok_or_else(|| "keyring item missing string alg".to_string())?;
+        let key_hex = match alg {
+            "mac-blake3" => item
+                .get("key_hex")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "mac-blake3 key missing string key_hex".to_string())?,
+            "ed25519" => item
+                .get("public_key_hex")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "ed25519 key missing string public_key_hex".to_string())?,
+            _ => return Err(format!("unsupported key algorithm {alg}")),
+        };
         out.insert(key_id, parse_auth_key_hex(key_hex)?);
     }
     Ok(out)

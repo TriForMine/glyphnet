@@ -571,7 +571,7 @@ fn decode(
 ) -> Result<()> {
     let image =
         image::open(&input).with_context(|| format!("failed to open image {}", input.display()))?;
-    let detached_signature = load_detached_signature(detached_auth_file.as_ref())?;
+    let detached_signature = load_detached_verification_input(detached_auth_file.as_ref())?;
     if auto {
         let auto_decoded = RasterDecoder::default()
             .decode_auto_with_info(&image)
@@ -626,7 +626,7 @@ fn scan(
 ) -> Result<()> {
     let image =
         image::open(&input).with_context(|| format!("failed to open image {}", input.display()))?;
-    let detached_signature = load_detached_signature(detached_auth_file.as_ref())?;
+    let detached_signature = load_detached_verification_input(detached_auth_file.as_ref())?;
     let scanned = scan_still(&image, mode).context("failed to scan image")?;
     let crop = scanned.crop.map(|region| {
         serde_json::json!({
@@ -711,72 +711,143 @@ fn verify_auth_payload(
     verify_key_hex: Option<&str>,
     verify_key_id: u32,
     verify_key_file: Option<&PathBuf>,
-    detached_signature: Option<&DetachedAuthSignature>,
+    detached_signature: Option<&DetachedVerificationInput>,
 ) -> Result<Option<(bool, u32, Option<String>)>> {
+    let keyring = verification_keyring(verify_key_hex, verify_key_id, verify_key_file)?;
     if let Some(signature) = detached_signature {
-        let keyring = verification_keyring(verify_key_hex, verify_key_id, verify_key_file)?;
-        match verify_detached_payload(payload, signature, |id| keyring.get(&id).copied()) {
-            Ok(_) => return Ok(Some((true, signature.key_id, None))),
-            Err(error) => return Ok(Some((false, signature.key_id, Some(error.to_string())))),
+        match signature {
+            DetachedVerificationInput::Mac(signature) => {
+                match verify_detached_payload(payload, signature, |id| {
+                    keyring.mac_keys.get(&id).copied()
+                }) {
+                    Ok(_) => return Ok(Some((true, signature.key_id, None))),
+                    Err(error) => {
+                        return Ok(Some((false, signature.key_id, Some(error.to_string()))));
+                    }
+                }
+            }
+            DetachedVerificationInput::Ed25519(signature) => {
+                match verify_detached_payload_ed25519(payload, signature, |id| {
+                    keyring.ed25519_public_keys.get(&id).copied()
+                }) {
+                    Ok(_) => return Ok(Some((true, signature.key_id, None))),
+                    Err(error) => {
+                        return Ok(Some((false, signature.key_id, Some(error.to_string()))));
+                    }
+                }
+            }
         }
     }
     if open_authenticated_payload(payload, |_id| None).is_err() {
         return Ok(None);
     }
-    let keyring = verification_keyring(verify_key_hex, verify_key_id, verify_key_file)?;
-    if keyring.is_empty() {
+    if keyring.mac_keys.is_empty() {
         return Ok(Some((
             false,
             verify_key_id,
             Some("missing verification key".to_string()),
         )));
     }
-    match decode_authenticated_payload(payload, |id| keyring.get(&id).copied()) {
+    match decode_authenticated_payload(payload, |id| keyring.mac_keys.get(&id).copied()) {
         Ok(_) => Ok(Some((true, verify_key_id, None))),
         Err(error) => Ok(Some((false, verify_key_id, Some(error.to_string())))),
     }
+}
+
+#[derive(Default)]
+struct VerificationKeyring {
+    mac_keys: HashMap<u32, [u8; 32]>,
+    ed25519_public_keys: HashMap<u32, [u8; 32]>,
 }
 
 fn verification_keyring(
     verify_key_hex: Option<&str>,
     verify_key_id: u32,
     verify_key_file: Option<&PathBuf>,
-) -> Result<HashMap<u32, [u8; 32]>> {
-    let mut keys = HashMap::new();
+) -> Result<VerificationKeyring> {
+    let mut keys = VerificationKeyring::default();
     if let Some(path) = verify_key_file {
         let loaded = load_verify_keys(path)?;
-        keys.extend(loaded);
+        keys.mac_keys.extend(loaded.mac_keys);
+        keys.ed25519_public_keys.extend(loaded.ed25519_public_keys);
     }
     if let Some(hex) = verify_key_hex {
-        keys.insert(verify_key_id, parse_auth_key_hex(hex)?);
+        keys.mac_keys
+            .insert(verify_key_id, parse_auth_key_hex(hex)?);
     }
     Ok(keys)
 }
 
-fn load_verify_keys(path: &PathBuf) -> Result<HashMap<u32, [u8; 32]>> {
+fn load_verify_keys(path: &PathBuf) -> Result<VerificationKeyring> {
     let content = fs::read_to_string(path)
         .with_context(|| format!("failed to read verify key file {}", path.display()))?;
     let json: serde_json::Value = serde_json::from_str(&content)
         .with_context(|| format!("invalid JSON in verify key file {}", path.display()))?;
-    let arr = json
-        .as_array()
-        .context("verify key file must be a JSON array")?;
-    let mut out = HashMap::new();
-    for item in arr {
+    let mut out = VerificationKeyring::default();
+    if let Some(arr) = json.as_array() {
+        for item in arr {
+            let key_id = item
+                .get("key_id")
+                .and_then(serde_json::Value::as_u64)
+                .context("verify key item missing numeric key_id")? as u32;
+            let key_hex = item
+                .get("key_hex")
+                .and_then(serde_json::Value::as_str)
+                .context("verify key item missing string key_hex")?;
+            out.mac_keys.insert(key_id, parse_auth_key_hex(key_hex)?);
+        }
+        return Ok(out);
+    }
+    let version = json
+        .get("version")
+        .and_then(serde_json::Value::as_u64)
+        .context("verify key file missing numeric version")?;
+    if version != 1 {
+        bail!("unsupported verify key file version {version}");
+    }
+    let keys = json
+        .get("keys")
+        .and_then(serde_json::Value::as_array)
+        .context("verify key file missing keys array")?;
+    for item in keys {
         let key_id = item
             .get("key_id")
             .and_then(serde_json::Value::as_u64)
             .context("verify key item missing numeric key_id")? as u32;
-        let key_hex = item
-            .get("key_hex")
+        let alg = item
+            .get("alg")
             .and_then(serde_json::Value::as_str)
-            .context("verify key item missing string key_hex")?;
-        out.insert(key_id, parse_auth_key_hex(key_hex)?);
+            .context("verify key item missing string alg")?;
+        match alg {
+            "mac-blake3" => {
+                let key_hex = item
+                    .get("key_hex")
+                    .and_then(serde_json::Value::as_str)
+                    .context("mac-blake3 key missing string key_hex")?;
+                out.mac_keys.insert(key_id, parse_auth_key_hex(key_hex)?);
+            }
+            "ed25519" => {
+                let key_hex = item
+                    .get("public_key_hex")
+                    .and_then(serde_json::Value::as_str)
+                    .context("ed25519 key missing string public_key_hex")?;
+                out.ed25519_public_keys
+                    .insert(key_id, parse_public_key_hex(key_hex)?);
+            }
+            _ => bail!("unsupported key algorithm {alg}"),
+        }
     }
     Ok(out)
 }
 
-fn load_detached_signature(path: Option<&PathBuf>) -> Result<Option<DetachedAuthSignature>> {
+enum DetachedVerificationInput {
+    Mac(DetachedAuthSignature),
+    Ed25519(DetachedEd25519Signature),
+}
+
+fn load_detached_verification_input(
+    path: Option<&PathBuf>,
+) -> Result<Option<DetachedVerificationInput>> {
     let Some(path) = path else {
         return Ok(None);
     };
@@ -784,33 +855,42 @@ fn load_detached_signature(path: Option<&PathBuf>) -> Result<Option<DetachedAuth
         .with_context(|| format!("failed to read detached signature file {}", path.display()))?;
     let json: serde_json::Value = serde_json::from_str(&content)
         .with_context(|| format!("invalid JSON in detached signature file {}", path.display()))?;
-    let key_id = json
-        .get("key_id")
-        .and_then(serde_json::Value::as_u64)
-        .context("detached signature missing numeric key_id")? as u32;
-    let payload_len = json
-        .get("payload_len")
-        .and_then(serde_json::Value::as_u64)
-        .context("detached signature missing numeric payload_len")? as u32;
-    let tag_hex = json
-        .get("tag_hex")
-        .and_then(serde_json::Value::as_str)
-        .context("detached signature missing string tag_hex")?;
-    if tag_hex.len() != 32 {
-        bail!("detached signature tag_hex must be 32 hex chars");
+    if json.get("tag_hex").is_some() {
+        let key_id = json
+            .get("key_id")
+            .and_then(serde_json::Value::as_u64)
+            .context("detached signature missing numeric key_id")? as u32;
+        let payload_len =
+            json.get("payload_len")
+                .and_then(serde_json::Value::as_u64)
+                .context("detached signature missing numeric payload_len")? as u32;
+        let tag_hex = json
+            .get("tag_hex")
+            .and_then(serde_json::Value::as_str)
+            .context("detached signature missing string tag_hex")?;
+        if tag_hex.len() != 32 {
+            bail!("detached signature tag_hex must be 32 hex chars");
+        }
+        let mut tag = [0u8; 16];
+        for (idx, slot) in tag.iter_mut().enumerate() {
+            let start = idx * 2;
+            let end = start + 2;
+            *slot = u8::from_str_radix(&tag_hex[start..end], 16)
+                .with_context(|| format!("invalid tag hex at bytes {}..{}", start, end))?;
+        }
+        return Ok(Some(DetachedVerificationInput::Mac(
+            DetachedAuthSignature {
+                key_id,
+                payload_len,
+                tag,
+            },
+        )));
     }
-    let mut tag = [0u8; 16];
-    for (idx, slot) in tag.iter_mut().enumerate() {
-        let start = idx * 2;
-        let end = start + 2;
-        *slot = u8::from_str_radix(&tag_hex[start..end], 16)
-            .with_context(|| format!("invalid tag hex at bytes {}..{}", start, end))?;
+    if json.get("signature_hex").is_some() {
+        let signature = load_detached_ed25519_signature(path)?;
+        return Ok(Some(DetachedVerificationInput::Ed25519(signature)));
     }
-    Ok(Some(DetachedAuthSignature {
-        key_id,
-        payload_len,
-        tag,
-    }))
+    bail!("detached signature must contain tag_hex or signature_hex");
 }
 
 fn load_detached_ed25519_signature(path: &PathBuf) -> Result<DetachedEd25519Signature> {
