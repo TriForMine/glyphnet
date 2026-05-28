@@ -78,6 +78,32 @@ pub struct EncodedSymbol {
     pub codewords: Vec<u8>,
 }
 
+/// Scheduled burst transmission entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BurstScheduleEntry {
+    /// Zero-based transmit slot.
+    pub slot: usize,
+    /// Zero-based redundancy pass.
+    pub pass: u16,
+    /// Zero-based frame index in the source burst set.
+    pub frame_index: u16,
+    /// Encoded frame to render in this slot.
+    pub symbol: EncodedSymbol,
+}
+
+/// Burst sender scheduling options.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BurstScheduleConfig {
+    /// Number of full round-robin passes over all burst frames.
+    pub passes: u16,
+}
+
+impl Default for BurstScheduleConfig {
+    fn default() -> Self {
+        Self { passes: 1 }
+    }
+}
+
 /// Reference encoder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Encoder {
@@ -189,6 +215,33 @@ impl Encoder {
         }
         Ok(frames)
     }
+
+    /// Encode and schedule burst frames for one-way repeated transmission.
+    pub fn encode_burst_schedule(
+        &self,
+        payload: &[u8],
+        schedule: BurstScheduleConfig,
+    ) -> Result<Vec<BurstScheduleEntry>> {
+        if schedule.passes == 0 {
+            return Err(GlyphError::InvalidArgument("burst schedule passes must be >= 1").into());
+        }
+        let frames = self.encode_burst(payload)?;
+        let frame_count = frames.len();
+        let mut entries = Vec::with_capacity(frame_count * usize::from(schedule.passes));
+        let mut slot = 0usize;
+        for pass in 0..schedule.passes {
+            for (frame_index, symbol) in frames.iter().cloned().enumerate() {
+                entries.push(BurstScheduleEntry {
+                    slot,
+                    pass,
+                    frame_index: frame_index as u16,
+                    symbol,
+                });
+                slot += 1;
+            }
+        }
+        Ok(entries)
+    }
 }
 
 impl Default for Encoder {
@@ -264,5 +317,41 @@ mod tests {
         let encoded = encoder.encode_static(b"hello").unwrap();
         assert_eq!(encoded.descriptor.width, 80);
         assert_eq!(encoded.descriptor.height, 80);
+    }
+
+    #[test]
+    fn burst_schedule_round_robin_repeats_all_frames() {
+        let encoder = Encoder::new(EncoderConfig {
+            mode: TransmissionMode::Burst,
+            max_frame_payload: 2,
+            ..EncoderConfig::default()
+        });
+        let schedule = encoder
+            .encode_burst_schedule(b"abcdef", BurstScheduleConfig { passes: 2 })
+            .unwrap();
+
+        assert_eq!(schedule.len(), 6);
+        assert_eq!(schedule[0].pass, 0);
+        assert_eq!(schedule[0].frame_index, 0);
+        assert_eq!(schedule[1].frame_index, 1);
+        assert_eq!(schedule[2].frame_index, 2);
+        assert_eq!(schedule[3].pass, 1);
+        assert_eq!(schedule[3].frame_index, 0);
+        assert_eq!(schedule[5].frame_index, 2);
+    }
+
+    #[test]
+    fn burst_schedule_rejects_zero_passes() {
+        let encoder = Encoder::new(EncoderConfig {
+            mode: TransmissionMode::Burst,
+            ..EncoderConfig::default()
+        });
+        let err = encoder
+            .encode_burst_schedule(b"abc", BurstScheduleConfig { passes: 0 })
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            EncodeError::Core(GlyphError::InvalidArgument(_))
+        ));
     }
 }
