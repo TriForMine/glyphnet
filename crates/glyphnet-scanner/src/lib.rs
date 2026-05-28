@@ -1133,8 +1133,7 @@ mod tests {
         });
         let frames = encoder.encode_burst_erasure(&payload, 12).unwrap();
         fn deterministic_drop_sample(trial: usize, frame_index: usize) -> f32 {
-            let mut x =
-                ((trial as u64) << 32) ^ (frame_index as u64) ^ 0x9E37_79B9_7F4A_7C15u64;
+            let mut x = ((trial as u64) << 32) ^ (frame_index as u64) ^ 0x9E37_79B9_7F4A_7C15u64;
             x ^= x >> 30;
             x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
             x ^= x >> 27;
