@@ -10,6 +10,7 @@ repository.workspace = true
 readme.workspace = true
 
 [dependencies]
+blake3.workspace = true
 crc32fast.workspace = true
 serde.workspace = true
 thiserror.workspace = true

@@ -3,9 +3,10 @@ use std::{fs, path::PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use glyphnet_core::{
-    EccLevel, ProfileId, SymbolGeometry, TransmissionMode, profile_catalog, profile_spec,
+    EccLevel, ProfileId, SymbolGeometry, TransmissionMode, open_authenticated_payload,
+    profile_catalog, profile_spec,
 };
-use glyphnet_decode::RasterDecoder;
+use glyphnet_decode::{RasterDecoder, decode_authenticated_payload};
 use glyphnet_encode::{Encoder, EncoderConfig};
 use glyphnet_render::{RasterRenderer, RenderOptions, SvgRenderer};
 use glyphnet_scanner::{CameraFrame, Scanner, ScannerConfig, scan_still};
@@ -52,6 +53,12 @@ enum Command {
         /// Fit output height in pixels.
         #[arg(long, value_name = "PX")]
         fit_height_px: Option<u32>,
+        /// Optional 32-byte authentication key in hex (64 hex chars).
+        #[arg(long)]
+        auth_key_hex: Option<String>,
+        /// Key id attached to the authenticity envelope.
+        #[arg(long, default_value_t = 1)]
+        auth_key_id: u32,
     },
     /// Decode a rendered PNG/JPEG image produced by the reference renderer.
     Decode {
@@ -60,6 +67,12 @@ enum Command {
         /// Infer module size and quiet zone automatically.
         #[arg(long)]
         auto: bool,
+        /// Optional verification key in hex for authenticated payload envelopes.
+        #[arg(long)]
+        verify_key_hex: Option<String>,
+        /// Key id for the verification key.
+        #[arg(long, default_value_t = 1)]
+        verify_key_id: u32,
     },
     /// Scan an image, attempting coarse auto-crop before decoding.
     Scan {
@@ -68,6 +81,12 @@ enum Command {
         /// Transmission mode used for CV tuning.
         #[arg(long, value_enum, default_value_t = ModeArg::Print)]
         mode: ModeArg,
+        /// Optional verification key in hex for authenticated payload envelopes.
+        #[arg(long)]
+        verify_key_hex: Option<String>,
+        /// Key id for the verification key.
+        #[arg(long, default_value_t = 1)]
+        verify_key_id: u32,
     },
     /// Scan an ordered directory of frames as a burst session.
     ScanBurst {
@@ -216,20 +235,34 @@ fn main() -> Result<()> {
             height_modules,
             fit_width_px,
             fit_height_px,
+            auth_key_hex,
+            auth_key_id,
         } => {
             let sizing = render_sizing(width_modules, height_modules, fit_width_px, fit_height_px)?;
-            encode(
-                data.as_bytes(),
+            encode(EncodeRequest {
+                payload: data.as_bytes(),
                 output,
-                profile.into(),
-                mode.map(Into::into),
-                ecc.map(Into::into),
+                profile: profile.into(),
+                mode: mode.map(Into::into),
+                ecc_level: ecc.map(Into::into),
                 format,
                 sizing,
-            )
+                auth_key_hex: auth_key_hex.as_deref(),
+                auth_key_id,
+            })
         }
-        Command::Decode { input, auto } => decode(input, auto),
-        Command::Scan { input, mode } => scan(input, mode.into()),
+        Command::Decode {
+            input,
+            auto,
+            verify_key_hex,
+            verify_key_id,
+        } => decode(input, auto, verify_key_hex.as_deref(), verify_key_id),
+        Command::Scan {
+            input,
+            mode,
+            verify_key_hex,
+            verify_key_id,
+        } => scan(input, mode.into(), verify_key_hex.as_deref(), verify_key_id),
         Command::ScanBurst { input_dir, mode } => scan_burst(input_dir, mode.into()),
         Command::Inspect {
             data,
@@ -374,74 +407,117 @@ fn encoder(
     Encoder::new(config)
 }
 
-fn encode(
-    payload: &[u8],
+struct EncodeRequest<'a> {
+    payload: &'a [u8],
     output: PathBuf,
     profile: ProfileId,
     mode: Option<TransmissionMode>,
     ecc_level: Option<EccLevel>,
     format: FormatArg,
     sizing: RenderSizing,
-) -> Result<()> {
-    let encoded = encoder(profile, mode, ecc_level, sizing.geometry)
-        .encode_static(payload)
-        .context("failed to encode payload")?;
+    auth_key_hex: Option<&'a str>,
+    auth_key_id: u32,
+}
+
+fn encode(request: EncodeRequest<'_>) -> Result<()> {
+    let encoder = encoder(
+        request.profile,
+        request.mode,
+        request.ecc_level,
+        request.sizing.geometry,
+    );
+    let encoded = if let Some(key_hex) = request.auth_key_hex {
+        let key = parse_auth_key_hex(key_hex)?;
+        encoder
+            .encode_static_authenticated(request.payload, &key, request.auth_key_id)
+            .context("failed to encode authenticated payload")?
+    } else {
+        encoder
+            .encode_static(request.payload)
+            .context("failed to encode payload")?
+    };
     let render_options = apply_fit(
         RenderOptions::for_descriptor(&encoded.descriptor),
         encoded.descriptor.width,
         encoded.descriptor.height,
-        sizing.fit,
+        request.sizing.fit,
     )?;
-    match format {
+    match request.format {
         FormatArg::Png => {
             let image = RasterRenderer::new(render_options)
                 .render(&encoded.matrix)
                 .context("failed to render PNG")?;
-            image.save(&output).with_context(|| {
-                format!("failed to save rendered image to {}", output.display())
+            image.save(&request.output).with_context(|| {
+                format!(
+                    "failed to save rendered image to {}",
+                    request.output.display()
+                )
             })?;
         }
         FormatArg::Svg => {
             let svg = SvgRenderer::new(render_options)
                 .render(&encoded.matrix)
                 .context("failed to render SVG")?;
-            fs::write(&output, svg)
-                .with_context(|| format!("failed to write SVG to {}", output.display()))?;
+            fs::write(&request.output, svg)
+                .with_context(|| format!("failed to write SVG to {}", request.output.display()))?;
         }
     }
     println!("{}", serde_json::to_string_pretty(&encoded.descriptor)?);
     Ok(())
 }
 
-fn decode(input: PathBuf, auto: bool) -> Result<()> {
+fn decode(
+    input: PathBuf,
+    auto: bool,
+    verify_key_hex: Option<&str>,
+    verify_key_id: u32,
+) -> Result<()> {
     let image =
         image::open(&input).with_context(|| format!("failed to open image {}", input.display()))?;
     if auto {
         let auto_decoded = RasterDecoder::default()
             .decode_auto_with_info(&image)
             .context("failed to auto-decode GlyphNet image")?;
-        println!("{}", decode_json(&auto_decoded, None, None, None));
+        let mut payload = decode_json(&auto_decoded, None, None, None);
+        if let Some((verified, key_id, error)) = verify_auth_payload(
+            &auto_decoded.decoded.frame.payload,
+            verify_key_hex,
+            verify_key_id,
+        )? {
+            payload["auth"] =
+                serde_json::json!({ "verified": verified, "key_id": key_id, "error": error });
+        }
+        println!("{payload}");
     } else {
         let decoded = RasterDecoder::default()
             .decode(&image)
             .context("failed to decode GlyphNet image")?;
-        println!(
-            "{}",
-            serde_json::json!({
-                "stream_id": decoded.frame.header.stream_id,
-                "frame_index": decoded.frame.header.frame_index,
-                "frame_count": decoded.frame.header.frame_count,
-                "mode": decoded.frame.header.mode.to_string(),
-                "ecc": decoded.frame.header.ecc_level.to_string(),
-                "payload_utf8_lossy": String::from_utf8_lossy(&decoded.frame.payload),
-                "payload_len": decoded.frame.payload.len()
-            })
-        );
+        let mut payload = serde_json::json!({
+            "stream_id": decoded.frame.header.stream_id,
+            "frame_index": decoded.frame.header.frame_index,
+            "frame_count": decoded.frame.header.frame_count,
+            "mode": decoded.frame.header.mode.to_string(),
+            "ecc": decoded.frame.header.ecc_level.to_string(),
+            "payload_utf8_lossy": String::from_utf8_lossy(&decoded.frame.payload),
+            "payload_len": decoded.frame.payload.len()
+        });
+        if let Some((verified, key_id, error)) =
+            verify_auth_payload(&decoded.frame.payload, verify_key_hex, verify_key_id)?
+        {
+            payload["auth"] =
+                serde_json::json!({ "verified": verified, "key_id": key_id, "error": error });
+        }
+        println!("{payload}");
     }
     Ok(())
 }
 
-fn scan(input: PathBuf, mode: TransmissionMode) -> Result<()> {
+fn scan(
+    input: PathBuf,
+    mode: TransmissionMode,
+    verify_key_hex: Option<&str>,
+    verify_key_id: u32,
+) -> Result<()> {
     let image =
         image::open(&input).with_context(|| format!("failed to open image {}", input.display()))?;
     let scanned = scan_still(&image, mode).context("failed to scan image")?;
@@ -487,8 +563,61 @@ fn scan(input: PathBuf, mode: TransmissionMode) -> Result<()> {
             "decode_attempts_micros": telemetry.timings.decode_attempts_micros
         }
     });
+    if let Some((verified, key_id, error)) = verify_auth_payload(
+        &scanned.decoded.decoded.frame.payload,
+        verify_key_hex,
+        verify_key_id,
+    )? {
+        payload["auth"] = serde_json::json!({
+            "verified": verified,
+            "key_id": key_id,
+            "error": error
+        });
+    }
     println!("{payload}");
     Ok(())
+}
+
+fn parse_auth_key_hex(input: &str) -> Result<[u8; 32]> {
+    let normalized = input.trim();
+    if normalized.len() != 64 {
+        bail!("auth key must be exactly 64 hex characters");
+    }
+    let mut key = [0u8; 32];
+    for (idx, slot) in key.iter_mut().enumerate() {
+        let start = idx * 2;
+        let end = start + 2;
+        *slot = u8::from_str_radix(&normalized[start..end], 16)
+            .with_context(|| format!("invalid hex at bytes {}..{}", start, end))?;
+    }
+    Ok(key)
+}
+
+fn verify_auth_payload(
+    payload: &[u8],
+    verify_key_hex: Option<&str>,
+    verify_key_id: u32,
+) -> Result<Option<(bool, u32, Option<String>)>> {
+    if open_authenticated_payload(payload, |_id| None).is_err() {
+        return Ok(None);
+    }
+    let Some(key_hex) = verify_key_hex else {
+        return Ok(Some((
+            false,
+            verify_key_id,
+            Some("missing verification key".to_string()),
+        )));
+    };
+    let key = parse_auth_key_hex(key_hex)?;
+    match decode_authenticated_payload(
+        payload,
+        |id| {
+            if id == verify_key_id { Some(key) } else { None }
+        },
+    ) {
+        Ok(_) => Ok(Some((true, verify_key_id, None))),
+        Err(error) => Ok(Some((false, verify_key_id, Some(error.to_string())))),
+    }
 }
 
 fn scan_burst(input_dir: PathBuf, mode: TransmissionMode) -> Result<()> {
