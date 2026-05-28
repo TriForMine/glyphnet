@@ -9,6 +9,7 @@ use std::time::Instant as ScanInstant;
 #[derive(Debug, Clone, Copy)]
 struct ScanInstant(f64);
 
+use glyphnet_core::BurstPacket;
 #[cfg(test)]
 use glyphnet_core::layout;
 use glyphnet_core::{Frame, TransmissionMode};
@@ -660,6 +661,44 @@ impl BurstAssembler {
     }
 }
 
+/// Burst packet assembly state for pre-frame transport chunks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BurstPacketAssembler {
+    packet_count: u16,
+    packets: BTreeMap<u16, Vec<u8>>,
+}
+
+impl BurstPacketAssembler {
+    /// Create burst packet assembly state.
+    pub const fn new(packet_count: u16) -> Self {
+        Self {
+            packet_count,
+            packets: BTreeMap::new(),
+        }
+    }
+
+    /// Push a packet and return the complete payload once all packets are present.
+    pub fn push(&mut self, packet: &BurstPacket) -> Result<Option<Vec<u8>>> {
+        if packet.header.packet_count != self.packet_count {
+            return Err(ScannerError::InconsistentBurst(packet.header.stream_id));
+        }
+        self.packets
+            .entry(packet.header.sequence)
+            .or_insert_with(|| packet.payload.clone());
+
+        if self.packets.len() == usize::from(self.packet_count) {
+            let mut payload = Vec::new();
+            for sequence in 0..self.packet_count {
+                if let Some(chunk) = self.packets.get(&sequence) {
+                    payload.extend_from_slice(chunk);
+                }
+            }
+            return Ok(Some(payload));
+        }
+        Ok(None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Instant;
@@ -825,6 +864,27 @@ mod tests {
         .unwrap();
         assert!(assembler.push(&second).unwrap().is_none());
         assert_eq!(assembler.push(&first).unwrap(), Some(b"abcd".to_vec()));
+    }
+
+    #[test]
+    fn burst_packet_assembler_handles_out_of_order_and_duplicates() {
+        let first = glyphnet_core::BurstPacket::new(0, 2, 88, 0, b"ab".to_vec()).unwrap();
+        let second = glyphnet_core::BurstPacket::new(1, 2, 88, 0, b"cd".to_vec()).unwrap();
+        let mut assembler = BurstPacketAssembler::new(2);
+
+        assert!(assembler.push(&second).unwrap().is_none());
+        assert!(assembler.push(&second).unwrap().is_none());
+        assert_eq!(assembler.push(&first).unwrap(), Some(b"abcd".to_vec()));
+    }
+
+    #[test]
+    fn burst_packet_assembler_rejects_inconsistent_packet_count() {
+        let packet = glyphnet_core::BurstPacket::new(0, 2, 77, 0, b"a".to_vec()).unwrap();
+        let mut assembler = BurstPacketAssembler::new(3);
+        assert!(matches!(
+            assembler.push(&packet),
+            Err(ScannerError::InconsistentBurst(77))
+        ));
     }
 
     #[test]
