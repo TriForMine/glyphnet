@@ -1,6 +1,11 @@
 //! WebAssembly-facing API for GlyphNet.
 
-use glyphnet_core::open_authenticated_payload;
+use std::collections::HashMap;
+
+use glyphnet_core::{
+    DetachedAuthSignature, open_authenticated_payload, sign_detached_payload,
+    verify_detached_payload,
+};
 use glyphnet_core::{LayoutFamily, ProfileId, TransmissionMode, profile_spec};
 use glyphnet_decode::decode_authenticated_payload;
 use glyphnet_encode::{Encoder, EncoderConfig};
@@ -325,6 +330,104 @@ fn parse_auth_key_hex(auth_key_hex: &str) -> Result<[u8; 32], String> {
     Ok(out)
 }
 
+fn auth_tag_hex(tag: &[u8; 16]) -> String {
+    tag.iter().map(|b| format!("{b:02x}")).collect::<String>()
+}
+
+fn parse_detached_signature_json(signature_json: &str) -> Result<DetachedAuthSignature, String> {
+    let json: serde_json::Value =
+        serde_json::from_str(signature_json).map_err(|error| error.to_string())?;
+    let key_id =
+        json.get("key_id")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| "detached signature missing numeric key_id".to_string())? as u32;
+    let payload_len = json
+        .get("payload_len")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| "detached signature missing numeric payload_len".to_string())?
+        as u32;
+    let tag_hex = json
+        .get("tag_hex")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "detached signature missing string tag_hex".to_string())?;
+    if tag_hex.len() != 32 {
+        return Err("detached signature tag_hex must be 32 hex chars".to_string());
+    }
+    let mut tag = [0u8; 16];
+    for (idx, slot) in tag.iter_mut().enumerate() {
+        let start = idx * 2;
+        let end = start + 2;
+        *slot = u8::from_str_radix(&tag_hex[start..end], 16)
+            .map_err(|_| "detached signature contains non-hex characters".to_string())?;
+    }
+    Ok(DetachedAuthSignature {
+        key_id,
+        payload_len,
+        tag,
+    })
+}
+
+fn parse_keyring_json(keyring_json: &str) -> Result<HashMap<u32, [u8; 32]>, String> {
+    let json: serde_json::Value =
+        serde_json::from_str(keyring_json).map_err(|error| error.to_string())?;
+    let arr = json
+        .as_array()
+        .ok_or_else(|| "keyring must be a JSON array".to_string())?;
+    let mut out = HashMap::new();
+    for item in arr {
+        let key_id = item
+            .get("key_id")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| "keyring item missing numeric key_id".to_string())?
+            as u32;
+        let key_hex = item
+            .get("key_hex")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "keyring item missing string key_hex".to_string())?;
+        out.insert(key_id, parse_auth_key_hex(key_hex)?);
+    }
+    Ok(out)
+}
+
+/// Build a detached authenticity signature JSON sidecar for raw payload bytes.
+pub fn sign_detached_auth_json(
+    payload: &[u8],
+    auth_key: &[u8; 32],
+    key_id: u32,
+) -> Result<String, String> {
+    let signature = sign_detached_payload(payload, auth_key, key_id);
+    serde_json::to_string_pretty(&serde_json::json!({
+        "key_id": signature.key_id,
+        "payload_len": signature.payload_len,
+        "tag_hex": auth_tag_hex(&signature.tag)
+    }))
+    .map_err(|error| error.to_string())
+}
+
+/// Verify raw payload bytes against detached signature JSON and keyring JSON.
+pub fn verify_detached_auth_json(
+    payload: &[u8],
+    signature_json: &str,
+    keyring_json: &str,
+) -> Result<String, String> {
+    let signature = parse_detached_signature_json(signature_json)?;
+    let keyring = parse_keyring_json(keyring_json)?;
+    let result = match verify_detached_payload(payload, &signature, |id| keyring.get(&id).copied())
+    {
+        Ok(()) => serde_json::json!({
+            "verified": true,
+            "key_id": signature.key_id,
+            "error": serde_json::Value::Null
+        }),
+        Err(error) => serde_json::json!({
+            "verified": false,
+            "key_id": signature.key_id,
+            "error": error.to_string()
+        }),
+    };
+    serde_json::to_string_pretty(&result).map_err(|error| error.to_string())
+}
+
 /// Stateful burst scanner session for incremental frame ingest.
 #[derive(Debug)]
 pub struct BurstScanSession {
@@ -540,6 +643,30 @@ mod wasm {
     #[wasm_bindgen(js_name = descriptorJson)]
     pub fn descriptor_json(input: &str) -> Result<String, JsValue> {
         crate::descriptor_json(input.as_bytes()).map_err(|error| JsValue::from_str(&error))
+    }
+
+    /// Build a detached authenticity signature JSON sidecar.
+    #[wasm_bindgen(js_name = signDetachedAuth)]
+    pub fn sign_detached_auth(
+        input: &str,
+        auth_key_hex: &str,
+        key_id: u32,
+    ) -> Result<String, JsValue> {
+        let auth_key =
+            crate::parse_auth_key_hex(auth_key_hex).map_err(|error| JsValue::from_str(&error))?;
+        crate::sign_detached_auth_json(input.as_bytes(), &auth_key, key_id)
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
+    /// Verify detached authenticity signature JSON against payload and keyring JSON.
+    #[wasm_bindgen(js_name = verifyDetachedAuth)]
+    pub fn verify_detached_auth(
+        input: &str,
+        signature_json: &str,
+        keyring_json: &str,
+    ) -> Result<String, JsValue> {
+        crate::verify_detached_auth_json(input.as_bytes(), signature_json, keyring_json)
+            .map_err(|error| JsValue::from_str(&error))
     }
 
     /// Encode a UTF-8 string with authenticity envelope and return symbol descriptor JSON.
@@ -907,5 +1034,50 @@ mod tests {
         assert!(json.contains(r#""ok": true"#));
         assert!(json.contains(r#""verified": true"#));
         assert!(json.contains("wasm-auth"));
+    }
+
+    #[test]
+    fn native_detached_signature_verifies_with_matching_key() {
+        let key = [0x33u8; 32];
+        let sig = sign_detached_auth_json(b"detached-ok", &key, 11).unwrap();
+        let keyring = r#"[{"key_id":11,"key_hex":"3333333333333333333333333333333333333333333333333333333333333333"}]"#;
+        let result = verify_detached_auth_json(b"detached-ok", &sig, keyring).unwrap();
+        assert!(result.contains(r#""verified": true"#));
+    }
+
+    #[test]
+    fn native_detached_signature_fails_with_wrong_key() {
+        let key = [0x33u8; 32];
+        let sig = sign_detached_auth_json(b"detached-wrong", &key, 11).unwrap();
+        let keyring = r#"[{"key_id":11,"key_hex":"4444444444444444444444444444444444444444444444444444444444444444"}]"#;
+        let result = verify_detached_auth_json(b"detached-wrong", &sig, keyring).unwrap();
+        assert!(result.contains(r#""verified": false"#));
+    }
+
+    #[test]
+    fn native_detached_signature_supports_rotated_key_ids() {
+        let key = [0x77u8; 32];
+        let sig = sign_detached_auth_json(b"detached-rotate", &key, 42).unwrap();
+        let keyring = r#"[{"key_id":1,"key_hex":"1111111111111111111111111111111111111111111111111111111111111111"},{"key_id":42,"key_hex":"7777777777777777777777777777777777777777777777777777777777777777"}]"#;
+        let result = verify_detached_auth_json(b"detached-rotate", &sig, keyring).unwrap();
+        assert!(result.contains(r#""verified": true"#));
+        assert!(result.contains(r#""key_id": 42"#));
+    }
+
+    #[test]
+    fn native_unsigned_payload_reports_no_auth_block_in_regular_scan() {
+        let encoded = Encoder::default().encode_static(b"unsigned").unwrap();
+        let image = glyphnet_render::RasterRenderer::default()
+            .render(&encoded.matrix)
+            .unwrap();
+        let json = scan_rgba_json(
+            image.as_raw(),
+            image.width(),
+            image.height(),
+            TransmissionMode::Print,
+        )
+        .unwrap();
+        assert!(json.contains(r#""ok": true"#));
+        assert!(!json.contains(r#""auth""#));
     }
 }
