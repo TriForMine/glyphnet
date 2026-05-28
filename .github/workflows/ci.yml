@@ -51,7 +51,7 @@ jobs:
       - name: Check PR branch perf gate
         if: github.event_name == 'pull_request'
         continue-on-error: true
-        run: SCANNER_BENCH_NAMES=scan_generated_ribbon_canvas_small,scan_generated_ribbon_canvas_medium,scan_generated_ribbon_canvas_large,scan_real_debugger_screenshot SCANNER_BENCH_NON_GATING=scan_real_debugger_screenshot SCANNER_BENCH_OUTPUT_JSON=target/scanner-perf/pr.json scripts/check_scanner_perf.sh
+        run: SCANNER_BENCH_NAMES=scan_generated_ribbon_canvas_small,scan_generated_ribbon_canvas_medium,scan_generated_ribbon_canvas_large,scan_generated_matrix_canvas,scan_real_debugger_screenshot SCANNER_BENCH_NON_GATING=scan_real_debugger_screenshot SCANNER_BENCH_OUTPUT_JSON=target/scanner-perf/pr.json scripts/check_scanner_perf.sh
 
       - name: Capture base benchmark metrics
         if: always() && github.event_name == 'pull_request'
@@ -61,7 +61,7 @@ jobs:
           mkdir -p /tmp/glyphnet-base/scripts
           cp scripts/check_scanner_perf.sh /tmp/glyphnet-base/scripts/check_scanner_perf.sh
           cd /tmp/glyphnet-base
-          SCANNER_BENCH_NAMES=scan_generated_ribbon_canvas_small,scan_generated_ribbon_canvas_medium,scan_generated_ribbon_canvas_large,scan_real_debugger_screenshot SCANNER_BENCH_NON_GATING=scan_real_debugger_screenshot SCANNER_BENCH_OUTPUT_JSON=target/scanner-perf/base.json ./scripts/check_scanner_perf.sh --no-fail
+          SCANNER_BENCH_NAMES=scan_generated_ribbon_canvas_small,scan_generated_ribbon_canvas_medium,scan_generated_ribbon_canvas_large,scan_generated_matrix_canvas,scan_real_debugger_screenshot SCANNER_BENCH_NON_GATING=scan_real_debugger_screenshot SCANNER_BENCH_OUTPUT_JSON=target/scanner-perf/base.json ./scripts/check_scanner_perf.sh --no-fail
 
       - name: Comment benchmark comparison on PR
         if: always() && github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork
@@ -84,12 +84,12 @@ jobs:
             const overallEmoji = pr ? (pr.status === 'pass' ? '✅' : '⚠️') : 'ℹ️';
             const marker = '<!-- scanner-perf-comment -->';
             const rows = benchNames.length === 0
-              ? ['| Benchmark | PR median (ms) | Base median (ms) | Delta (ms) | Delta % |',
-                 '|---|---:|---:|---:|---:|',
+              ? ['| Benchmark | Gating | PR median (ms) | Base median (ms) | Delta (ms) | Delta % |',
+                 '|---|:---:|---:|---:|---:|---:|',
                  '| unavailable | - | - | - | - |']
               : [
-                  '| Benchmark | PR median (ms) | Base median (ms) | Delta (ms) | Delta % |',
-                  '|---|---:|---:|---:|---:|',
+                  '| Benchmark | Gating | PR median (ms) | Base median (ms) | Delta (ms) | Delta % |',
+                  '|---|:---:|---:|---:|---:|---:|',
                   ...benchNames.map(name => {
                     const p = prMap.get(name);
                     const b = baseMap.get(name);
@@ -107,7 +107,7 @@ jobs:
                 ];
             const body = [
               marker,
-              '## Scanner perf (RibbonPrint fixtures)',
+              '## Scanner perf (ribbon + matrix fixtures)',
               '',
               pr
                 ? `${overallEmoji} **PR gate status:** ${pr.status.toUpperCase()}`
@@ -119,8 +119,8 @@ jobs:
                 ? `- **Allowed (budget + ${pr.tolerance_pct.toFixed(1)}%):** ${pr.allowed_ms.toFixed(3)} ms`
                 : '- **Allowed threshold:** unavailable',
               '',
-              rows[0].replace('| Benchmark | PR median (ms) | Base median (ms) | Delta (ms) | Delta % |', '| Benchmark | Gating | PR median (ms) | Base median (ms) | Delta (ms) | Delta % |'),
-              rows[1].replace('|---|---:|---:|---:|---:|', '|---|:---:|---:|---:|---:|---:|'),
+              rows[0],
+              rows[1],
               ...rows.slice(2),
               '',
             ].join('\n');
