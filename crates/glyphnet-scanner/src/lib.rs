@@ -9,6 +9,7 @@ use std::time::Instant as ScanInstant;
 #[derive(Debug, Clone, Copy)]
 struct ScanInstant(f64);
 
+use glyphnet_core::BurstPacket;
 #[cfg(test)]
 use glyphnet_core::layout;
 use glyphnet_core::{Frame, TransmissionMode};
@@ -19,6 +20,7 @@ use glyphnet_cv::{
     quad_dimensions, warp_perspective_gray,
 };
 use glyphnet_decode::{AutoDecodedSymbol, DecodeError, DecodeOptions, RasterDecoder};
+use glyphnet_ecc::BurstErasureCodec;
 use image::DynamicImage;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
@@ -100,8 +102,21 @@ pub struct ScanEvent {
     pub frame: Frame,
     /// Complete payload when a static symbol or full burst stream is available.
     pub complete_payload: Option<Vec<u8>>,
+    /// Burst collection progress for multi-frame streams.
+    pub burst_progress: BurstProgress,
     /// Capture timestamp for diagnostics.
     pub timestamp_micros: u64,
+}
+
+/// Burst receive progress snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BurstProgress {
+    /// Total expected frames in stream.
+    pub frame_count: u16,
+    /// Number of unique frames collected so far.
+    pub received_frames: usize,
+    /// Number of frames still missing.
+    pub missing_frames: usize,
 }
 
 /// Axis-aligned scan region in pixel coordinates.
@@ -123,6 +138,7 @@ pub struct Scanner {
     config: ScannerConfig,
     decoder: RasterDecoder,
     bursts: HashMap<u64, BurstAssembler>,
+    erasure_bursts: HashMap<u64, BurstErasureAssembler>,
 }
 
 impl Scanner {
@@ -132,6 +148,7 @@ impl Scanner {
             decoder: RasterDecoder::new(config.decode.clone()),
             config,
             bursts: HashMap::new(),
+            erasure_bursts: HashMap::new(),
         }
     }
 
@@ -144,19 +161,67 @@ impl Scanner {
     pub fn scan_frame(&mut self, frame: CameraFrame) -> Result<ScanEvent> {
         let decoded = self.decoder.decode(&frame.image)?;
         let protocol_frame = decoded.frame;
-        let complete_payload = if protocol_frame.header.frame_count == 1 {
-            Some(protocol_frame.payload.clone())
+        let (complete_payload, burst_progress) = if protocol_frame.header.frame_count == 1 {
+            (
+                Some(protocol_frame.payload.clone()),
+                BurstProgress {
+                    frame_count: 1,
+                    received_frames: 1,
+                    missing_frames: 0,
+                },
+            )
+        } else if matches!(protocol_frame.header.mode, TransmissionMode::Burst) {
+            if let Ok(packet) = BurstPacket::decode(&protocol_frame.payload)
+                && packet.header.data_shards > 0
+            {
+                let assembler = self
+                    .erasure_bursts
+                    .entry(protocol_frame.header.stream_id)
+                    .or_insert_with(|| BurstErasureAssembler::new(&packet.header));
+                let complete = assembler.push(&packet)?;
+                (
+                    complete,
+                    BurstProgress {
+                        frame_count: assembler.packet_count,
+                        received_frames: assembler.received_count(),
+                        missing_frames: assembler.missing_count(),
+                    },
+                )
+            } else {
+                let assembler = self
+                    .bursts
+                    .entry(protocol_frame.header.stream_id)
+                    .or_insert_with(|| BurstAssembler::new(protocol_frame.header.frame_count));
+                let complete = assembler.push(&protocol_frame)?;
+                (
+                    complete,
+                    BurstProgress {
+                        frame_count: assembler.frame_count,
+                        received_frames: assembler.received_count(),
+                        missing_frames: assembler.missing_count(),
+                    },
+                )
+            }
         } else {
             let assembler = self
                 .bursts
                 .entry(protocol_frame.header.stream_id)
                 .or_insert_with(|| BurstAssembler::new(protocol_frame.header.frame_count));
-            assembler.push(&protocol_frame)?
+            let complete = assembler.push(&protocol_frame)?;
+            (
+                complete,
+                BurstProgress {
+                    frame_count: assembler.frame_count,
+                    received_frames: assembler.received_count(),
+                    missing_frames: assembler.missing_count(),
+                },
+            )
         };
 
         Ok(ScanEvent {
             frame: protocol_frame,
             complete_payload,
+            burst_progress,
             timestamp_micros: frame.timestamp_micros,
         })
     }
@@ -658,20 +723,143 @@ impl BurstAssembler {
         }
         Ok(None)
     }
+
+    /// Number of unique frames collected so far.
+    pub fn received_count(&self) -> usize {
+        self.frames.len()
+    }
+
+    /// Number of frames still missing for completion.
+    pub fn missing_count(&self) -> usize {
+        usize::from(self.frame_count).saturating_sub(self.frames.len())
+    }
+}
+
+/// Burst packet assembly state for pre-frame transport chunks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BurstPacketAssembler {
+    packet_count: u16,
+    packets: BTreeMap<u16, Vec<u8>>,
+}
+
+impl BurstPacketAssembler {
+    /// Create burst packet assembly state.
+    pub const fn new(packet_count: u16) -> Self {
+        Self {
+            packet_count,
+            packets: BTreeMap::new(),
+        }
+    }
+
+    /// Push a packet and return the complete payload once all packets are present.
+    pub fn push(&mut self, packet: &BurstPacket) -> Result<Option<Vec<u8>>> {
+        if packet.header.packet_count != self.packet_count {
+            return Err(ScannerError::InconsistentBurst(packet.header.stream_id));
+        }
+        self.packets
+            .entry(packet.header.sequence)
+            .or_insert_with(|| packet.payload.clone());
+
+        if self.packets.len() == usize::from(self.packet_count) {
+            let mut payload = Vec::new();
+            for sequence in 0..self.packet_count {
+                if let Some(chunk) = self.packets.get(&sequence) {
+                    payload.extend_from_slice(chunk);
+                }
+            }
+            return Ok(Some(payload));
+        }
+        Ok(None)
+    }
+
+    /// Number of unique packets collected so far.
+    pub fn received_count(&self) -> usize {
+        self.packets.len()
+    }
+
+    /// Number of packets still missing for completion.
+    pub fn missing_count(&self) -> usize {
+        usize::from(self.packet_count).saturating_sub(self.packets.len())
+    }
+}
+
+/// Burst erasure-packet assembly state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BurstErasureAssembler {
+    packet_count: u16,
+    data_shards: u16,
+    original_len: u32,
+    packets: BTreeMap<u16, Vec<u8>>,
+}
+
+impl BurstErasureAssembler {
+    /// Create erasure assembly state from first packet metadata.
+    pub fn new(header: &glyphnet_core::BurstPacketHeader) -> Self {
+        Self {
+            packet_count: header.packet_count,
+            data_shards: header.data_shards,
+            original_len: header.original_len,
+            packets: BTreeMap::new(),
+        }
+    }
+
+    /// Push one packet and return recovered payload once possible.
+    pub fn push(&mut self, packet: &BurstPacket) -> Result<Option<Vec<u8>>> {
+        if packet.header.packet_count != self.packet_count
+            || packet.header.data_shards != self.data_shards
+            || packet.header.original_len != self.original_len
+        {
+            return Err(ScannerError::InconsistentBurst(packet.header.stream_id));
+        }
+
+        self.packets
+            .entry(packet.header.sequence)
+            .or_insert_with(|| packet.payload.clone());
+
+        if self.packets.len() < usize::from(self.data_shards) {
+            return Ok(None);
+        }
+
+        let codec = BurstErasureCodec::new(
+            usize::from(self.data_shards),
+            usize::from(self.packet_count.saturating_sub(self.data_shards)),
+        );
+        let mut sparse = vec![None; usize::from(self.packet_count)];
+        for (sequence, payload) in &self.packets {
+            let index = usize::from(*sequence);
+            if let Some(slot) = sparse.get_mut(index) {
+                *slot = Some(payload.clone());
+            }
+        }
+        match codec.recover(sparse, self.original_len as usize) {
+            Ok(payload) => Ok(Some(payload)),
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// Number of unique packets collected so far.
+    pub fn received_count(&self) -> usize {
+        self.packets.len()
+    }
+
+    /// Number of packets still missing.
+    pub fn missing_count(&self) -> usize {
+        usize::from(self.packet_count).saturating_sub(self.packets.len())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::time::Instant;
 
-    use glyphnet_core::{EccLevel, Frame};
-    use glyphnet_encode::Encoder;
+    use glyphnet_core::{BurstPacket, EccLevel, Frame, TransmissionMode};
+    use glyphnet_encode::{BurstScheduleConfig, Encoder, EncoderConfig};
     use glyphnet_render::{RasterRenderer, RenderOptions};
     use glyphnet_testkit::{
         add_salt_pepper_noise, adjust_exposure, blur, place_on_canvas, resize, skew_x_on_white,
     };
     use image::{Rgba, RgbaImage};
-    use rand::{SeedableRng, rngs::StdRng};
+    use rand::{Rng, SeedableRng, rngs::StdRng};
 
     use super::*;
 
@@ -825,6 +1013,203 @@ mod tests {
         .unwrap();
         assert!(assembler.push(&second).unwrap().is_none());
         assert_eq!(assembler.push(&first).unwrap(), Some(b"abcd".to_vec()));
+    }
+
+    #[test]
+    fn burst_packet_assembler_handles_out_of_order_and_duplicates() {
+        let first = glyphnet_core::BurstPacket::new(0, 2, 88, 0, 4, 2, b"ab".to_vec()).unwrap();
+        let second = glyphnet_core::BurstPacket::new(1, 2, 88, 0, 4, 2, b"cd".to_vec()).unwrap();
+        let mut assembler = BurstPacketAssembler::new(2);
+
+        assert!(assembler.push(&second).unwrap().is_none());
+        assert!(assembler.push(&second).unwrap().is_none());
+        assert_eq!(assembler.push(&first).unwrap(), Some(b"abcd".to_vec()));
+    }
+
+    #[test]
+    fn burst_packet_assembler_rejects_inconsistent_packet_count() {
+        let packet = glyphnet_core::BurstPacket::new(0, 2, 77, 0, 1, 1, b"a".to_vec()).unwrap();
+        let mut assembler = BurstPacketAssembler::new(3);
+        assert!(matches!(
+            assembler.push(&packet),
+            Err(ScannerError::InconsistentBurst(77))
+        ));
+    }
+
+    #[test]
+    fn burst_packet_assembler_reports_progress() {
+        let mut assembler = BurstPacketAssembler::new(3);
+        let p0 = BurstPacket::new(0, 3, 15, 0, 6, 3, b"aa".to_vec()).unwrap();
+        let p2 = BurstPacket::new(2, 3, 15, 0, 6, 3, b"cc".to_vec()).unwrap();
+
+        assert_eq!(assembler.received_count(), 0);
+        assert_eq!(assembler.missing_count(), 3);
+        assert!(assembler.push(&p2).unwrap().is_none());
+        assert_eq!(assembler.received_count(), 1);
+        assert_eq!(assembler.missing_count(), 2);
+        assert!(assembler.push(&p0).unwrap().is_none());
+        assert_eq!(assembler.received_count(), 2);
+        assert_eq!(assembler.missing_count(), 1);
+    }
+
+    #[test]
+    fn burst_schedule_recovers_after_first_pass_loss() {
+        let encoder = Encoder::new(EncoderConfig {
+            mode: TransmissionMode::Burst,
+            max_frame_payload: 3,
+            ..EncoderConfig::default()
+        });
+        let payload = b"offline-burst-payload".to_vec();
+        let scheduled = encoder
+            .encode_burst_schedule(&payload, BurstScheduleConfig { passes: 2 })
+            .unwrap();
+        let frame_count = scheduled
+            .first()
+            .map(|entry| entry.symbol.frame.header.frame_count)
+            .unwrap_or(1);
+        let mut assembler = BurstAssembler::new(frame_count);
+        let mut recovered = None;
+
+        for entry in scheduled {
+            if entry.pass == 0 && entry.frame_index % 2 == 0 {
+                continue;
+            }
+            recovered = assembler.push(&entry.symbol.frame).unwrap();
+            if recovered.is_some() {
+                break;
+            }
+        }
+
+        assert_eq!(recovered, Some(payload));
+        assert_eq!(assembler.missing_count(), 0);
+    }
+
+    #[test]
+    fn scanner_recovers_erasure_burst_with_missing_frames() {
+        let payload = b"scanner-erasure-burst-recovery".to_vec();
+        let encoder = Encoder::new(EncoderConfig {
+            mode: TransmissionMode::Burst,
+            ecc_level: EccLevel::High,
+            ..EncoderConfig::default()
+        });
+        let frames = encoder.encode_burst_erasure(&payload, 6).unwrap();
+        let mut scanner = Scanner::new(ScannerConfig {
+            mode: TransmissionMode::Burst,
+            ..ScannerConfig::default()
+        });
+        let mut recovered = None;
+        for (index, encoded) in frames.into_iter().enumerate() {
+            if index % 4 == 0 {
+                continue;
+            }
+            let event = scanner
+                .scan_frame(CameraFrame {
+                    image: RasterRenderer::default()
+                        .render(&encoded.matrix)
+                        .unwrap()
+                        .into(),
+                    timestamp_micros: index as u64,
+                })
+                .unwrap();
+            if event.complete_payload.is_some() {
+                recovered = event.complete_payload;
+                break;
+            }
+        }
+        assert_eq!(recovered, Some(payload));
+    }
+
+    fn run_erasure_loss_sweep(
+        payload_len: usize,
+        trials: usize,
+        max_median_frames: usize,
+        rates: &[(f32, f32)],
+    ) {
+        let payload = vec![0x5A; payload_len];
+        let encoder = Encoder::new(EncoderConfig {
+            mode: TransmissionMode::Burst,
+            ecc_level: EccLevel::High,
+            ..EncoderConfig::default()
+        });
+        let frames = encoder.encode_burst_erasure(&payload, 12).unwrap();
+        let mut rng = StdRng::seed_from_u64(0xB517_5EED);
+
+        for (drop_rate, min_success) in rates.iter().copied() {
+            let mut successes = 0usize;
+            let mut completion_frames = Vec::new();
+            let mut completion_millis = Vec::new();
+            for _ in 0..trials {
+                let mut scanner = Scanner::new(ScannerConfig {
+                    mode: TransmissionMode::Burst,
+                    max_frames: 120,
+                    ..ScannerConfig::default()
+                });
+                let trial_started = Instant::now();
+                let mut complete_at = None;
+                for (index, encoded) in frames.iter().enumerate() {
+                    if rng.r#gen::<f32>() < drop_rate {
+                        continue;
+                    }
+                    let image = RasterRenderer::default().render(&encoded.matrix).unwrap();
+                    let event = scanner
+                        .scan_frame(CameraFrame {
+                            image: DynamicImage::ImageRgba8(image),
+                            timestamp_micros: index as u64,
+                        })
+                        .unwrap();
+                    if event.complete_payload.is_some() {
+                        complete_at = Some(index + 1);
+                        break;
+                    }
+                }
+                if let Some(done) = complete_at {
+                    successes += 1;
+                    completion_frames.push(done);
+                    completion_millis.push(trial_started.elapsed().as_millis() as u64);
+                }
+            }
+
+            let success_rate = successes as f32 / trials as f32;
+            assert!(
+                success_rate >= min_success,
+                "drop_rate={drop_rate:.2} success_rate={success_rate:.2} expected>={min_success:.2}"
+            );
+            if !completion_frames.is_empty() {
+                completion_frames.sort_unstable();
+                let median = completion_frames[completion_frames.len() / 2];
+                completion_millis.sort_unstable();
+                let median_ms = completion_millis[completion_millis.len() / 2];
+                eprintln!(
+                    "[burst-reliability] drop_rate={drop_rate:.2} success_rate={success_rate:.3} median_frames={median} median_completion_ms={median_ms}"
+                );
+                assert!(
+                    median <= max_median_frames,
+                    "drop_rate={drop_rate:.2} median_frames_to_complete={median} exceeded {max_median_frames}"
+                );
+            } else {
+                eprintln!(
+                    "[burst-reliability] drop_rate={drop_rate:.2} success_rate={success_rate:.3} median_frames=- median_completion_ms=-"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn scanner_erasure_burst_loss_sweep_fast_smoke() {
+        let rates = [(0.10f32, 0.95f32), (0.30f32, 0.60f32)];
+        run_erasure_loss_sweep(256, 4, 48, &rates);
+    }
+
+    #[test]
+    #[ignore = "full reliability sweep for CI reporting; too slow for default test suite"]
+    fn scanner_erasure_burst_loss_sweep_meets_baseline_targets() {
+        let rates = [
+            (0.10f32, 0.95f32),
+            (0.20f32, 0.90f32),
+            (0.30f32, 0.65f32),
+            (0.40f32, 0.45f32),
+        ];
+        run_erasure_loss_sweep(512, 6, 64, &rates);
     }
 
     #[test]

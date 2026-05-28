@@ -187,6 +187,99 @@ jobs:
               await github.rest.issues.createComment({ owner, repo, issue_number, body });
             }
 
+  burst-reliability:
+    name: burst reliability
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check PR branch burst reliability
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        run: BURST_RELIABILITY_OUTPUT_JSON=target/burst-reliability/pr.json bash scripts/check_burst_reliability.sh --no-fail
+
+      - name: Capture base burst reliability
+        if: always() && github.event_name == 'pull_request'
+        continue-on-error: true
+        run: |
+          git worktree add /tmp/glyphnet-base origin/${{ github.base_ref }}
+          mkdir -p /tmp/glyphnet-base/scripts
+          cp scripts/check_burst_reliability.sh /tmp/glyphnet-base/scripts/check_burst_reliability.sh
+          cd /tmp/glyphnet-base
+          BURST_RELIABILITY_OUTPUT_JSON=target/burst-reliability/base.json bash ./scripts/check_burst_reliability.sh --no-fail
+
+      - name: Comment burst reliability comparison on PR
+        if: always() && github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const prPath = 'target/burst-reliability/pr.json';
+            const basePath = '/tmp/glyphnet-base/target/burst-reliability/base.json';
+            const pr = fs.existsSync(prPath) ? JSON.parse(fs.readFileSync(prPath, 'utf8')) : null;
+            const base = fs.existsSync(basePath) ? JSON.parse(fs.readFileSync(basePath, 'utf8')) : null;
+            const byDrop = (payload) => new Map((payload?.cases || []).map(c => [Number(c.drop_rate).toFixed(2), c]));
+            const prMap = byDrop(pr);
+            const baseMap = byDrop(base);
+            const keys = Array.from(new Set([...prMap.keys(), ...baseMap.keys()])).sort();
+            const marker = '<!-- burst-reliability-comment -->';
+            const rows = keys.length === 0
+              ? [
+                  '| Drop rate | Gating | PR success | Base success | Delta | PR median frames | Base median frames |',
+                  '|---:|:---:|---:|---:|---:|---:|---:|',
+                  '| - | - | - | - | - | - | - |'
+                ]
+              : [
+                  '| Drop rate | Gating | PR success | Base success | Delta | PR median frames | Base median frames |',
+                  '|---:|:---:|---:|---:|---:|---:|---:|',
+                  ...keys.map(k => {
+                    const p = prMap.get(k);
+                    const b = baseMap.get(k);
+                    const ps = p ? (p.success_rate * 100) : null;
+                    const bs = b ? (b.success_rate * 100) : null;
+                    const delta = (ps != null && bs != null) ? (ps - bs) : null;
+                    const pFrames = p?.median_frames ?? '-';
+                    const bFrames = b?.median_frames ?? '-';
+                    const gating = p ? (p.gating !== false ? 'Yes' : 'No') : (b && b.gating !== false ? 'Yes' : 'No');
+                    return `| ${(Number(k) * 100).toFixed(0)}% | ${gating} | ${ps == null ? '-' : ps.toFixed(1) + '%'} | ${bs == null ? '-' : bs.toFixed(1) + '%'} | ${delta == null ? '-' : delta.toFixed(1) + 'pp'} | ${pFrames} | ${bFrames} |`;
+                  })
+                ];
+            const gatingCases = (pr?.cases || []).filter(c => c.gating !== false);
+            const passCount = gatingCases.filter(c => c.status === 'pass').length;
+            const failCount = gatingCases.filter(c => c.status === 'fail').length;
+            const body = [
+              marker,
+              '## Burst reliability (loss sweep)',
+              '',
+              pr
+                ? `${pr.status === 'pass' ? '✅' : '⚠️'} **PR gate status:** ${pr.status.toUpperCase()}`
+                : '⚠️ **PR status:** unavailable',
+              pr
+                ? `- **Gating rows:** ${passCount} pass / ${failCount} fail`
+                : '- **Gating rows:** unavailable',
+              '- **Non-gating rows:** none',
+              '',
+              ...rows,
+              '',
+            ].join('\n');
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number, per_page: 100 });
+            const existing = comments.find(c => c.body && c.body.includes(marker) && c.user && c.user.type === 'Bot');
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
+
   wasm:
     name: wasm32 check
     runs-on: ubuntu-latest

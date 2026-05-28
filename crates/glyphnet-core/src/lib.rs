@@ -5,6 +5,7 @@
 //! shared by encoders, decoders, renderers, scanners, and SDK bindings.
 
 pub mod bitstream;
+pub mod burst_packet;
 pub mod descriptor;
 pub mod error;
 pub mod frame;
@@ -14,6 +15,10 @@ pub mod matrix;
 pub mod mode;
 pub mod profile;
 
+pub use burst_packet::{
+    BURST_PACKET_HEADER_LEN, BURST_PACKET_MAGIC, BURST_PACKET_VERSION, BurstPacket,
+    BurstPacketHeader,
+};
 pub use descriptor::{
     Capability, CapabilitySet, ColorEncoding, LayoutFamily, ProtocolVersion, SymbolDescriptor,
 };

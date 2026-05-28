@@ -872,6 +872,106 @@ impl ShardSet {
     }
 }
 
+/// Reed-Solomon erasure coding for burst transport shards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BurstErasureCodec {
+    /// Number of original data shards.
+    pub data_shards: usize,
+    /// Number of repair shards.
+    pub repair_shards: usize,
+}
+
+impl BurstErasureCodec {
+    /// Create a burst erasure codec.
+    pub const fn new(data_shards: usize, repair_shards: usize) -> Self {
+        Self {
+            data_shards,
+            repair_shards,
+        }
+    }
+
+    /// Build codec parameters from ECC level and payload length.
+    pub fn from_level(level: EccLevel, payload_len: usize, target_data_shards: usize) -> Self {
+        let data_shards = target_data_shards.max(1).min(payload_len.max(1));
+        let (num, den) = level.parity_ratio();
+        let repair_shards = ((data_shards * num).div_ceil(den)).max(1);
+        Self::new(data_shards, repair_shards)
+    }
+
+    fn validate(self) -> Result<()> {
+        if self.data_shards == 0
+            || self.repair_shards == 0
+            || self.data_shards.saturating_add(self.repair_shards) > 255
+        {
+            return Err(EccError::InvalidShardConfiguration);
+        }
+        Ok(())
+    }
+
+    /// Encode payload into data+repair shards.
+    pub fn encode(self, payload: &[u8]) -> Result<ShardSet> {
+        self.validate()?;
+        let shard_len = payload.len().div_ceil(self.data_shards).max(1);
+        let total = self.data_shards + self.repair_shards;
+        let mut shards = vec![vec![0u8; shard_len]; total];
+        for (index, byte) in payload.iter().enumerate() {
+            let shard = index / shard_len;
+            let offset = index % shard_len;
+            if shard < self.data_shards {
+                shards[shard][offset] = *byte;
+            }
+        }
+
+        let rs = ReedSolomon::new(self.data_shards, self.repair_shards)
+            .map_err(|_| EccError::InvalidShardConfiguration)?;
+        let mut refs: Vec<_> = shards.iter_mut().map(Vec::as_mut_slice).collect();
+        rs.encode(&mut refs)
+            .map_err(|_| EccError::InvalidShardConfiguration)?;
+
+        Ok(ShardSet {
+            original_len: payload.len(),
+            data_shards: self.data_shards,
+            shard_len,
+            shards,
+        })
+    }
+
+    /// Recover payload from sparse shard slots (`None` means missing).
+    pub fn recover(self, mut shards: Vec<Option<Vec<u8>>>, original_len: usize) -> Result<Vec<u8>> {
+        self.validate()?;
+        let total = self.data_shards + self.repair_shards;
+        if shards.len() != total {
+            return Err(EccError::InvalidShardConfiguration);
+        }
+        let Some(shard_len) = shards.iter().find_map(|s| s.as_ref().map(Vec::len)) else {
+            return Err(EccError::TooManyErasures);
+        };
+        for shard in shards.iter_mut().flatten() {
+            if shard.len() != shard_len {
+                return Err(EccError::InvalidShardConfiguration);
+            }
+        }
+
+        let present = shards.iter().filter(|s| s.is_some()).count();
+        if present < self.data_shards {
+            return Err(EccError::TooManyErasures);
+        }
+
+        let rs = ReedSolomon::new(self.data_shards, self.repair_shards)
+            .map_err(|_| EccError::InvalidShardConfiguration)?;
+        rs.reconstruct(&mut shards)
+            .map_err(|_| EccError::TooManyErasures)?;
+
+        let mut out = Vec::with_capacity(self.data_shards * shard_len);
+        for shard in shards.iter().take(self.data_shards) {
+            let shard = shard.as_ref().ok_or(EccError::TooManyErasures)?;
+            out.extend_from_slice(shard);
+        }
+        out.truncate(original_len);
+        Ok(out)
+    }
+}
+
 /// Interleave bytes to distribute local damage across distant codewords.
 pub fn interleave(bytes: &[u8], stride: usize) -> Vec<u8> {
     if stride <= 1 || bytes.is_empty() {
@@ -1175,6 +1275,34 @@ mod tests {
         let set = code.encode_shards(b"abcdefghijklmnopqrstuvwxyz").unwrap();
         let recovered = code.recover_one(&set, 1).unwrap();
         assert_eq!(recovered, set.shards[1]);
+    }
+
+    #[test]
+    fn burst_erasure_recovers_from_missing_data_and_repair_shards() {
+        let payload = b"burst-erasure-payload-0123456789";
+        let codec = BurstErasureCodec::new(6, 3);
+        let set = codec.encode(payload).unwrap();
+        let mut sparse: Vec<Option<Vec<u8>>> = set.shards.into_iter().map(Some).collect();
+        sparse[1] = None;
+        sparse[4] = None;
+        sparse[8] = None;
+        let recovered = codec.recover(sparse, set.original_len).unwrap();
+        assert_eq!(recovered, payload);
+    }
+
+    #[test]
+    fn burst_erasure_rejects_when_too_many_missing() {
+        let payload = b"burst-erasure-payload-0123456789";
+        let codec = BurstErasureCodec::new(5, 2);
+        let set = codec.encode(payload).unwrap();
+        let mut sparse: Vec<Option<Vec<u8>>> = set.shards.into_iter().map(Some).collect();
+        sparse[0] = None;
+        sparse[1] = None;
+        sparse[2] = None;
+        assert!(matches!(
+            codec.recover(sparse, set.original_len),
+            Err(EccError::TooManyErasures)
+        ));
     }
 
     proptest! {

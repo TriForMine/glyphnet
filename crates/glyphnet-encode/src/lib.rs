@@ -2,11 +2,11 @@
 
 use blake3::Hash;
 use glyphnet_core::{
-    Capability, CapabilitySet, ColorEncoding, EccLevel, Frame, GlyphError, LayoutFamily, ProfileId,
-    ProtocolVersion, SymbolDescriptor, SymbolGeometry, SymbolMatrix, TransmissionMode, bitstream,
-    choose_symbol_geometry, profile_spec,
+    BurstPacket, Capability, CapabilitySet, ColorEncoding, EccLevel, Frame, GlyphError,
+    LayoutFamily, ProfileId, ProtocolVersion, SymbolDescriptor, SymbolGeometry, SymbolMatrix,
+    TransmissionMode, bitstream, choose_symbol_geometry, profile_spec,
 };
-use glyphnet_ecc::encode_for_mode;
+use glyphnet_ecc::{BurstErasureCodec, EccError, encode_for_mode};
 use thiserror::Error;
 
 /// Result type for encoder operations.
@@ -18,6 +18,9 @@ pub enum EncodeError {
     /// Wrapped core error.
     #[error(transparent)]
     Core(#[from] GlyphError),
+    /// Wrapped ECC error.
+    #[error(transparent)]
+    Ecc(#[from] EccError),
 }
 
 /// Encoder configuration.
@@ -76,6 +79,32 @@ pub struct EncodedSymbol {
     pub frame: Frame,
     /// Wire bytes plus parity bytes.
     pub codewords: Vec<u8>,
+}
+
+/// Scheduled burst transmission entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BurstScheduleEntry {
+    /// Zero-based transmit slot.
+    pub slot: usize,
+    /// Zero-based redundancy pass.
+    pub pass: u16,
+    /// Zero-based frame index in the source burst set.
+    pub frame_index: u16,
+    /// Encoded frame to render in this slot.
+    pub symbol: EncodedSymbol,
+}
+
+/// Burst sender scheduling options.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BurstScheduleConfig {
+    /// Number of full round-robin passes over all burst frames.
+    pub passes: u16,
+}
+
+impl Default for BurstScheduleConfig {
+    fn default() -> Self {
+        Self { passes: 1 }
+    }
 }
 
 /// Reference encoder.
@@ -189,6 +218,96 @@ impl Encoder {
         }
         Ok(frames)
     }
+
+    /// Encode and schedule burst frames for one-way repeated transmission.
+    pub fn encode_burst_schedule(
+        &self,
+        payload: &[u8],
+        schedule: BurstScheduleConfig,
+    ) -> Result<Vec<BurstScheduleEntry>> {
+        if schedule.passes == 0 {
+            return Err(GlyphError::InvalidArgument("burst schedule passes must be >= 1").into());
+        }
+        let frames = self.encode_burst(payload)?;
+        let frame_count = frames.len();
+        let mut entries = Vec::with_capacity(frame_count * usize::from(schedule.passes));
+        let mut slot = 0usize;
+        for pass in 0..schedule.passes {
+            for (frame_index, symbol) in frames.iter().cloned().enumerate() {
+                entries.push(BurstScheduleEntry {
+                    slot,
+                    pass,
+                    frame_index: frame_index as u16,
+                    symbol,
+                });
+                slot += 1;
+            }
+        }
+        Ok(entries)
+    }
+
+    /// Encode payload as erasure-coded burst shards packed into burst packets.
+    pub fn encode_burst_erasure(
+        &self,
+        payload: &[u8],
+        target_data_shards: usize,
+    ) -> Result<Vec<EncodedSymbol>> {
+        let base = BurstErasureCodec::from_level(
+            self.config.ecc_level,
+            payload.len(),
+            target_data_shards.max(1),
+        );
+        let min_repair = minimum_burst_repair_shards(base.data_shards, self.config.ecc_level);
+        let codec = BurstErasureCodec::new(base.data_shards, base.repair_shards.max(min_repair));
+        let shards = codec.encode(payload)?;
+        if shards.shards.len() > usize::from(u16::MAX) {
+            return Err(GlyphError::InvalidArgument(
+                "payload requires too many burst erasure shards",
+            )
+            .into());
+        }
+
+        let packet_count = shards.shards.len() as u16;
+        let stream_id = stream_id(payload);
+        let data_shards = shards.data_shards;
+        let mut frames = Vec::with_capacity(shards.shards.len());
+        for (index, shard) in shards.shards.into_iter().enumerate() {
+            let flags = if index >= data_shards { 0b0000_0001 } else { 0 };
+            let packet = BurstPacket::new(
+                index as u16,
+                packet_count,
+                stream_id,
+                flags,
+                payload.len() as u32,
+                data_shards as u16,
+                shard,
+            )?;
+            frames.push(self.encode_frame(
+                &packet.encode(),
+                index as u16,
+                packet_count,
+                stream_id,
+                TransmissionMode::Burst,
+            )?);
+        }
+        Ok(frames)
+    }
+}
+
+fn minimum_burst_repair_shards(data_shards: usize, level: EccLevel) -> usize {
+    let numer = match level {
+        EccLevel::Low => 1usize,
+        EccLevel::Medium => 1usize,
+        EccLevel::High => 3usize,
+        EccLevel::Adaptive => 1usize,
+    };
+    let denom = match level {
+        EccLevel::Low => 3usize,
+        EccLevel::Medium => 2usize,
+        EccLevel::High => 4usize,
+        EccLevel::Adaptive => 1usize,
+    };
+    ((data_shards * numer).div_ceil(denom)).max(1)
 }
 
 impl Default for Encoder {
@@ -264,5 +383,78 @@ mod tests {
         let encoded = encoder.encode_static(b"hello").unwrap();
         assert_eq!(encoded.descriptor.width, 80);
         assert_eq!(encoded.descriptor.height, 80);
+    }
+
+    #[test]
+    fn burst_schedule_round_robin_repeats_all_frames() {
+        let encoder = Encoder::new(EncoderConfig {
+            mode: TransmissionMode::Burst,
+            max_frame_payload: 2,
+            ..EncoderConfig::default()
+        });
+        let schedule = encoder
+            .encode_burst_schedule(b"abcdef", BurstScheduleConfig { passes: 2 })
+            .unwrap();
+
+        assert_eq!(schedule.len(), 6);
+        assert_eq!(schedule[0].pass, 0);
+        assert_eq!(schedule[0].frame_index, 0);
+        assert_eq!(schedule[1].frame_index, 1);
+        assert_eq!(schedule[2].frame_index, 2);
+        assert_eq!(schedule[3].pass, 1);
+        assert_eq!(schedule[3].frame_index, 0);
+        assert_eq!(schedule[5].frame_index, 2);
+    }
+
+    #[test]
+    fn burst_schedule_rejects_zero_passes() {
+        let encoder = Encoder::new(EncoderConfig {
+            mode: TransmissionMode::Burst,
+            ..EncoderConfig::default()
+        });
+        let err = encoder
+            .encode_burst_schedule(b"abc", BurstScheduleConfig { passes: 0 })
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            EncodeError::Core(GlyphError::InvalidArgument(_))
+        ));
+    }
+
+    #[test]
+    fn burst_erasure_encodes_packets_with_repair_flag() {
+        let encoder = Encoder::new(EncoderConfig {
+            mode: TransmissionMode::Burst,
+            ecc_level: EccLevel::High,
+            ..EncoderConfig::default()
+        });
+        let frames = encoder
+            .encode_burst_erasure(b"hello-erasure-burst", 4)
+            .unwrap();
+        assert!(frames.len() > 4);
+
+        let mut repair_count = 0usize;
+        for frame in &frames {
+            let packet = BurstPacket::decode(&frame.frame.payload).unwrap();
+            if packet.header.flags & 0b0000_0001 != 0 {
+                repair_count += 1;
+            }
+        }
+        assert!(repair_count > 0);
+    }
+
+    #[test]
+    fn burst_erasure_applies_minimum_repair_ratio_for_burst_mode() {
+        let encoder = Encoder::new(EncoderConfig {
+            mode: TransmissionMode::Burst,
+            ecc_level: EccLevel::High,
+            ..EncoderConfig::default()
+        });
+        let frames = encoder.encode_burst_erasure(&vec![0xAB; 512], 12).unwrap();
+        let first = BurstPacket::decode(&frames[0].frame.payload).unwrap();
+        let data_shards = usize::from(first.header.data_shards);
+        let packet_count = usize::from(first.header.packet_count);
+        let repair_shards = packet_count.saturating_sub(data_shards);
+        assert!(repair_shards >= (data_shards * 3).div_ceil(4));
     }
 }

@@ -2,11 +2,13 @@ use std::{fs, path::PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
-use glyphnet_core::{EccLevel, ProfileId, SymbolGeometry, TransmissionMode, profile_catalog};
+use glyphnet_core::{
+    EccLevel, ProfileId, SymbolGeometry, TransmissionMode, profile_catalog, profile_spec,
+};
 use glyphnet_decode::RasterDecoder;
 use glyphnet_encode::{Encoder, EncoderConfig};
 use glyphnet_render::{RasterRenderer, RenderOptions, SvgRenderer};
-use glyphnet_scanner::scan_still;
+use glyphnet_scanner::{CameraFrame, Scanner, ScannerConfig, scan_still};
 
 #[derive(Debug, Parser)]
 #[command(name = "glyphnet")]
@@ -67,6 +69,14 @@ enum Command {
         #[arg(long, value_enum, default_value_t = ModeArg::Print)]
         mode: ModeArg,
     },
+    /// Scan an ordered directory of frames as a burst session.
+    ScanBurst {
+        /// Input directory containing frame images.
+        input_dir: PathBuf,
+        /// Transmission mode used for scanner decode.
+        #[arg(long, value_enum, default_value_t = ModeArg::Burst)]
+        mode: ModeArg,
+    },
     /// Print descriptor JSON without rendering.
     Inspect {
         /// Payload data.
@@ -102,6 +112,9 @@ enum Command {
         /// Maximum payload bytes per frame.
         #[arg(long, default_value_t = 512)]
         frame_payload: usize,
+        /// Data shard count for burst erasure coding.
+        #[arg(long)]
+        erasure_data_shards: Option<usize>,
         /// Explicit symbol width in modules.
         #[arg(long, value_name = "MODULES")]
         width_modules: Option<u16>,
@@ -217,6 +230,7 @@ fn main() -> Result<()> {
         }
         Command::Decode { input, auto } => decode(input, auto),
         Command::Scan { input, mode } => scan(input, mode.into()),
+        Command::ScanBurst { input_dir, mode } => scan_burst(input_dir, mode.into()),
         Command::Inspect {
             data,
             profile,
@@ -239,6 +253,7 @@ fn main() -> Result<()> {
             output_dir,
             profile,
             frame_payload,
+            erasure_data_shards,
             width_modules,
             height_modules,
             fit_width_px,
@@ -250,6 +265,7 @@ fn main() -> Result<()> {
                 output_dir,
                 profile.into(),
                 frame_payload,
+                erasure_data_shards,
                 sizing,
             )
         }
@@ -456,6 +472,11 @@ fn scan(input: PathBuf, mode: TransmissionMode) -> Result<()> {
     payload["scan_telemetry"] = serde_json::json!({
         "candidate_count": telemetry.candidate_count,
         "failed_candidates": telemetry.failed_candidates,
+        "burst_progress": {
+            "frame_count": scanned.decoded.decoded.frame.header.frame_count,
+            "received_frames": 1,
+            "missing_frames": usize::from(scanned.decoded.decoded.frame.header.frame_count.saturating_sub(1))
+        },
         "timings": {
             "total_micros": telemetry.timings.total_micros,
             "full_frame_micros": telemetry.timings.full_frame_micros,
@@ -467,6 +488,81 @@ fn scan(input: PathBuf, mode: TransmissionMode) -> Result<()> {
         }
     });
     println!("{payload}");
+    Ok(())
+}
+
+fn scan_burst(input_dir: PathBuf, mode: TransmissionMode) -> Result<()> {
+    let mut scanner = Scanner::new(ScannerConfig {
+        mode,
+        ..ScannerConfig::default()
+    });
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(&input_dir)
+        .with_context(|| format!("failed to read directory {}", input_dir.display()))?
+    {
+        let path = entry?.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+            continue;
+        };
+        let ext = ext.to_ascii_lowercase();
+        if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "bmp") {
+            entries.push(path);
+        }
+    }
+    entries.sort();
+    if entries.is_empty() {
+        bail!("no image files found in {}", input_dir.display());
+    }
+
+    let mut events = Vec::with_capacity(entries.len());
+    for (i, path) in entries.iter().enumerate() {
+        let image = image::open(path)
+            .with_context(|| format!("failed to open image {}", path.display()))?;
+        let event = scanner
+            .scan_frame(CameraFrame {
+                image,
+                timestamp_micros: i as u64,
+            })
+            .with_context(|| format!("failed to scan frame {}", path.display()))?;
+        events.push(serde_json::json!({
+            "file": path.file_name().and_then(|name| name.to_str()).unwrap_or_default(),
+            "stream_id": event.frame.header.stream_id,
+            "frame_index": event.frame.header.frame_index,
+            "frame_count": event.frame.header.frame_count,
+            "complete": event.complete_payload.is_some(),
+            "burst_progress": {
+                "frame_count": event.burst_progress.frame_count,
+                "received_frames": event.burst_progress.received_frames,
+                "missing_frames": event.burst_progress.missing_frames
+            }
+        }));
+        if let Some(payload) = event.complete_payload {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "ok": true,
+                    "event_count": events.len(),
+                    "events": events,
+                    "payload_utf8_lossy": String::from_utf8_lossy(&payload),
+                    "payload_len": payload.len()
+                })
+            );
+            return Ok(());
+        }
+    }
+
+    println!(
+        "{}",
+        serde_json::json!({
+            "ok": false,
+            "event_count": events.len(),
+            "events": events,
+            "error": "incomplete burst stream"
+        })
+    );
     Ok(())
 }
 
@@ -530,6 +626,7 @@ fn burst(
     output_dir: PathBuf,
     profile: ProfileId,
     frame_payload: usize,
+    erasure_data_shards: Option<usize>,
     sizing: RenderSizing,
 ) -> Result<()> {
     fs::create_dir_all(&output_dir)
@@ -539,8 +636,12 @@ fn burst(
     config.max_frame_payload = frame_payload;
     config.geometry = sizing.geometry;
     let encoder = Encoder::new(config);
+    let default_shards = profile_spec(profile)
+        .burst_data_shards
+        .map(usize::from)
+        .unwrap_or(12);
     let frames = encoder
-        .encode_burst(payload)
+        .encode_burst_erasure(payload, erasure_data_shards.unwrap_or(default_shards))
         .context("failed to encode burst")?;
     for frame in frames {
         let render_options = apply_fit(
