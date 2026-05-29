@@ -1,10 +1,29 @@
 import * as FileSystem from "expo-file-system";
+import * as MediaLibrary from "expo-media-library";
 import * as Print from "expo-print";
 import { useMemo, useState } from "react";
 import { SvgXml } from "react-native-svg";
 
 import { scannerAdapter } from "@/adapters/scanner";
 import { Pressable, Text, TextInput, View } from "@/tw";
+
+function getWritableBaseDir(): string | null {
+  const fsAny = FileSystem as unknown as {
+    documentDirectory?: string | null;
+    cacheDirectory?: string | null;
+    Paths?: {
+      document?: { uri?: string };
+      cache?: { uri?: string };
+    };
+  };
+  return (
+    fsAny.documentDirectory ??
+    fsAny.cacheDirectory ??
+    fsAny.Paths?.document?.uri ??
+    fsAny.Paths?.cache?.uri ??
+    null
+  );
+}
 
 export function EncodePanel() {
   const [payload, setPayload] = useState("hello glyphnet");
@@ -44,7 +63,7 @@ export function EncodePanel() {
       return;
     }
     try {
-      const dir = FileSystem.documentDirectory ?? FileSystem.cacheDirectory;
+      const dir = getWritableBaseDir();
       if (!dir) {
         setActionMessage("Unable to access local storage.");
         return;
@@ -53,6 +72,17 @@ export function EncodePanel() {
       await FileSystem.writeAsStringAsync(uri, svgPreview, {
         encoding: FileSystem.EncodingType.UTF8,
       });
+      let savedToLibrary = false;
+      try {
+        const perm = await MediaLibrary.requestPermissionsAsync();
+        if (perm.granted) {
+          await MediaLibrary.saveToLibraryAsync(uri);
+          savedToLibrary = true;
+        }
+      } catch {
+        // Ignore and fall back to share/export.
+      }
+
       // Load sharing lazily so Expo Go / unsupported runtimes never fail at import time.
       try {
         const Sharing = await import("expo-sharing");
@@ -61,12 +91,20 @@ export function EncodePanel() {
             mimeType: "image/svg+xml",
             dialogTitle: "Share GlyphNet SVG",
           });
-          setActionMessage("SVG saved and share sheet opened.");
+          setActionMessage(
+            savedToLibrary
+              ? "SVG saved to library and share sheet opened."
+              : "SVG exported and share sheet opened.",
+          );
         } else {
-          setActionMessage(`SVG saved: ${uri}`);
+          setActionMessage(
+            savedToLibrary ? "SVG saved to library." : `SVG saved in app storage: ${uri}`,
+          );
         }
       } catch {
-        setActionMessage(`SVG saved: ${uri}`);
+        setActionMessage(
+          savedToLibrary ? "SVG saved to library." : `SVG saved in app storage: ${uri}`,
+        );
       }
     } catch (error) {
       setActionMessage(

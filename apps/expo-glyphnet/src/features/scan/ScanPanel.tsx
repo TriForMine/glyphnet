@@ -1,5 +1,7 @@
-import { CameraView, useCameraPermissions } from "expo-camera";
+it's not expo go it's expo devimport { CameraView, useCameraPermissions } from "expo-camera";
 import * as NavigationBar from "expo-navigation-bar";
+import * as FileSystem from "expo-file-system";
+import * as ImageManipulator from "expo-image-manipulator";
 import { useMemo, useRef, useState } from "react";
 import { Modal, Vibration } from "react-native";
 import { Platform, useColorScheme } from "react-native";
@@ -14,6 +16,24 @@ const MODES = ["print", "screen", "burst"] as const;
 // Wide ribbon-like scan guide (GlyphNet print profile), centered in portrait view.
 const GUIDE_ROI = { x: 0.06, y: 0.34, w: 0.88, h: 0.26 } as const;
 
+function getWritableBaseDir(): string | null {
+  const fsAny = FileSystem as unknown as {
+    documentDirectory?: string | null;
+    cacheDirectory?: string | null;
+    Paths?: {
+      document?: { uri?: string };
+      cache?: { uri?: string };
+    };
+  };
+  return (
+    fsAny.documentDirectory ??
+    fsAny.cacheDirectory ??
+    fsAny.Paths?.document?.uri ??
+    fsAny.Paths?.cache?.uri ??
+    null
+  );
+}
+
 export function ScanPanel() {
   const cameraRef = useRef<any>(null);
   const insets = useSafeAreaInsets();
@@ -25,10 +45,14 @@ export function ScanPanel() {
   const [resultOpen, setResultOpen] = useState(false);
   const [debugEnabled, setDebugEnabled] = useState(false);
   const [lastCaptureDataUri, setLastCaptureDataUri] = useState<string | null>(null);
+  const [lastCaptureUri, setLastCaptureUri] = useState<string | null>(null);
+  const [lastCaptureWidth, setLastCaptureWidth] = useState<number | null>(null);
+  const [lastCaptureHeight, setLastCaptureHeight] = useState<number | null>(null);
   const [captureMs, setCaptureMs] = useState<number | null>(null);
   const [scanMs, setScanMs] = useState<number | null>(null);
   const [torchEnabled, setTorchEnabled] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [debugSaveMessage, setDebugSaveMessage] = useState<string | null>(null);
 
   const statusLabel = useMemo(() => {
     if (!permission) {
@@ -73,6 +97,9 @@ export function ScanPanel() {
         setResult("Failed to capture image from camera.");
         return;
       }
+      setLastCaptureUri(shot.uri ?? null);
+      setLastCaptureWidth(typeof shot.width === "number" ? shot.width : null);
+      setLastCaptureHeight(typeof shot.height === "number" ? shot.height : null);
       if (debugEnabled) {
         setLastCaptureDataUri(`data:image/jpeg;base64,${shot.base64}`);
       }
@@ -114,6 +141,76 @@ export function ScanPanel() {
       return null;
     }
   }, [result]);
+
+  const saveDebugBundle = async () => {
+    setDebugSaveMessage(null);
+    if (!lastCaptureUri || !lastCaptureWidth || !lastCaptureHeight) {
+      setDebugSaveMessage("No captured image available yet.");
+      return;
+    }
+    try {
+      const dir = getWritableBaseDir();
+      if (!dir) {
+        setDebugSaveMessage("No writable app directory available.");
+        return;
+      }
+      const stamp = Date.now();
+      const outDir = `${dir}glyphnet-debug-${stamp}/`;
+      await FileSystem.makeDirectoryAsync(outDir, { intermediates: true });
+
+      const captureOut = `${outDir}capture.jpg`;
+      await FileSystem.copyAsync({ from: lastCaptureUri, to: captureOut });
+
+      const crop = {
+        originX: Math.max(0, Math.floor(lastCaptureWidth * GUIDE_ROI.x)),
+        originY: Math.max(0, Math.floor(lastCaptureHeight * GUIDE_ROI.y)),
+        width: Math.max(1, Math.floor(lastCaptureWidth * GUIDE_ROI.w)),
+        height: Math.max(1, Math.floor(lastCaptureHeight * GUIDE_ROI.h)),
+      };
+      const cropped = await ImageManipulator.manipulateAsync(
+        lastCaptureUri,
+        [{ crop }],
+        { compress: 1, format: ImageManipulator.SaveFormat.JPEG },
+      );
+      const roiOut = `${outDir}roi.jpg`;
+      await FileSystem.copyAsync({ from: cropped.uri, to: roiOut });
+
+      const debugJson = {
+        ts: stamp,
+        mode,
+        roi: GUIDE_ROI,
+        capture: {
+          width: lastCaptureWidth,
+          height: lastCaptureHeight,
+          captureMs,
+          scanMs,
+        },
+        result: parsedResult ?? result,
+      };
+      const jsonOut = `${outDir}result.json`;
+      await FileSystem.writeAsStringAsync(jsonOut, JSON.stringify(debugJson, null, 2), {
+        encoding: FileSystem.EncodingType.UTF8,
+      });
+
+      try {
+        const Sharing = await import("expo-sharing");
+        if (await Sharing.isAvailableAsync()) {
+          await Sharing.shareAsync(roiOut, {
+            mimeType: "image/jpeg",
+            dialogTitle: "Share GlyphNet ROI debug image",
+          });
+        }
+      } catch {
+        // no-op: sharing may be unavailable in current runtime.
+      }
+
+      setDebugSaveMessage(`Saved debug bundle: ${outDir}`);
+    } catch (error) {
+      setDebugSaveMessage(
+        error instanceof Error ? `Debug save failed: ${error.message}` : "Debug save failed.",
+      );
+    }
+  };
 
   return (
     <View className="flex-1">
@@ -315,6 +412,19 @@ export function ScanPanel() {
                         }}
                       />
                     </View>
+                    <Pressable
+                      onPress={() => {
+                        void saveDebugBundle();
+                      }}
+                      className="mt-3 items-center rounded-xl border border-cyan-400/50 bg-cyan-500/20 px-3 py-2"
+                    >
+                      <Text className="text-xs font-semibold uppercase tracking-wide text-cyan-100">
+                        Save Debug Bundle
+                      </Text>
+                    </Pressable>
+                    {debugSaveMessage ? (
+                      <Text className="mt-2 text-xs text-slate-300">{debugSaveMessage}</Text>
+                    ) : null}
                   </View>
                 ) : null}
 
