@@ -30,6 +30,10 @@ export interface ScanRequest {
   verifyKeyHex?: string;
   verifyKeyId?: number;
   imageBase64?: string;
+  roiX?: number;
+  roiY?: number;
+  roiW?: number;
+  roiH?: number;
   width?: number;
   height?: number;
   rgbaBase64?: string;

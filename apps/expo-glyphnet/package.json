@@ -15,6 +15,7 @@
     "expo-glass-effect": "~56.0.4",
     "expo-image": "~56.0.9",
     "expo-linking": "~56.0.12",
+    "expo-navigation-bar": "~56.0.3",
     "expo-router": "~56.2.7",
     "expo-splash-screen": "~56.0.10",
     "expo-status-bar": "~56.0.4",
@@ -30,6 +31,7 @@
     "react-native-reanimated": "4.3.1",
     "react-native-safe-area-context": "~5.7.0",
     "react-native-screens": "4.25.2",
+    "react-native-svg": "15.15.4",
     "react-native-web": "~0.21.0",
     "tailwind-merge": "^3.6.0",
     "tailwindcss": "^4"
