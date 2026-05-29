@@ -1,3 +1,5 @@
+import * as FileSystem from "expo-file-system";
+import * as Print from "expo-print";
 import { useMemo, useState } from "react";
 import { SvgXml } from "react-native-svg";
 
@@ -8,6 +10,7 @@ export function EncodePanel() {
   const [payload, setPayload] = useState("hello glyphnet");
   const [svgPreview, setSvgPreview] = useState("");
   const [encodeError, setEncodeError] = useState<string | null>(null);
+  const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   const payloadBytes = useMemo(() => new TextEncoder().encode(payload).length, [payload]);
@@ -16,6 +19,7 @@ export function EncodePanel() {
     setLoading(true);
     try {
       setEncodeError(null);
+      setActionMessage(null);
       const svg = await scannerAdapter.encodeSvg(payload);
       if (svg.trim().startsWith("<svg")) {
         setSvgPreview(svg);
@@ -31,6 +35,60 @@ export function EncodePanel() {
       }
     } finally {
       setLoading(false);
+    }
+  };
+
+  const saveSvg = async () => {
+    if (!svgPreview) {
+      setActionMessage("No SVG to save yet.");
+      return;
+    }
+    try {
+      const dir = FileSystem.documentDirectory ?? FileSystem.cacheDirectory;
+      if (!dir) {
+        setActionMessage("Unable to access local storage.");
+        return;
+      }
+      const uri = `${dir}glyphnet-${Date.now()}.svg`;
+      await FileSystem.writeAsStringAsync(uri, svgPreview, {
+        encoding: FileSystem.EncodingType.UTF8,
+      });
+      // Load sharing lazily so Expo Go / unsupported runtimes never fail at import time.
+      try {
+        const Sharing = await import("expo-sharing");
+        if (await Sharing.isAvailableAsync()) {
+          await Sharing.shareAsync(uri, {
+            mimeType: "image/svg+xml",
+            dialogTitle: "Share GlyphNet SVG",
+          });
+          setActionMessage("SVG saved and share sheet opened.");
+        } else {
+          setActionMessage(`SVG saved: ${uri}`);
+        }
+      } catch {
+        setActionMessage(`SVG saved: ${uri}`);
+      }
+    } catch (error) {
+      setActionMessage(
+        error instanceof Error ? `Save failed: ${error.message}` : "Save failed.",
+      );
+    }
+  };
+
+  const printSvg = async () => {
+    if (!svgPreview) {
+      setActionMessage("No SVG to print yet.");
+      return;
+    }
+    try {
+      await Print.printAsync({
+        html: `<!doctype html><html><body style="margin:0;display:flex;align-items:center;justify-content:center;background:#fff;">${svgPreview}</body></html>`,
+      });
+      setActionMessage("Print dialog opened.");
+    } catch (error) {
+      setActionMessage(
+        error instanceof Error ? `Print failed: ${error.message}` : "Print failed.",
+      );
     }
   };
 
@@ -62,6 +120,27 @@ export function EncodePanel() {
             </Text>
           </Pressable>
         </View>
+        <View className="mt-3 flex-row gap-2">
+          <Pressable
+            onPress={saveSvg}
+            className="flex-1 items-center rounded-xl border border-slate-300 px-3 py-2 dark:border-slate-700"
+          >
+            <Text className="text-sm font-semibold text-slate-700 dark:text-slate-200">
+              Save SVG
+            </Text>
+          </Pressable>
+          <Pressable
+            onPress={printSvg}
+            className="flex-1 items-center rounded-xl border border-slate-300 px-3 py-2 dark:border-slate-700"
+          >
+            <Text className="text-sm font-semibold text-slate-700 dark:text-slate-200">
+              Print
+            </Text>
+          </Pressable>
+        </View>
+        {actionMessage ? (
+          <Text className="mt-2 text-xs text-slate-500 dark:text-slate-400">{actionMessage}</Text>
+        ) : null}
       </View>
 
       <View className="rounded-3xl bg-white p-4 dark:bg-black">
