@@ -1,17 +1,28 @@
 import { CameraView, useCameraPermissions } from "expo-camera";
+import * as NavigationBar from "expo-navigation-bar";
 import { useMemo, useRef, useState } from "react";
+import { Modal, Vibration } from "react-native";
+import { useColorScheme } from "react-native";
+import { Platform } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { useEffect } from "react";
 
 import { scannerAdapter } from "@/adapters/scanner";
 import { Pressable, Text, TextInput, View } from "@/tw";
 
 const MODES = ["print", "screen", "burst"] as const;
+// Wide ribbon-like scan guide (GlyphNet print profile), centered in portrait view.
+const GUIDE_ROI = { x: 0.06, y: 0.34, w: 0.88, h: 0.26 } as const;
 
 export function ScanPanel() {
   const cameraRef = useRef<any>(null);
+  const insets = useSafeAreaInsets();
+  const colorScheme = useColorScheme();
   const [permission, requestPermission] = useCameraPermissions();
   const [mode, setMode] = useState<(typeof MODES)[number]>("print");
   const [verifyKeyHex, setVerifyKeyHex] = useState("");
-  const [result, setResult] = useState("No scan yet");
+  const [result, setResult] = useState("");
+  const [resultOpen, setResultOpen] = useState(false);
   const [loading, setLoading] = useState(false);
 
   const statusLabel = useMemo(() => {
@@ -23,6 +34,21 @@ export function ScanPanel() {
       : "Camera access required for live scanning";
   }, [permission]);
 
+  useEffect(() => {
+    if (Platform.OS !== "android" || colorScheme !== "dark") {
+      return;
+    }
+    const applyNavStyle = async () => {
+      try {
+        await NavigationBar.setBackgroundColorAsync("#020617");
+        await NavigationBar.setButtonStyleAsync("light");
+      } catch {
+        // Ignore navigation bar styling failures in unsupported runtimes.
+      }
+    };
+    void applyNavStyle();
+  }, [colorScheme]);
+
   const runScan = async () => {
     setLoading(true);
     try {
@@ -33,6 +59,7 @@ export function ScanPanel() {
       const shot = await cameraRef.current.takePictureAsync({
         base64: true,
         quality: 0.9,
+        shutterSound: false,
       });
       if (!shot?.base64) {
         setResult("Failed to capture image from camera.");
@@ -43,95 +70,212 @@ export function ScanPanel() {
         verifyKeyHex: verifyKeyHex || undefined,
         verifyKeyId: 1,
         imageBase64: shot.base64,
+        roiX: GUIDE_ROI.x,
+        roiY: GUIDE_ROI.y,
+        roiW: GUIDE_ROI.w,
+        roiH: GUIDE_ROI.h,
       });
       setResult(JSON.stringify(json, null, 2));
+      if (json.ok) {
+        Vibration.vibrate(18);
+      } else {
+        Vibration.vibrate([0, 24, 36, 24]);
+      }
+      setResultOpen(true);
     } finally {
       setLoading(false);
     }
   };
 
+  const parsedResult = useMemo(() => {
+    try {
+      return JSON.parse(result) as {
+        ok?: boolean;
+        payload_utf8_lossy?: string;
+        payload_len?: number;
+        error?: string;
+        mode?: string;
+      };
+    } catch {
+      return null;
+    }
+  }, [result]);
+
   return (
-    <View className="gap-3">
-      <View className="overflow-hidden rounded-3xl bg-white p-4 dark:bg-neutral-900">
-        <Text className="text-sm font-medium text-slate-500 dark:text-neutral-400">
-          Live Preview
-        </Text>
-        <View className="mt-3 h-56 overflow-hidden rounded-2xl bg-slate-200 dark:bg-neutral-800">
-          {permission?.granted ? (
-            <CameraView
-              ref={cameraRef}
-              style={{ width: "100%", height: "100%" }}
-              facing="back"
-            />
-          ) : (
-            <View className="flex-1 items-center justify-center px-6">
-              <Text className="text-center text-sm text-slate-600 dark:text-neutral-300">
-                {statusLabel}
+    <View className="flex-1">
+      {permission?.granted ? (
+        <View className="relative h-full w-full">
+          <CameraView
+            ref={cameraRef}
+            style={{ width: "100%", height: "100%" }}
+            facing="back"
+            animateShutter={false}
+          />
+          <View
+            pointerEvents="none"
+            style={{
+              position: "absolute",
+              inset: 0,
+              backgroundColor: "rgba(2, 6, 23, 0.18)",
+            }}
+          />
+          <View
+            pointerEvents="none"
+            className="absolute left-4 right-4"
+            style={{ top: Math.max(insets.top, 8) }}
+          >
+            <Text className="text-center text-lg font-semibold tracking-wide text-white">
+              GlyphNet
+            </Text>
+          </View>
+          <View
+            pointerEvents="none"
+            style={{
+              position: "absolute",
+              left: `${GUIDE_ROI.x * 100}%`,
+              top: `${GUIDE_ROI.y * 100}%`,
+              width: `${GUIDE_ROI.w * 100}%`,
+              height: `${GUIDE_ROI.h * 100}%`,
+              borderWidth: 2,
+              borderColor: "#38bdf8",
+              borderRadius: 12,
+            }}
+          />
+          <View className="absolute bottom-0 left-0 right-0 p-4">
+            <View className="rounded-2xl bg-black/55 p-3">
+              <Text className="text-center text-xs font-medium text-slate-100">
+                Align the GlyphNet code inside the blue ribbon frame
               </Text>
+              <View className="mt-3 flex-row gap-2">
+                {MODES.map((candidate) => (
+                  <Pressable
+                    key={candidate}
+                    onPress={() => setMode(candidate)}
+                    className={`flex-1 rounded-xl border px-3 py-2 ${
+                      mode === candidate
+                        ? "border-sky-400 bg-sky-500/30"
+                        : "border-slate-400/60 bg-slate-900/40"
+                    }`}
+                  >
+                    <Text className="text-center text-xs font-semibold uppercase tracking-wide text-slate-100">
+                      {candidate}
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
+              <TextInput
+                value={verifyKeyHex}
+                onChangeText={setVerifyKeyHex}
+                autoCapitalize="none"
+                placeholder="verification key (optional)"
+                placeholderTextColor="#94a3b8"
+                className="mt-3 rounded-xl border border-slate-500/60 bg-slate-900/60 px-3 py-3 text-slate-100"
+              />
               <Pressable
-                onPress={requestPermission}
-                className="mt-4 rounded-xl bg-sky-600 px-4 py-2 active:opacity-80"
+                onPress={runScan}
+                disabled={loading}
+                className="mt-3 items-center rounded-xl bg-sky-600 px-4 py-3 active:opacity-80 disabled:opacity-60"
               >
-                <Text className="text-sm font-semibold text-white">Allow Camera</Text>
+                <Text className="text-base font-semibold text-white">
+                  {loading ? "Scanning..." : "Scan Still"}
+                </Text>
               </Pressable>
             </View>
-          )}
+          </View>
         </View>
-      </View>
-
-      <View className="rounded-3xl bg-white p-4 dark:bg-neutral-900">
-        <Text className="text-sm font-medium text-slate-500 dark:text-neutral-400">
-          Mode
-        </Text>
-        <View className="mt-3 flex-row gap-2">
-          {MODES.map((candidate) => (
-            <Pressable
-              key={candidate}
-              onPress={() => setMode(candidate)}
-              className={`flex-1 rounded-xl border px-3 py-2 ${
-                mode === candidate
-                  ? "border-sky-400 bg-sky-100 dark:border-sky-500 dark:bg-sky-900/40"
-                  : "border-slate-200 bg-slate-100 dark:border-neutral-700 dark:bg-neutral-800"
-              }`}
-            >
-              <Text className="text-center text-xs font-semibold uppercase tracking-wide text-slate-800 dark:text-neutral-100">
-                {candidate}
-              </Text>
-            </Pressable>
-          ))}
-        </View>
-
-        <Text className="mt-4 text-sm font-medium text-slate-500 dark:text-neutral-400">
-          Verification key (optional)
-        </Text>
-        <TextInput
-          value={verifyKeyHex}
-          onChangeText={setVerifyKeyHex}
-          autoCapitalize="none"
-          placeholder="hex public key"
-          placeholderTextColor="#64748b"
-          className="mt-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 text-slate-900 dark:border-neutral-700 dark:bg-neutral-800 dark:text-neutral-100"
-        />
-
-        <Pressable
-          onPress={runScan}
-          disabled={loading}
-          className="mt-4 items-center rounded-xl bg-sky-600 px-4 py-3 active:opacity-80 disabled:opacity-60"
-        >
-          <Text className="text-base font-semibold text-white">
-            {loading ? "Scanning..." : "Scan Still"}
+      ) : (
+        <View className="flex-1 items-center justify-center px-6">
+          <Text className="text-center text-sm text-slate-600 dark:text-neutral-300">
+            {statusLabel}
           </Text>
-        </Pressable>
-      </View>
+          <Pressable
+            onPress={requestPermission}
+            className="mt-4 rounded-xl bg-sky-600 px-4 py-2 active:opacity-80"
+          >
+            <Text className="text-sm font-semibold text-white">Allow Camera</Text>
+          </Pressable>
+        </View>
+      )}
 
-      <View className="rounded-3xl bg-slate-900 p-4 dark:bg-black">
-        <Text className="text-xs font-semibold uppercase tracking-wide text-slate-400">
-          Result
-        </Text>
-        <Text selectable className="mt-2 font-mono text-xs leading-5 text-slate-100">
-          {result}
-        </Text>
-      </View>
+      <Modal
+        visible={resultOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setResultOpen(false)}
+      >
+        <View className="flex-1 items-center justify-center bg-black/65 p-5">
+          <View className="w-full max-w-[560px] rounded-2xl bg-slate-900 p-4">
+            <Text className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+              Scan Result
+            </Text>
+            {parsedResult ? (
+              <View className="mt-2 gap-3">
+                <View
+                  className={`rounded-xl px-3 py-2 ${
+                    parsedResult.ok ? "bg-emerald-500/20" : "bg-rose-500/20"
+                  }`}
+                >
+                  <Text
+                    className={`text-sm font-semibold ${
+                      parsedResult.ok ? "text-emerald-300" : "text-rose-300"
+                    }`}
+                  >
+                    {parsedResult.ok ? "Scan succeeded" : "Scan failed"}
+                  </Text>
+                  {!!parsedResult.mode && (
+                    <Text className="mt-1 text-xs text-slate-300">Mode: {parsedResult.mode}</Text>
+                  )}
+                </View>
+
+                {parsedResult.ok ? (
+                  <View className="rounded-xl bg-slate-800 p-3">
+                    <Text className="text-xs uppercase tracking-wide text-slate-400">Payload</Text>
+                    <Text selectable className="mt-1 text-sm text-slate-100">
+                      {parsedResult.payload_utf8_lossy || "(empty)"}
+                    </Text>
+                    <Text className="mt-1 text-xs text-slate-400">
+                      {parsedResult.payload_len ?? 0} bytes
+                    </Text>
+                  </View>
+                ) : (
+                  <View className="rounded-xl bg-slate-800 p-3">
+                    <Text className="text-xs uppercase tracking-wide text-slate-400">Error</Text>
+                    <Text selectable className="mt-1 text-sm text-rose-300">
+                      {parsedResult.error || "Unknown error"}
+                    </Text>
+                  </View>
+                )}
+
+                <Text selectable className="font-mono text-[11px] leading-5 text-slate-400">
+                  {result}
+                </Text>
+              </View>
+            ) : (
+              <Text selectable className="mt-2 font-mono text-xs leading-5 text-slate-100">
+                {result}
+              </Text>
+            )}
+
+            <View className="mt-4 flex-row gap-2">
+              <Pressable
+                onPress={() => setResultOpen(false)}
+                className="flex-1 items-center rounded-xl border border-slate-500 px-4 py-3"
+              >
+                <Text className="text-sm font-semibold text-slate-100">Close</Text>
+              </Pressable>
+              <Pressable
+                onPress={() => {
+                  setResultOpen(false);
+                  void runScan();
+                }}
+                className="flex-1 items-center rounded-xl bg-sky-600 px-4 py-3"
+              >
+                <Text className="text-sm font-semibold text-white">Scan Again</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }

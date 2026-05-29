@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
+import { SvgXml } from "react-native-svg";
 
 import { scannerAdapter } from "@/adapters/scanner";
-import { Image } from "@/tw/image";
 import { Pressable, Text, TextInput, View } from "@/tw";
 
 export function EncodePanel() {
@@ -64,18 +64,19 @@ export function EncodePanel() {
         </View>
       </View>
 
-      <View className="rounded-3xl bg-slate-900 p-4 dark:bg-black">
-        <Text className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+      <View className="rounded-3xl bg-white p-4 dark:bg-black">
+        <Text className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
           SVG output
         </Text>
         {svgPreview ? (
-          <Image
-            source={{ uri: `data:image/svg+xml;utf8,${encodeURIComponent(svgPreview)}` }}
-            contentFit="contain"
-            style={{ width: "100%", height: 220, marginTop: 10, borderRadius: 12 }}
-          />
+          <View className="mt-2 overflow-hidden rounded-xl border border-slate-200 bg-white p-2 dark:border-slate-700">
+            <SvgXml xml={svgPreview} width="100%" height={220} />
+          </View>
         ) : (
-          <Text selectable className="mt-2 font-mono text-xs leading-5 text-slate-100">
+          <Text
+            selectable
+            className="mt-2 font-mono text-xs leading-5 text-slate-700 dark:text-slate-100"
+          >
             {encodeError ?? "No output yet"}
           </Text>
         )}

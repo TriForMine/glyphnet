@@ -23,6 +23,14 @@ struct ScanStillRequest {
     rgba_base64: Option<String>,
     #[serde(rename = "imageBase64")]
     image_base64: Option<String>,
+    #[serde(rename = "roiX")]
+    roi_x: Option<f32>,
+    #[serde(rename = "roiY")]
+    roi_y: Option<f32>,
+    #[serde(rename = "roiW")]
+    roi_w: Option<f32>,
+    #[serde(rename = "roiH")]
+    roi_h: Option<f32>,
 }
 
 fn make_java_string(env: JNIEnv<'_>, value: &str) -> jstring {
@@ -56,6 +64,35 @@ fn error_json(
     .to_string()
 }
 
+fn apply_normalized_roi(
+    image: DynamicImage,
+    roi_x: Option<f32>,
+    roi_y: Option<f32>,
+    roi_w: Option<f32>,
+    roi_h: Option<f32>,
+) -> DynamicImage {
+    let (x, y, w, h) = match (roi_x, roi_y, roi_w, roi_h) {
+        (Some(x), Some(y), Some(w), Some(h)) => (x, y, w, h),
+        _ => return image,
+    };
+    if !(0.0..1.0).contains(&w) || !(0.0..1.0).contains(&h) || w <= 0.0 || h <= 0.0 {
+        return image;
+    }
+
+    let img_w = image.width();
+    let img_h = image.height();
+    let left = (x.clamp(0.0, 1.0) * img_w as f32).round() as u32;
+    let top = (y.clamp(0.0, 1.0) * img_h as f32).round() as u32;
+    let mut crop_w = (w.clamp(0.0, 1.0) * img_w as f32).round() as u32;
+    let mut crop_h = (h.clamp(0.0, 1.0) * img_h as f32).round() as u32;
+    if left >= img_w || top >= img_h {
+        return image;
+    }
+    crop_w = crop_w.min(img_w.saturating_sub(left)).max(1);
+    crop_h = crop_h.min(img_h.saturating_sub(top)).max(1);
+    image.crop_imm(left, top, crop_w, crop_h)
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_expo_modules_glyphnetscanner_GlyphNetNativeBridge_encodeSvgNative(
     mut env: JNIEnv<'_>,
@@ -87,7 +124,18 @@ pub extern "system" fn Java_expo_modules_glyphnetscanner_GlyphNetNativeBridge_en
     };
 
     match SvgRenderer::default().render(&encoded.matrix) {
-        Ok(svg) => make_java_string(env, &svg),
+        Ok(svg) => {
+            let svg_with_white_bg = if let Some(tag_end) = svg.find('>') {
+                let mut out = String::with_capacity(svg.len() + 64);
+                out.push_str(&svg[..=tag_end]);
+                out.push_str(r##"<rect width="100%" height="100%" fill="#FFFFFF"/>"##);
+                out.push_str(&svg[tag_end + 1..]);
+                out
+            } else {
+                svg
+            };
+            make_java_string(env, &svg_with_white_bg)
+        }
         Err(error) => {
             let err = json!({
                 "ok": false,
@@ -232,7 +280,14 @@ pub extern "system" fn Java_expo_modules_glyphnetscanner_GlyphNetNativeBridge_sc
         }
     };
 
-    let response = match scan_still_with_diagnostics(&image, mode) {
+    let cropped = apply_normalized_roi(
+        image,
+        parsed.roi_x,
+        parsed.roi_y,
+        parsed.roi_w,
+        parsed.roi_h,
+    );
+    let response = match scan_still_with_diagnostics(&cropped, mode) {
         Ok(scanned) => json!({
             "ok": true,
             "payload_utf8_lossy": String::from_utf8_lossy(&scanned.decoded.decoded.frame.payload),
