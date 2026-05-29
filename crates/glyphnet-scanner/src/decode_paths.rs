@@ -1,8 +1,9 @@
 use glyphnet_core::{Cell, FrameHeader, HEADER_LEN, LayoutFamily, SymbolMatrix, bitstream, layout};
+use glyphnet_cv::{Point, Quad, warp_perspective_gray};
 use glyphnet_decode::{
-    AutoDecodedSymbol, DecodeError, DecodeOptions, RasterDecoder, decode_matrix,
+    AutoDecodedSymbol, DecodeError, DecodeOptions, RasterDecoder, decode_matrix_with_suspect_bytes,
 };
-use image::{DynamicImage, GrayImage};
+use image::{DynamicImage, GrayImage, Luma};
 
 use crate::ScanRegion;
 
@@ -169,6 +170,10 @@ fn decode_fractional_ribbon_candidate(
     thresholds.sort_unstable();
     thresholds.dedup();
 
+    if let Ok(decoded) = decode_normalized_dark_bounds_ribbon(&luma, otsu) {
+        return Ok(decoded);
+    }
+
     for scale_adjust in [1.0_f32, 0.985, 1.015, 0.97, 1.03] {
         let scale_x = base_scale_x * scale_adjust;
         let scale_y = base_scale_y * scale_adjust;
@@ -214,6 +219,140 @@ fn decode_fractional_ribbon_candidate(
 
 fn module_shifts(radius: i32) -> impl Iterator<Item = f32> {
     (-radius * 2..=radius * 2).map(|value| value as f32 * 0.5)
+}
+
+fn decode_normalized_dark_bounds_ribbon(
+    luma: &GrayImage,
+    otsu: u8,
+) -> std::result::Result<AutoDecodedSymbol, DecodeError> {
+    const MODULE_PX: u32 = 4;
+    const SYMBOL_WIDTH: u32 = 96;
+    const SYMBOL_HEIGHT: u32 = 36;
+    const QUIET_MODULES: u32 = 4;
+    const TOTAL_WIDTH: u32 = (SYMBOL_WIDTH + QUIET_MODULES * 2) * MODULE_PX;
+    const TOTAL_HEIGHT: u32 = (SYMBOL_HEIGHT + QUIET_MODULES * 2) * MODULE_PX;
+
+    for threshold in [otsu.saturating_sub(80).clamp(40, 72), 48, 56] {
+        let Some(bounds) = dark_bounds_luma(luma, threshold) else {
+            continue;
+        };
+        let (min_x, min_y, max_x, max_y) = bounds;
+        let width = max_x.saturating_sub(min_x).saturating_add(1);
+        let height = max_y.saturating_sub(min_y).saturating_add(1);
+        if width < SYMBOL_WIDTH || height < SYMBOL_HEIGHT {
+            continue;
+        }
+        let Some(quad) = dark_content_quad(luma, threshold, min_x, max_x) else {
+            continue;
+        };
+        let mut normalized = warp_perspective_gray(
+            luma,
+            quad,
+            SYMBOL_WIDTH * MODULE_PX,
+            SYMBOL_HEIGHT * MODULE_PX,
+        )
+        .map_err(|_| DecodeError::AutoDetectFailed)?;
+        let normalized_threshold = fractional_threshold(&normalized).clamp(96, 160);
+        for pixel in normalized.pixels_mut() {
+            pixel.0[0] = if pixel.0[0] < normalized_threshold {
+                0
+            } else {
+                255
+            };
+        }
+        let mut canvas = GrayImage::from_pixel(TOTAL_WIDTH, TOTAL_HEIGHT, Luma([255]));
+        image::imageops::overlay(
+            &mut canvas,
+            &normalized,
+            i64::from(QUIET_MODULES * MODULE_PX),
+            i64::from(QUIET_MODULES * MODULE_PX),
+        );
+        let image = DynamicImage::ImageLuma8(canvas);
+        let region = ScanRegion {
+            x: 0,
+            y: 0,
+            width: TOTAL_WIDTH,
+            height: TOTAL_HEIGHT,
+        };
+        if let Ok(decoded) = decode_exact_ribbon_candidate(&image, region) {
+            return Ok(decoded);
+        }
+    }
+    Err(DecodeError::AutoDetectFailed)
+}
+
+fn dark_content_quad(luma: &GrayImage, threshold: u8, min_x: u32, max_x: u32) -> Option<Quad> {
+    let span = max_x.saturating_sub(min_x).saturating_add(1);
+    let band = (span / 5).max(16);
+    let left = vertical_dark_extent(luma, threshold, min_x, min_x.saturating_add(band))?;
+    let right = vertical_dark_extent(luma, threshold, max_x.saturating_sub(band), max_x)?;
+    let expand_edge = |top: u32, bottom: u32| {
+        let module = bottom.saturating_sub(top).max(1) as f32 / 29.0;
+        (
+            (top as f32 - module * 3.0).max(0.0),
+            (bottom as f32 + module * 4.0).min(luma.height().saturating_sub(1) as f32),
+        )
+    };
+    let left = expand_edge(left.0, left.1);
+    let right = expand_edge(right.0, right.1);
+    Some(Quad {
+        top_left: Point {
+            x: min_x as f32,
+            y: left.0,
+        },
+        top_right: Point {
+            x: max_x as f32,
+            y: right.0,
+        },
+        bottom_right: Point {
+            x: max_x as f32,
+            y: right.1,
+        },
+        bottom_left: Point {
+            x: min_x as f32,
+            y: left.1,
+        },
+    })
+}
+
+fn vertical_dark_extent(
+    luma: &GrayImage,
+    threshold: u8,
+    start_x: u32,
+    end_x: u32,
+) -> Option<(u32, u32)> {
+    let mut min_y = u32::MAX;
+    let mut max_y = 0u32;
+    let mut found = false;
+    for y in 0..luma.height() {
+        for x in start_x..=end_x.min(luma.width().saturating_sub(1)) {
+            if luma.get_pixel(x, y)[0] < threshold {
+                min_y = min_y.min(y);
+                max_y = max_y.max(y);
+                found = true;
+            }
+        }
+    }
+    found.then_some((min_y, max_y))
+}
+
+fn dark_bounds_luma(luma: &GrayImage, threshold: u8) -> Option<(u32, u32, u32, u32)> {
+    let mut min_x = u32::MAX;
+    let mut min_y = u32::MAX;
+    let mut max_x = 0u32;
+    let mut max_y = 0u32;
+    let mut found = false;
+    for (x, y, pixel) in luma.enumerate_pixels() {
+        if pixel[0] >= threshold {
+            continue;
+        }
+        found = true;
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x);
+        max_y = max_y.max(y);
+    }
+    found.then_some((min_x, min_y, max_x, max_y))
 }
 
 fn fractional_header_precheck(
@@ -290,6 +429,7 @@ fn decode_fractional_with_params(
 
     let mut matrix =
         SymbolMatrix::with_layout(SYMBOL_WIDTH, SYMBOL_HEIGHT, LayoutFamily::RibbonWeave);
+    let mut bit_confidence = Vec::new();
     for y in 0..SYMBOL_HEIGHT {
         for x in 0..SYMBOL_WIDTH {
             if let Some(cell) = layout::function_cell_for(
@@ -310,10 +450,13 @@ fn decode_fractional_with_params(
                 scale_y,
             );
             matrix.set(x, y, Cell::Data(avg < threshold))?;
+            bit_confidence.push(avg.abs_diff(threshold));
         }
     }
 
-    let decoded = decode_matrix(&matrix)?;
+    let suspect_bytes =
+        glyphnet_decode::suspect_bytes_from_confidence(&matrix, &bit_confidence, 16);
+    let decoded = decode_matrix_with_suspect_bytes(&matrix, &suspect_bytes)?;
     Ok(AutoDecodedSymbol {
         decoded,
         info: glyphnet_decode::AutoDecodeInfo {

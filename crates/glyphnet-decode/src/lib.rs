@@ -102,6 +102,23 @@ pub fn decode_matrix(matrix: &SymbolMatrix) -> Result<DecodedSymbol> {
     decode_matrix_with_suspects(matrix, &[])
 }
 
+/// Decode a matrix while prioritizing likely-corrupted byte indexes for ECC recovery.
+pub fn decode_matrix_with_suspect_bytes(
+    matrix: &SymbolMatrix,
+    suspect_bytes: &[usize],
+) -> Result<DecodedSymbol> {
+    decode_matrix_with_suspects(matrix, suspect_bytes)
+}
+
+/// Rank likely-corrupted byte indexes from per-data-bit confidence scores.
+pub fn suspect_bytes_from_confidence(
+    matrix: &SymbolMatrix,
+    bit_confidence: &[u8],
+    limit: usize,
+) -> Vec<usize> {
+    suspect_bytes_from_bit_confidence(matrix, bit_confidence, limit)
+}
+
 /// Raster image decoder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RasterDecoder {
