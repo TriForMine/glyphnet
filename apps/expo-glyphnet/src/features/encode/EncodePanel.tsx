@@ -1,4 +1,4 @@
-import * as FileSystem from "expo-file-system";
+import { Directory, File, Paths } from "expo-file-system";
 import * as MediaLibrary from "expo-media-library";
 import * as Print from "expo-print";
 import { useMemo, useState } from "react";
@@ -6,24 +6,6 @@ import { SvgXml } from "react-native-svg";
 
 import { scannerAdapter } from "@/adapters/scanner";
 import { Pressable, Text, TextInput, View } from "@/tw";
-
-function getWritableBaseDir(): string | null {
-  const fsAny = FileSystem as unknown as {
-    documentDirectory?: string | null;
-    cacheDirectory?: string | null;
-    Paths?: {
-      document?: { uri?: string };
-      cache?: { uri?: string };
-    };
-  };
-  return (
-    fsAny.documentDirectory ??
-    fsAny.cacheDirectory ??
-    fsAny.Paths?.document?.uri ??
-    fsAny.Paths?.cache?.uri ??
-    null
-  );
-}
 
 export function EncodePanel() {
   const [payload, setPayload] = useState("hello glyphnet");
@@ -63,15 +45,12 @@ export function EncodePanel() {
       return;
     }
     try {
-      const dir = getWritableBaseDir();
-      if (!dir) {
-        setActionMessage("Unable to access local storage.");
-        return;
-      }
-      const uri = `${dir}glyphnet-${Date.now()}.svg`;
-      await FileSystem.writeAsStringAsync(uri, svgPreview, {
-        encoding: FileSystem.EncodingType.UTF8,
-      });
+      const exportDir = new Directory(Paths.document, "glyphnet-exports");
+      exportDir.create({ idempotent: true, intermediates: true });
+      const file = new File(exportDir, `glyphnet-${Date.now()}.svg`);
+      file.create({ overwrite: true, intermediates: true });
+      file.write(svgPreview, { encoding: "utf8" });
+      const uri = file.uri;
       let savedToLibrary = false;
       try {
         const perm = await MediaLibrary.requestPermissionsAsync();
