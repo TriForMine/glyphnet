@@ -2,12 +2,12 @@ import { CameraView, useCameraPermissions } from "expo-camera";
 import * as NavigationBar from "expo-navigation-bar";
 import { useMemo, useRef, useState } from "react";
 import { Modal, Vibration } from "react-native";
-import { useColorScheme } from "react-native";
-import { Platform } from "react-native";
+import { Platform, useColorScheme } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useEffect } from "react";
 
 import { scannerAdapter } from "@/adapters/scanner";
+import { Image } from "@/tw/image";
 import { Pressable, Text, TextInput, View } from "@/tw";
 
 const MODES = ["print", "screen", "burst"] as const;
@@ -23,6 +23,11 @@ export function ScanPanel() {
   const [verifyKeyHex, setVerifyKeyHex] = useState("");
   const [result, setResult] = useState("");
   const [resultOpen, setResultOpen] = useState(false);
+  const [debugEnabled, setDebugEnabled] = useState(false);
+  const [lastCaptureDataUri, setLastCaptureDataUri] = useState<string | null>(null);
+  const [captureMs, setCaptureMs] = useState<number | null>(null);
+  const [scanMs, setScanMs] = useState<number | null>(null);
+  const [torchEnabled, setTorchEnabled] = useState(false);
   const [loading, setLoading] = useState(false);
 
   const statusLabel = useMemo(() => {
@@ -43,7 +48,7 @@ export function ScanPanel() {
         await NavigationBar.setBackgroundColorAsync("#020617");
         await NavigationBar.setButtonStyleAsync("light");
       } catch {
-        // Ignore navigation bar styling failures in unsupported runtimes.
+        // Ignore runtime/platform cases where nav bar styling is unavailable.
       }
     };
     void applyNavStyle();
@@ -56,15 +61,22 @@ export function ScanPanel() {
         setResult("Camera capture is not ready yet.");
         return;
       }
+      const captureStart = Date.now();
       const shot = await cameraRef.current.takePictureAsync({
         base64: true,
         quality: 0.9,
         shutterSound: false,
       });
+      const captureElapsed = Date.now() - captureStart;
+      setCaptureMs(captureElapsed);
       if (!shot?.base64) {
         setResult("Failed to capture image from camera.");
         return;
       }
+      if (debugEnabled) {
+        setLastCaptureDataUri(`data:image/jpeg;base64,${shot.base64}`);
+      }
+      const scanStart = Date.now();
       const json = await scannerAdapter.scanStill({
         mode,
         verifyKeyHex: verifyKeyHex || undefined,
@@ -75,6 +87,8 @@ export function ScanPanel() {
         roiW: GUIDE_ROI.w,
         roiH: GUIDE_ROI.h,
       });
+      const scanElapsed = Date.now() - scanStart;
+      setScanMs(scanElapsed);
       setResult(JSON.stringify(json, null, 2));
       if (json.ok) {
         Vibration.vibrate(18);
@@ -110,6 +124,7 @@ export function ScanPanel() {
             style={{ width: "100%", height: "100%" }}
             facing="back"
             animateShutter={false}
+            enableTorch={torchEnabled}
           />
           <View
             pointerEvents="none"
@@ -163,6 +178,32 @@ export function ScanPanel() {
                   </Pressable>
                 ))}
               </View>
+              <View className="mt-3 flex-row gap-2">
+                <Pressable
+                  onPress={() => setTorchEnabled((v) => !v)}
+                  className={`flex-1 items-center rounded-xl border px-3 py-2 ${
+                    torchEnabled
+                      ? "border-amber-300 bg-amber-500/30"
+                      : "border-slate-400/60 bg-slate-900/40"
+                  }`}
+                >
+                  <Text className="text-xs font-semibold uppercase tracking-wide text-slate-100">
+                    Torch: {torchEnabled ? "On" : "Off"}
+                  </Text>
+                </Pressable>
+              </View>
+              <Pressable
+                onPress={() => setDebugEnabled((v) => !v)}
+                className={`mt-3 items-center rounded-xl border px-3 py-2 ${
+                  debugEnabled
+                    ? "border-amber-300 bg-amber-500/25"
+                    : "border-slate-400/60 bg-slate-900/40"
+                }`}
+              >
+                <Text className="text-xs font-semibold uppercase tracking-wide text-slate-100">
+                  Debug: {debugEnabled ? "On" : "Off"}
+                </Text>
+              </Pressable>
               <TextInput
                 value={verifyKeyHex}
                 onChangeText={setVerifyKeyHex}
@@ -225,6 +266,9 @@ export function ScanPanel() {
                   {!!parsedResult.mode && (
                     <Text className="mt-1 text-xs text-slate-300">Mode: {parsedResult.mode}</Text>
                   )}
+                  <Text className="mt-1 text-xs text-slate-300">
+                    Capture: {captureMs ?? "-"} ms | Scan: {scanMs ?? "-"} ms
+                  </Text>
                 </View>
 
                 {parsedResult.ok ? (
@@ -245,6 +289,34 @@ export function ScanPanel() {
                     </Text>
                   </View>
                 )}
+
+                {debugEnabled && lastCaptureDataUri ? (
+                  <View className="rounded-xl bg-slate-800 p-3">
+                    <Text className="text-xs uppercase tracking-wide text-slate-400">
+                      Debug Capture + ROI
+                    </Text>
+                    <View className="relative mt-2 overflow-hidden rounded-lg border border-slate-600">
+                      <Image
+                        source={{ uri: lastCaptureDataUri }}
+                        contentFit="fill"
+                        style={{ width: "100%", height: 180, backgroundColor: "#000" }}
+                      />
+                      <View
+                        pointerEvents="none"
+                        style={{
+                          position: "absolute",
+                          left: `${GUIDE_ROI.x * 100}%`,
+                          top: `${GUIDE_ROI.y * 100}%`,
+                          width: `${GUIDE_ROI.w * 100}%`,
+                          height: `${GUIDE_ROI.h * 100}%`,
+                          borderWidth: 2,
+                          borderColor: "#22d3ee",
+                          borderRadius: 8,
+                        }}
+                      />
+                    </View>
+                  </View>
+                ) : null}
 
                 <Text selectable className="font-mono text-[11px] leading-5 text-slate-400">
                   {result}
