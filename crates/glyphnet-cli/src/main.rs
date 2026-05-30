@@ -1,14 +1,18 @@
-use std::{fs, path::PathBuf};
+use std::{env, fs, path::PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use glyphnet_core::{
     EccLevel, ProfileId, SymbolGeometry, TransmissionMode, profile_catalog, profile_spec,
 };
+use glyphnet_cv::{VisionProfile, adaptive_threshold, grayscale, warp_perspective_gray};
 use glyphnet_decode::RasterDecoder;
 use glyphnet_encode::{Encoder, EncoderConfig};
 use glyphnet_render::{RasterRenderer, RenderOptions, SvgRenderer};
-use glyphnet_scanner::{CameraFrame, Scanner, ScannerConfig, scan_still};
+use glyphnet_scanner::{
+    CameraFrame, FailedStillScan, Scanner, ScannerConfig, scan_still_robust,
+    scan_still_with_diagnostics,
+};
 mod auth;
 
 #[derive(Debug, Parser)]
@@ -682,8 +686,30 @@ fn scan(
 ) -> Result<()> {
     let image =
         image::open(&input).with_context(|| format!("failed to open image {}", input.display()))?;
+    let debug = ScanDebug::from_env(&input);
+    if let Some(debug) = &debug {
+        debug.dump_base_steps(&image, mode)?;
+    }
     let detached_signature = auth::load_detached_verification_input(detached_auth_file.as_ref())?;
-    let scanned = scan_still(&image, mode).context("failed to scan image")?;
+    let scanned = match scan_still_with_diagnostics(&image, mode) {
+        Ok(scanned) => {
+            if let Some(debug) = &debug {
+                debug.dump_success(&image, mode, &scanned)?;
+            }
+            scanned
+        }
+        Err(failed) => {
+            if let Some(debug) = &debug {
+                let _ = debug.dump_failure(&image, mode, &failed);
+            }
+            let robust = scan_still_robust(&image, mode)
+                .map_err(|_| anyhow::anyhow!("failed to scan image: {}", failed.error))?;
+            if let Some(debug) = &debug {
+                debug.dump_robust_success(&image, mode, &robust)?;
+            }
+            robust
+        }
+    };
     let crop = scanned.crop.map(|region| {
         serde_json::json!({
             "x": region.x,
@@ -742,6 +768,326 @@ fn scan(
     }
     println!("{payload}");
     Ok(())
+}
+
+struct ScanDebug {
+    enabled: bool,
+    dir: PathBuf,
+}
+
+impl ScanDebug {
+    fn from_env(input: &std::path::Path) -> Option<Self> {
+        if env::var_os("GLYPHNET_SCAN_DEBUG").is_none() {
+            return None;
+        }
+        let input_stem = input
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("scan");
+        let dir = env::var_os("GLYPHNET_SCAN_DEBUG_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("target").join("scan-debug"))
+            .join(input_stem);
+        Some(Self { enabled: true, dir })
+    }
+
+    fn dump_base_steps(&self, image: &image::DynamicImage, mode: TransmissionMode) -> Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        fs::create_dir_all(&self.dir)
+            .with_context(|| format!("failed to create debug directory {}", self.dir.display()))?;
+        image
+            .save(self.dir.join("00-input.png"))
+            .context("failed to save debug input image")?;
+        let gray = grayscale(image).context("failed to compute debug grayscale image")?;
+        gray.save(self.dir.join("01-gray.png"))
+            .context("failed to save debug grayscale image")?;
+        let profile = VisionProfile::for_mode(mode);
+        let binary = adaptive_threshold(&gray, profile.threshold_radius, profile.threshold_bias)
+            .context("failed to compute debug binary image")?;
+        binary
+            .save(self.dir.join("02-binary.png"))
+            .context("failed to save debug binary image")?;
+        self.write_binary_text(&binary)?;
+        self.write_binary_grid_image(&binary)?;
+        Ok(())
+    }
+
+    fn dump_success(
+        &self,
+        image: &image::DynamicImage,
+        mode: TransmissionMode,
+        scanned: &glyphnet_scanner::StillScanResult,
+    ) -> Result<()> {
+        self.dump_attempt_regions(image, mode, &scanned.attempts)?;
+        self.write_decoded_matrix_artifacts(&scanned.decoded.decoded.matrix)?;
+        if let Some(crop) = scanned.crop {
+            let cropped =
+                image::imageops::crop_imm(image, crop.x, crop.y, crop.width, crop.height).to_image();
+            cropped
+                .save(self.dir.join("03-crop-hit.png"))
+                .context("failed to save debug crop hit image")?;
+        }
+        if let (Some(quad), Some((width, height))) = (scanned.quad, scanned.warp_size) {
+            let gray = grayscale(image).context("failed to compute gray for debug warp")?;
+            let warped = warp_perspective_gray(&gray, quad, width, height)
+                .context("failed to compute debug warp image")?;
+            warped
+                .save(self.dir.join("04-quad-warp.png"))
+                .context("failed to save debug warp image")?;
+        }
+        let telemetry = scanned.telemetry();
+        let payload = serde_json::json!({
+            "ok": true,
+            "mode": mode.to_string(),
+            "auto": {
+                "module_px": scanned.decoded.info.module_px,
+                "quiet_zone_modules": scanned.decoded.info.quiet_zone_modules,
+                "threshold": scanned.decoded.info.threshold,
+                "layout": layout_name(scanned.decoded.info.layout)
+            },
+            "crop": scanned.crop.map(|region| serde_json::json!({
+                "x": region.x,
+                "y": region.y,
+                "width": region.width,
+                "height": region.height
+            })),
+            "quad": scanned.quad.map(|quad| serde_json::json!({
+                "top_left": {"x": quad.top_left.x, "y": quad.top_left.y},
+                "top_right": {"x": quad.top_right.x, "y": quad.top_right.y},
+                "bottom_right": {"x": quad.bottom_right.x, "y": quad.bottom_right.y},
+                "bottom_left": {"x": quad.bottom_left.x, "y": quad.bottom_left.y}
+            })),
+            "warp_size": scanned.warp_size.map(|(w, h)| serde_json::json!({"width": w, "height": h})),
+            "attempts": scanned.attempts.iter().enumerate().map(|(index, attempt)| serde_json::json!({
+                "index": index,
+                "detector": attempt.detector,
+                "layout_hint": attempt.layout_hint.map(layout_name),
+                "stage": attempt.stage,
+                "decoded": attempt.decoded,
+                "error": attempt.error,
+                "duration_micros": attempt.duration_micros,
+                "region": {"x": attempt.region.x, "y": attempt.region.y, "width": attempt.region.width, "height": attempt.region.height}
+            })).collect::<Vec<_>>(),
+            "timings": {
+                "total_micros": telemetry.timings.total_micros,
+                "full_frame_micros": telemetry.timings.full_frame_micros,
+                "grayscale_micros": telemetry.timings.grayscale_micros,
+                "threshold_micros": telemetry.timings.threshold_micros,
+                "quad_micros": telemetry.timings.quad_micros,
+                "candidate_micros": telemetry.timings.candidate_micros,
+                "decode_attempts_micros": telemetry.timings.decode_attempts_micros
+            }
+        });
+        fs::write(
+            self.dir.join("diagnostics.json"),
+            serde_json::to_string_pretty(&payload)?,
+        )
+        .context("failed to write debug diagnostics json")?;
+        Ok(())
+    }
+
+    fn dump_failure(
+        &self,
+        image: &image::DynamicImage,
+        mode: TransmissionMode,
+        failed: &FailedStillScan,
+    ) -> Result<()> {
+        self.dump_attempt_regions(image, mode, &failed.attempts)?;
+        let payload = serde_json::json!({
+            "ok": false,
+            "mode": mode.to_string(),
+            "error": failed.error.to_string(),
+            "attempts": failed.attempts.iter().enumerate().map(|(index, attempt)| serde_json::json!({
+                "index": index,
+                "detector": attempt.detector,
+                "layout_hint": attempt.layout_hint.map(layout_name),
+                "stage": attempt.stage,
+                "decoded": attempt.decoded,
+                "error": attempt.error,
+                "duration_micros": attempt.duration_micros,
+                "region": {"x": attempt.region.x, "y": attempt.region.y, "width": attempt.region.width, "height": attempt.region.height}
+            })).collect::<Vec<_>>(),
+            "timings": {
+                "total_micros": failed.timings.total_micros,
+                "full_frame_micros": failed.timings.full_frame_micros,
+                "grayscale_micros": failed.timings.grayscale_micros,
+                "threshold_micros": failed.timings.threshold_micros,
+                "quad_micros": failed.timings.quad_micros,
+                "candidate_micros": failed.timings.candidate_micros,
+                "decode_attempts_micros": failed.timings.decode_attempts_micros
+            }
+        });
+        fs::write(
+            self.dir.join("diagnostics.json"),
+            serde_json::to_string_pretty(&payload)?,
+        )
+        .context("failed to write failure diagnostics json")?;
+        Ok(())
+    }
+
+    fn dump_robust_success(
+        &self,
+        image: &image::DynamicImage,
+        mode: TransmissionMode,
+        scanned: &glyphnet_scanner::StillScanResult,
+    ) -> Result<()> {
+        self.dump_success(image, mode, scanned)?;
+        let path = self.dir.join("diagnostics.json");
+        let data = fs::read_to_string(&path).context("failed to read diagnostics json")?;
+        let mut payload: serde_json::Value =
+            serde_json::from_str(&data).context("failed to parse diagnostics json")?;
+        payload["used_robust_fallback"] = serde_json::json!(true);
+        fs::write(path, serde_json::to_string_pretty(&payload)?)
+            .context("failed to rewrite diagnostics json")?;
+        Ok(())
+    }
+
+    fn dump_attempt_regions(
+        &self,
+        image: &image::DynamicImage,
+        mode: TransmissionMode,
+        attempts: &[glyphnet_scanner::ScanAttempt],
+    ) -> Result<()> {
+        let profile = VisionProfile::for_mode(mode);
+        for (index, attempt) in attempts.iter().enumerate() {
+            let region = attempt.region;
+            let cropped =
+                image::imageops::crop_imm(image, region.x, region.y, region.width, region.height)
+                    .to_image();
+            let state = if attempt.decoded { "hit" } else { "miss" };
+            let stem = format!(
+                "attempt-{index:03}-{state}-{}-{}-{}x{}+{}+{}",
+                attempt.detector,
+                attempt.stage,
+                region.width,
+                region.height,
+                region.x,
+                region.y
+            );
+            cropped
+                .save(self.dir.join(format!("{stem}-crop.png")))
+                .context("failed to save attempt debug crop")?;
+
+            let cropped_dyn = image::DynamicImage::ImageRgba8(cropped);
+            let gray = grayscale(&cropped_dyn).context("failed to grayscale attempt crop")?;
+            gray.save(self.dir.join(format!("{stem}-gray.png")))
+                .context("failed to save attempt grayscale image")?;
+
+            let binary = adaptive_threshold(&gray, profile.threshold_radius, profile.threshold_bias)
+                .context("failed to threshold attempt crop")?;
+            binary
+                .save(self.dir.join(format!("{stem}-binary.png")))
+                .context("failed to save attempt binary image")?;
+            self.write_binary_text_named(&binary, &format!("{stem}-binary.txt"))?;
+            self.write_binary_grid_image_named(&binary, &format!("{stem}-binary-grid.png"))?;
+        }
+        Ok(())
+    }
+
+    fn write_binary_text(&self, binary: &image::GrayImage) -> Result<()> {
+        self.write_binary_text_named(binary, "02-binary.txt")
+    }
+
+    fn write_binary_text_named(&self, binary: &image::GrayImage, name: &str) -> Result<()> {
+        let mut text =
+            String::with_capacity((binary.width() as usize + 1).saturating_mul(binary.height() as usize));
+        for y in 0..binary.height() {
+            for x in 0..binary.width() {
+                let pixel = binary.get_pixel(x, y).0[0];
+                text.push(if pixel == 0 { '1' } else { '0' });
+            }
+            text.push('\n');
+        }
+        fs::write(self.dir.join(name), text)
+            .context("failed to write debug binary text file")?;
+        Ok(())
+    }
+
+    fn write_binary_grid_image(&self, binary: &image::GrayImage) -> Result<()> {
+        self.write_binary_grid_image_named(binary, "02-binary-grid.png")
+    }
+
+    fn write_binary_grid_image_named(&self, binary: &image::GrayImage, name: &str) -> Result<()> {
+        const CELL: u32 = 4;
+        const GRID: u32 = 1;
+
+        let width = binary.width();
+        let height = binary.height();
+        let out_width = width.saturating_mul(CELL + GRID).saturating_add(GRID);
+        let out_height = height.saturating_mul(CELL + GRID).saturating_add(GRID);
+        let mut out = image::GrayImage::from_pixel(out_width, out_height, image::Luma([220]));
+
+        for y in 0..height {
+            for x in 0..width {
+                let pixel = binary.get_pixel(x, y).0[0];
+                let start_x = GRID + x * (CELL + GRID);
+                let start_y = GRID + y * (CELL + GRID);
+                for dy in 0..CELL {
+                    for dx in 0..CELL {
+                        out.put_pixel(start_x + dx, start_y + dy, image::Luma([pixel]));
+                    }
+                }
+            }
+        }
+
+        out.save(self.dir.join(name))
+            .context("failed to save debug binary grid image")?;
+        Ok(())
+    }
+
+    fn write_decoded_matrix_artifacts(&self, matrix: &glyphnet_core::SymbolMatrix) -> Result<()> {
+        let width = usize::from(matrix.width());
+        let height = usize::from(matrix.height());
+
+        let mut text = String::with_capacity((width + 1).saturating_mul(height));
+        for y in 0..matrix.height() {
+            for x in 0..matrix.width() {
+                let cell = matrix.get(x, y).map_err(|err| anyhow::anyhow!(err.to_string()))?;
+                text.push(if cell.is_dark() { '1' } else { '0' });
+            }
+            text.push('\n');
+        }
+        fs::write(self.dir.join("05-decoded-matrix.txt"), text)
+            .context("failed to write decoded matrix text")?;
+
+        const CELL: u32 = 14;
+        const GRID: u32 = 1;
+        let out_width = u32::from(matrix.width())
+            .saturating_mul(CELL + GRID)
+            .saturating_add(GRID);
+        let out_height = u32::from(matrix.height())
+            .saturating_mul(CELL + GRID)
+            .saturating_add(GRID);
+        let mut out = image::GrayImage::from_pixel(out_width, out_height, image::Luma([210]));
+
+        for y in 0..matrix.height() {
+            for x in 0..matrix.width() {
+                let cell = matrix.get(x, y).map_err(|err| anyhow::anyhow!(err.to_string()))?;
+                let value = if cell.is_dark() { 0 } else { 255 };
+                let start_x = GRID + u32::from(x) * (CELL + GRID);
+                let start_y = GRID + u32::from(y) * (CELL + GRID);
+                for dy in 0..CELL {
+                    for dx in 0..CELL {
+                        out.put_pixel(start_x + dx, start_y + dy, image::Luma([value]));
+                    }
+                }
+            }
+        }
+        out.save(self.dir.join("05-decoded-matrix-grid.png"))
+            .context("failed to save decoded matrix grid image")?;
+
+        let data_bits = matrix.read_data_bits();
+        let mut data_bits_text = String::with_capacity(data_bits.len() + 1);
+        for bit in data_bits {
+            data_bits_text.push(if bit { '1' } else { '0' });
+        }
+        data_bits_text.push('\n');
+        fs::write(self.dir.join("05-decoded-data-bits.txt"), data_bits_text)
+            .context("failed to write decoded data bits text")?;
+        Ok(())
+    }
 }
 
 // Auth/keyset logic extracted to `auth` module.

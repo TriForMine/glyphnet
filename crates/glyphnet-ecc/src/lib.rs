@@ -602,6 +602,24 @@ pub fn try_recover_for_mode_with_suspects_and_telemetry(
                         }
                     }
                 }
+                for count in 3..=suspect_pool.len().min(rs.parity_shards) {
+                    attempts += 1;
+                    if attempts > max_attempts {
+                        telemetry.attempts = attempts;
+                        telemetry.max_attempts_exceeded = true;
+                        return (None, telemetry);
+                    }
+                    if let Some(candidate) =
+                        rs.recover_data_shards(&normalized, data_len, &suspect_pool[..count])
+                        && rs.verify(&candidate, data_len)
+                        && Frame::decode(&candidate).is_ok()
+                    {
+                        telemetry.recovered = true;
+                        telemetry.attempts = attempts;
+                        telemetry.method = RecoveryMethod::ReedSolomonPair;
+                        return (Some(to_encoded_layout(candidate)), telemetry);
+                    }
+                }
             }
             for (index, already_tried) in tried_index.iter().enumerate().take(data_len) {
                 if *already_tried {

@@ -75,10 +75,12 @@ pub(crate) fn still_scan_candidates(
     } else {
         12
     };
-    let max_generic = if !robust || large_image {
-        0
-    } else {
+    let max_generic = if large_image {
+        if robust { 8 } else { 4 }
+    } else if robust {
         MAX_GENERIC_CANDIDATES
+    } else {
+        4
     };
     let max_dark_bounds = if !robust {
         1
@@ -88,6 +90,21 @@ pub(crate) fn still_scan_candidates(
         MAX_DARK_BOUNDS_CANDIDATES
     };
     let mut candidates = Vec::new();
+    let precomputed_dark_bounds = dark_bounds(binary);
+
+    let mut border_trim = ribbon_border_trim_candidates(image_width, image_height);
+    border_trim.truncate(10);
+    candidates.extend(border_trim);
+
+    let mut roi_group = ribbon_symbol_roi_candidates(binary, image_width, image_height);
+    roi_group.truncate(8);
+    candidates.extend(roi_group);
+
+    if let Some(bounds) = precomputed_dark_bounds {
+        let mut anchored = ribbon_top_left_scale_candidates(bounds, image_width, image_height);
+        anchored.truncate(10);
+        candidates.extend(anchored);
+    }
 
     if !large_image && let Some(bounds) = content_bounds(image) {
         let mut content =
@@ -112,7 +129,7 @@ pub(crate) fn still_scan_candidates(
 
     if candidates.len() < max_total
         && should_try_dark_bounds_fallback(image_width, image_height, candidates.len())
-        && let Some(bounds) = dark_bounds(binary)
+        && let Some(bounds) = precomputed_dark_bounds
     {
         let mut dark_bounds =
             ribbon_dark_bounds_candidates(bounds, padding, image_width, image_height);
@@ -122,28 +139,249 @@ pub(crate) fn still_scan_candidates(
     }
 
     if candidates.len() < max_total {
-        let mut fallback = coarse_ribbon_grid_candidates(image_width, image_height);
+        let mut fallback = coarse_ribbon_grid_candidates(binary, image_width, image_height);
         fallback.truncate(max_total - candidates.len());
         candidates.extend(fallback);
     }
 
+    refine_candidate_priority(&mut candidates, image_width, image_height);
     candidates.truncate(max_total);
     candidates
 }
 
-fn coarse_ribbon_grid_candidates(image_width: u32, image_height: u32) -> Vec<ScanCandidate> {
+fn refine_candidate_priority(
+    candidates: &mut Vec<ScanCandidate>,
+    image_width: u32,
+    image_height: u32,
+) {
+    let image_area = u64::from(image_width)
+        .saturating_mul(u64::from(image_height))
+        .max(1);
+    candidates.retain(|candidate| {
+        let region = candidate.region;
+        let area = u64::from(region.width).saturating_mul(u64::from(region.height));
+        let area_pct = area.saturating_mul(100) / image_area;
+        let top_edge = region.y <= (image_height / 32).max(8);
+        let is_large = area_pct >= 60;
+
+        let reject_signature_window = candidate.detector == CandidateDetector::RibbonWeave
+            && candidate.stage == "signature-window"
+            && top_edge
+            && is_large;
+        let reject_full_band = candidate.detector == CandidateDetector::GenericBinary
+            && candidate.stage == "horizontal-band"
+            && area_pct >= 80;
+        let reject_full_aspect = candidate.detector == CandidateDetector::GenericBinary
+            && candidate.stage == "horizontal-aspect"
+            && area_pct >= 80;
+        !(reject_signature_window || reject_full_band || reject_full_aspect)
+    });
+
+    let has_non_top_ribbon = candidates.iter().any(|candidate| {
+        candidate.detector == CandidateDetector::RibbonWeave
+            && !is_top_heavy_ribbon_region(candidate.region, image_height)
+    });
+    if has_non_top_ribbon {
+        candidates.retain(|candidate| {
+            candidate.detector != CandidateDetector::RibbonWeave
+                || !is_top_heavy_ribbon_region(candidate.region, image_height)
+        });
+    }
+
+    candidates.sort_by_key(|candidate| candidate_priority_score(*candidate, image_width, image_height));
+}
+
+fn is_top_heavy_ribbon_region(region: ScanRegion, image_height: u32) -> bool {
+    let near_top = region.y <= (image_height / 32).max(8);
+    let very_tall = region.height >= (image_height.saturating_mul(3) / 5).max(160);
+    near_top && very_tall
+}
+
+fn candidate_priority_score(
+    candidate: ScanCandidate,
+    image_width: u32,
+    image_height: u32,
+) -> u64 {
+    let region = candidate.region;
+    let mut score = 0u64;
+
+    if candidate.detector == CandidateDetector::RibbonWeave {
+        if candidate.stage == "border-trim" {
+            score = score.saturating_sub(140);
+        }
+        if candidate.stage == "roi-group" {
+            score = score.saturating_sub(80);
+        }
+        let expected_ratio = 104.0f32 / 44.0f32;
+        let ratio = region.width as f32 / region.height.max(1) as f32;
+        score = score.saturating_add(((ratio - expected_ratio).abs() * 100.0).round() as u64);
+    }
+
+    if region.y <= (image_height / 32).max(8) {
+        score = score.saturating_add(120);
+    }
+    if region.x == 0
+        || region.y == 0
+        || region.x.saturating_add(region.width) >= image_width
+        || region.y.saturating_add(region.height) >= image_height
+    {
+        score = score.saturating_add(60);
+    }
+
+    let area = u64::from(region.width).saturating_mul(u64::from(region.height));
+    let image_area = u64::from(image_width)
+        .saturating_mul(u64::from(image_height))
+        .max(1);
+    let area_pct = area.saturating_mul(100) / image_area;
+    if area_pct > 35 {
+        score = score.saturating_add((area_pct - 35) * 4);
+    }
+    if candidate.detector == CandidateDetector::GenericBinary && candidate.stage == "horizontal-aspect" {
+        score = score.saturating_add(260);
+    }
+    score
+}
+
+fn ribbon_border_trim_candidates(image_width: u32, image_height: u32) -> Vec<ScanCandidate> {
+    if image_width < 220 || image_height < 90 {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for pct in [2u32, 3, 4, 5, 6, 8, 10] {
+        let trim_x = image_width.saturating_mul(pct) / 100;
+        let trim_y = image_height.saturating_mul(pct) / 100;
+        let width = image_width.saturating_sub(trim_x.saturating_mul(2));
+        let height = image_height.saturating_sub(trim_y.saturating_mul(2));
+        if width < 160 || height < 60 {
+            continue;
+        }
+        push_unique_candidate(
+            &mut out,
+            CandidateDetector::RibbonWeave,
+            Some(LayoutFamily::RibbonWeave),
+            "border-trim",
+            ScanRegion {
+                x: trim_x,
+                y: trim_y,
+                width,
+                height,
+            },
+        );
+    }
+    out
+}
+
+fn ribbon_symbol_roi_candidates(
+    binary: &GrayImage,
+    image_width: u32,
+    image_height: u32,
+) -> Vec<ScanCandidate> {
+    let mut seeds: Vec<DarkComponent> = dark_components(binary)
+        .into_iter()
+        .filter(|c| {
+            let b = c.bounds;
+            if c.pixels < 60 || b.width < 20 || b.height < 10 {
+                return false;
+            }
+            let aspect = b.width as f32 / b.height.max(1) as f32;
+            (0.6..=12.0).contains(&aspect)
+        })
+        .take(120)
+        .collect();
+    if seeds.is_empty() {
+        return Vec::new();
+    }
+
+    #[derive(Clone, Copy)]
+    struct Group {
+        bounds: ScanRegion,
+        pixels: u32,
+        score: i64,
+    }
+    let mut groups = Vec::new();
+    for seed in &seeds {
+        let mut bounds = seed.bounds;
+        let mut pixels = seed.pixels;
+        let sx = seed.bounds.x + seed.bounds.width / 2;
+        let sy = seed.bounds.y + seed.bounds.height / 2;
+        for other in &seeds {
+            let ox = other.bounds.x + other.bounds.width / 2;
+            let oy = other.bounds.y + other.bounds.height / 2;
+            let dx = sx.abs_diff(ox);
+            let dy = sy.abs_diff(oy);
+            if dx <= seed.bounds.width.saturating_mul(4) && dy <= seed.bounds.height.saturating_mul(3) {
+                bounds = union_region(bounds, other.bounds);
+                pixels = pixels.saturating_add(other.pixels);
+            }
+        }
+        let area = bounds.width.saturating_mul(bounds.height).max(1);
+        let area_ratio = area as f32 / (image_width.saturating_mul(image_height).max(1) as f32);
+        if !(0.01..=0.85).contains(&area_ratio) {
+            continue;
+        }
+        let aspect = bounds.width as f32 / bounds.height.max(1) as f32;
+        let aspect_penalty = ((aspect - (104.0 / 44.0)).abs() * 100.0) as i64;
+        let top_penalty = if bounds.y < image_height / 12 { 120 } else { 0 };
+        let score = pixels as i64 - aspect_penalty - top_penalty;
+        groups.push(Group { bounds, pixels, score });
+    }
+    groups.sort_by(|a, b| b.score.cmp(&a.score).then(b.pixels.cmp(&a.pixels)));
+    groups.truncate(4);
+
+    let mut out = Vec::new();
+    for g in groups {
+        for w_scale in [1.10f32, 1.25, 1.40, 1.55] {
+            let w = ((g.bounds.width as f32) * w_scale).round() as u32;
+            if w < 120 || w > image_width {
+                continue;
+            }
+            if w > image_width.saturating_mul(80) / 100 {
+                continue;
+            }
+            let nominal_h = ((w as f32) * (44.0 / 104.0)).round() as u32;
+            for h_scale in [1.00f32, 1.15, 1.30] {
+                let h = ((nominal_h as f32) * h_scale).round() as u32;
+                if h < 70 || h > image_height {
+                    continue;
+                }
+                let cx = g.bounds.x + g.bounds.width / 2;
+                let cy = g.bounds.y + g.bounds.height / 2;
+                let x = cx.saturating_sub(w / 2).min(image_width.saturating_sub(w));
+                let y = cy.saturating_sub(h / 2).min(image_height.saturating_sub(h));
+                let region = ScanRegion { x, y, width: w, height: h };
+                if !region_contains(region, g.bounds) {
+                    continue;
+                }
+                push_unique_candidate(
+                    &mut out,
+                    CandidateDetector::RibbonWeave,
+                    Some(LayoutFamily::RibbonWeave),
+                    "roi-group",
+                    region,
+                );
+            }
+        }
+    }
+    out
+}
+
+fn coarse_ribbon_grid_candidates(
+    binary: &GrayImage,
+    image_width: u32,
+    image_height: u32,
+) -> Vec<ScanCandidate> {
     if image_width < 240 || image_height < 120 {
         return Vec::new();
     }
     let mut candidates = Vec::new();
-    for module_px in [4u32, 5, 3, 6, 7, 8] {
+    for module_px in [4u32, 5, 3, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16] {
         let width = 104 * module_px;
         let height = 44 * module_px;
         if width > image_width || height > image_height {
             continue;
         }
-        let x_fracs = [0.06_f32, 0.115, 0.16, 0.22, 0.30, 0.38];
-        let y_fracs = [0.08_f32, 0.14, 0.20, 0.233, 0.28, 0.32];
+        let x_fracs = [0.04_f32, 0.10, 0.16, 0.24, 0.32, 0.42, 0.52, 0.62, 0.72, 0.80];
+        let y_fracs = [0.07_f32, 0.12, 0.18, 0.24, 0.30, 0.36, 0.44];
         for xf in x_fracs {
             for yf in y_fracs {
                 let x = ((image_width as f32 * xf).round() as u32)
@@ -167,6 +405,29 @@ fn coarse_ribbon_grid_candidates(image_width: u32, image_height: u32) -> Vec<Sca
                 }
             }
         }
+        for x in [
+            image_width.saturating_sub(width + 20),
+            image_width.saturating_sub(width + 80),
+            image_width.saturating_sub(width + 160),
+        ] {
+            for y in [image_height / 8, image_height / 5, image_height / 3] {
+                let region = ScanRegion {
+                    x: x.min(image_width.saturating_sub(width + 1)),
+                    y: y.min(image_height.saturating_sub(height + 1)),
+                    width,
+                    height,
+                };
+                if region_fits(region, image_width, image_height) {
+                    push_unique_candidate(
+                        &mut candidates,
+                        CandidateDetector::RibbonWeave,
+                        Some(LayoutFamily::RibbonWeave),
+                        "coarse-grid",
+                        region,
+                    );
+                }
+            }
+        }
         if module_px == 4 {
             let center_x = image_width.saturating_sub(width) / 2;
             let center_y = image_height.saturating_sub(height) / 2;
@@ -174,6 +435,7 @@ fn coarse_ribbon_grid_candidates(image_width: u32, image_height: u32) -> Vec<Sca
                 (center_x, center_y),
                 (center_x / 2, center_y),
                 (center_x / 3, center_y / 2),
+                (center_x.saturating_add(center_x / 2), center_y),
             ] {
                 let region = ScanRegion {
                     x,
@@ -193,7 +455,22 @@ fn coarse_ribbon_grid_candidates(image_width: u32, image_height: u32) -> Vec<Sca
             }
         }
     }
+    candidates.sort_by_key(|candidate| std::cmp::Reverse(region_dark_pixels(binary, candidate.region)));
     candidates
+}
+
+fn region_dark_pixels(binary: &GrayImage, region: ScanRegion) -> u32 {
+    let x_end = region.x.saturating_add(region.width).min(binary.width());
+    let y_end = region.y.saturating_add(region.height).min(binary.height());
+    let mut dark = 0u32;
+    for y in region.y..y_end {
+        for x in region.x..x_end {
+            if binary.get_pixel(x, y).0[0] == 0 {
+                dark = dark.saturating_add(1);
+            }
+        }
+    }
+    dark
 }
 
 fn content_bounds(image: &DynamicImage) -> Option<ScanRegion> {
@@ -346,6 +623,11 @@ fn ribbon_dark_bounds_candidates(
             region,
         ));
     }
+    candidates.extend(ribbon_top_left_scale_candidates(
+        bounds,
+        image_width,
+        image_height,
+    ));
     let expanded = expand_region(bounds, padding, image_width, image_height);
     candidates.push(ScanCandidate::new(
         CandidateDetector::RibbonWeave,
@@ -362,6 +644,77 @@ fn ribbon_dark_bounds_candidates(
         ));
     }
     candidates
+}
+
+fn ribbon_top_left_scale_candidates(
+    bounds: ScanRegion,
+    image_width: u32,
+    image_height: u32,
+) -> Vec<ScanCandidate> {
+    let mut candidates = Vec::new();
+    if bounds.width < 64 || bounds.height < 24 {
+        return candidates;
+    }
+
+    let est_module_w = (bounds.width as f32 / 96.0).round() as i32;
+    let est_module_h = (bounds.height as f32 / 36.0).round() as i32;
+    let est_module = ((est_module_w + est_module_h) / 2).clamp(2, 16) as u32;
+    let mut module_values = Vec::new();
+    for delta in -5..=6 {
+        let value = (est_module as i32 + delta).clamp(2, 18) as u32;
+        if !module_values.contains(&value) {
+            module_values.push(value);
+        }
+    }
+
+    for module_px in module_values {
+        let width = 104u32.saturating_mul(module_px);
+        let height = 44u32.saturating_mul(module_px);
+        if width > image_width || height > image_height {
+            continue;
+        }
+        for margin_mul in [4u32, 6, 8, 10] {
+            let quiet = margin_mul.saturating_mul(module_px);
+            let x = bounds.x.saturating_sub(quiet);
+            let y = bounds.y.saturating_sub(quiet);
+            let region = clamp_region(
+                ScanRegion {
+                    x,
+                    y,
+                    width,
+                    height,
+                },
+                image_width,
+                image_height,
+            );
+            if !plausible_region(region) {
+                continue;
+            }
+            // Keep only candidates that still contain the detected dark content bounds.
+            if !region_contains(region, bounds) {
+                continue;
+            }
+            push_unique_candidate(
+                &mut candidates,
+                CandidateDetector::RibbonWeave,
+                Some(LayoutFamily::RibbonWeave),
+                "top-left-scale",
+                region,
+            );
+        }
+    }
+    candidates
+}
+
+fn region_contains(outer: ScanRegion, inner: ScanRegion) -> bool {
+    let outer_right = outer.x.saturating_add(outer.width);
+    let outer_bottom = outer.y.saturating_add(outer.height);
+    let inner_right = inner.x.saturating_add(inner.width);
+    let inner_bottom = inner.y.saturating_add(inner.height);
+    inner.x >= outer.x
+        && inner.y >= outer.y
+        && inner_right <= outer_right
+        && inner_bottom <= outer_bottom
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -923,7 +1276,9 @@ fn generic_binary_candidates(
             continue;
         }
         let expanded = expand_region(component.bounds, padding * 2, image_width, image_height);
-        if plausible_region(expanded) {
+        if plausible_region(expanded)
+            && plausible_symbol_roi(expanded, image_width, image_height)
+        {
             push_unique_candidate(
                 &mut regions,
                 CandidateDetector::GenericBinary,
@@ -936,6 +1291,22 @@ fn generic_binary_candidates(
 
     regions.truncate(MAX_CANDIDATE_REGIONS);
     regions
+}
+
+fn plausible_symbol_roi(region: ScanRegion, image_width: u32, image_height: u32) -> bool {
+    let area = u64::from(region.width).saturating_mul(u64::from(region.height));
+    let image_area = u64::from(image_width)
+        .saturating_mul(u64::from(image_height))
+        .max(1);
+    let area_pct = area.saturating_mul(100) / image_area;
+    if area_pct < 1 || area_pct > 45 {
+        return false;
+    }
+    if region.height < 120 || region.width < 260 {
+        return false;
+    }
+    let aspect = region.width as f32 / region.height.max(1) as f32;
+    (1.8..=3.8).contains(&aspect)
 }
 
 #[derive(Debug, Clone, Copy)]

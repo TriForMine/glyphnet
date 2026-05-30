@@ -1,10 +1,15 @@
 use glyphnet_core::{Cell, FrameHeader, HEADER_LEN, LayoutFamily, SymbolMatrix, bitstream, layout};
+use glyphnet_cv::{Point, Quad, warp_perspective_gray};
 use glyphnet_decode::{
-    AutoDecodedSymbol, DecodeError, DecodeOptions, RasterDecoder, decode_matrix,
+    AutoDecodedSymbol, DecodeError, DecodeOptions, RasterDecoder, decode_matrix_with_suspect_bytes,
 };
-use image::{DynamicImage, GrayImage};
+use image::{DynamicImage, GrayImage, Luma, Rgba, RgbaImage};
+use std::fs;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::ScanRegion;
+static NORMALIZED_DEBUG_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 pub(crate) fn decode_candidate(
     decoder: &RasterDecoder,
@@ -17,11 +22,23 @@ pub(crate) fn decode_candidate(
     {
         return Ok(decoded);
     }
-    if matches!(candidate.stage, "signature-window" | "coarse-grid") {
+    if matches!(
+        candidate.stage,
+        "signature-window" | "coarse-grid" | "top-left-scale" | "roi-group" | "border-trim"
+    ) {
+        let region_area = region.width.saturating_mul(region.height);
         if let Ok(decoded) = decode_exact_ribbon_candidate(image, region) {
             return Ok(decoded);
         }
-        if let Ok(decoded) = decode_fractional_ribbon_candidate(image) {
+        if let Ok(decoded) = decode_forced_normalized_ribbon_candidate(image, region) {
+            return Ok(decoded);
+        }
+        if region_area <= 700_000
+            && let Ok(decoded) = decode_fractional_ribbon_candidate(image)
+        {
+            return Ok(decoded);
+        }
+        if let Ok(decoded) = decode_with_padding_variants(decoder, image) {
             return Ok(decoded);
         }
         let target_module_px = 4;
@@ -41,6 +58,9 @@ pub(crate) fn decode_candidate(
         if let Ok(decoded) = decode_exact_ribbon_candidate(&resized, normalized_region) {
             return Ok(decoded);
         }
+        if let Ok(decoded) = decode_with_padding_variants(decoder, &resized) {
+            return Ok(decoded);
+        }
         return Err(DecodeError::AutoDetectFailed);
     }
 
@@ -54,8 +74,49 @@ pub(crate) fn decode_candidate(
         if let Ok(decoded) = decode_fractional_ribbon_candidate(image) {
             return Ok(decoded);
         }
+        if let Ok(decoded) = decode_with_padding_variants(decoder, image) {
+            return Ok(decoded);
+        }
     }
-    decoder.decode_auto_with_info(image)
+    decoder
+        .decode_auto_with_info(image)
+        .or_else(|_| decode_with_padding_variants(decoder, image))
+}
+
+fn decode_with_padding_variants(
+    decoder: &RasterDecoder,
+    image: &DynamicImage,
+) -> std::result::Result<AutoDecodedSymbol, DecodeError> {
+    for pad_pct in [4u32, 8, 12, 16] {
+        let padded = white_pad_image(image, pad_pct);
+        if let Ok(decoded) = decoder.decode_auto_with_info(&padded) {
+            return Ok(decoded);
+        }
+        if let Ok(decoded) = decode_fractional_ribbon_candidate(&padded) {
+            return Ok(decoded);
+        }
+        let region = crate::ScanRegion {
+            x: 0,
+            y: 0,
+            width: padded.width(),
+            height: padded.height(),
+        };
+        if let Ok(decoded) = decode_exact_ribbon_candidate(&padded, region) {
+            return Ok(decoded);
+        }
+    }
+    Err(DecodeError::AutoDetectFailed)
+}
+
+fn white_pad_image(image: &DynamicImage, pad_pct: u32) -> DynamicImage {
+    let rgba = image.to_rgba8();
+    let pad_x = (rgba.width().saturating_mul(pad_pct) / 100).max(2);
+    let pad_y = (rgba.height().saturating_mul(pad_pct) / 100).max(2);
+    let out_w = rgba.width().saturating_add(pad_x.saturating_mul(2));
+    let out_h = rgba.height().saturating_add(pad_y.saturating_mul(2));
+    let mut canvas = RgbaImage::from_pixel(out_w, out_h, Rgba([255, 255, 255, 255]));
+    image::imageops::overlay(&mut canvas, &rgba, i64::from(pad_x), i64::from(pad_y));
+    DynamicImage::ImageRgba8(canvas)
 }
 
 fn decode_exact_matrix_candidate(
@@ -120,23 +181,25 @@ fn decode_exact_ribbon_candidate(
     if region.width >= 104 && region.height >= 44 {
         let module_px = (region.width / 104).max(1);
         if region.width == 104 * module_px && region.height == 44 * module_px {
-            for threshold in [160, 192, 224] {
-                let exact = RasterDecoder::new(DecodeOptions {
-                    module_px,
-                    quiet_zone_modules: 4,
-                    threshold,
-                    layout: LayoutFamily::RibbonWeave,
-                });
-                if let Ok(decoded) = exact.decode(image) {
-                    return Ok(AutoDecodedSymbol {
-                        decoded,
-                        info: glyphnet_decode::AutoDecodeInfo {
-                            module_px,
-                            quiet_zone_modules: 4,
-                            threshold,
-                            layout: LayoutFamily::RibbonWeave,
-                        },
+            for quiet_zone_modules in [0u32, 1, 2, 3, 4, 5, 6, 7, 8] {
+                for threshold in [144, 160, 176, 192, 208, 224] {
+                    let exact = RasterDecoder::new(DecodeOptions {
+                        module_px,
+                        quiet_zone_modules,
+                        threshold,
+                        layout: LayoutFamily::RibbonWeave,
                     });
+                    if let Ok(decoded) = exact.decode(image) {
+                        return Ok(AutoDecodedSymbol {
+                            decoded,
+                            info: glyphnet_decode::AutoDecodeInfo {
+                                module_px,
+                                quiet_zone_modules,
+                                threshold,
+                                layout: LayoutFamily::RibbonWeave,
+                            },
+                        });
+                    }
                 }
             }
         }
@@ -168,6 +231,10 @@ fn decode_fractional_ribbon_candidate(
     let mut thresholds = vec![otsu, 160, 192, 224];
     thresholds.sort_unstable();
     thresholds.dedup();
+
+    if let Ok(decoded) = decode_normalized_dark_bounds_ribbon(&luma, otsu) {
+        return Ok(decoded);
+    }
 
     for scale_adjust in [1.0_f32, 0.985, 1.015, 0.97, 1.03] {
         let scale_x = base_scale_x * scale_adjust;
@@ -212,8 +279,283 @@ fn decode_fractional_ribbon_candidate(
     Err(DecodeError::AutoDetectFailed)
 }
 
+fn decode_forced_normalized_ribbon_candidate(
+    image: &DynamicImage,
+    region: ScanRegion,
+) -> std::result::Result<AutoDecodedSymbol, DecodeError> {
+    const SYMBOL_WIDTH: u32 = 96;
+    const SYMBOL_HEIGHT: u32 = 36;
+    const QUIET: u32 = 4;
+
+    let x = region.x.min(image.width().saturating_sub(1));
+    let y = region.y.min(image.height().saturating_sub(1));
+    let max_w = image.width().saturating_sub(x);
+    let max_h = image.height().saturating_sub(y);
+    let w = region.width.min(max_w);
+    let h = region.height.min(max_h);
+    if w < 80 || h < 30 {
+        return Err(DecodeError::AutoDetectFailed);
+    }
+
+    let full = image.to_luma8();
+    let trims = [0.00f32, 0.06];
+    let shifts = [0.00f32, -0.04, 0.04];
+
+    let est_w = (w / 104).max(2);
+    let est_h = (h / 44).max(2);
+    let est = ((est_w + est_h) / 2).clamp(2, 24);
+    let mut module_candidates = Vec::new();
+    for d in -3i32..=3 {
+        let m = (est as i32 + d).clamp(2, 24) as u32;
+        if !module_candidates.contains(&m) {
+            module_candidates.push(m);
+        }
+    }
+
+    for trim in trims {
+        let trim_x = ((w as f32) * trim).round() as u32;
+        let trim_y = ((h as f32) * trim).round() as u32;
+        let base_w = w.saturating_sub(trim_x.saturating_mul(2));
+        let base_h = h.saturating_sub(trim_y.saturating_mul(2));
+        if base_w < 60 || base_h < 24 {
+            continue;
+        }
+        let base_x = x.saturating_add(trim_x);
+        let base_y = y.saturating_add(trim_y);
+
+        for sx in shifts {
+            for sy in shifts {
+                let dx = ((base_w as f32) * sx).round() as i32;
+                let dy = ((base_h as f32) * sy).round() as i32;
+                let rx = (base_x as i32 + dx).max(0) as u32;
+                let ry = (base_y as i32 + dy).max(0) as u32;
+                let rw = base_w.min(full.width().saturating_sub(rx));
+                let rh = base_h.min(full.height().saturating_sub(ry));
+                if rw < 60 || rh < 24 {
+                    continue;
+                }
+
+                let sub = image::imageops::crop_imm(&full, rx, ry, rw, rh).to_image();
+                for module_px in &module_candidates {
+                    let total_w = (SYMBOL_WIDTH + QUIET * 2) * *module_px;
+                    let total_h = (SYMBOL_HEIGHT + QUIET * 2) * *module_px;
+                    let content_w = SYMBOL_WIDTH * *module_px;
+                    let content_h = SYMBOL_HEIGHT * *module_px;
+                    let resized = image::imageops::resize(
+                        &sub,
+                        content_w,
+                        content_h,
+                        image::imageops::FilterType::CatmullRom,
+                    );
+
+                    let mut thresholds = vec![fractional_threshold(&resized), 120, 136, 152];
+                    thresholds.sort_unstable();
+                    thresholds.dedup();
+
+                    for threshold in thresholds {
+                        let mut bin = resized.clone();
+                        for px in bin.pixels_mut() {
+                            px.0[0] = if px.0[0] < threshold { 0 } else { 255 };
+                        }
+                        dump_normalized_debug(region, threshold, &resized, &bin);
+                        let mut canvas = GrayImage::from_pixel(total_w, total_h, Luma([255]));
+                        image::imageops::overlay(
+                            &mut canvas,
+                            &bin,
+                            i64::from(QUIET * *module_px),
+                            i64::from(QUIET * *module_px),
+                        );
+                        let candidate = DynamicImage::ImageLuma8(canvas);
+                        let full_region = ScanRegion {
+                            x: 0,
+                            y: 0,
+                            width: total_w,
+                            height: total_h,
+                        };
+                        if let Ok(decoded) = decode_exact_ribbon_candidate(&candidate, full_region) {
+                            return Ok(decoded);
+                        }
+                        let auto = RasterDecoder::default();
+                        if let Ok(decoded) = auto.decode_auto_with_info(&candidate) {
+                            return Ok(decoded);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Err(DecodeError::AutoDetectFailed)
+}
+
+fn dump_normalized_debug(region: ScanRegion, threshold: u8, resized: &GrayImage, bin: &GrayImage) {
+    if std::env::var_os("GLYPHNET_SCAN_DEBUG").is_none() {
+        return;
+    }
+    let base_dir = std::env::var_os("GLYPHNET_SCAN_DEBUG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("target/scan-debug"));
+    let out_dir = base_dir.join("normalized");
+    if fs::create_dir_all(&out_dir).is_err() {
+        return;
+    }
+    let idx = NORMALIZED_DEBUG_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let prefix = format!(
+        "n{:04}-{}x{}+{}+{}-t{}",
+        idx, region.width, region.height, region.x, region.y, threshold
+    );
+    let _ = resized.save(out_dir.join(format!("{prefix}-normalized-resized.png")));
+    let _ = bin.save(out_dir.join(format!("{prefix}-normalized-binary.png")));
+    let mut txt = String::new();
+    for y in 0..bin.height() {
+        for x in 0..bin.width() {
+            let value = if bin.get_pixel(x, y).0[0] == 0 { '1' } else { '0' };
+            txt.push(value);
+        }
+        txt.push('\n');
+    }
+    let _ = fs::write(
+        out_dir.join(format!("{prefix}-normalized-binary.txt")),
+        txt,
+    );
+}
+
 fn module_shifts(radius: i32) -> impl Iterator<Item = f32> {
     (-radius * 2..=radius * 2).map(|value| value as f32 * 0.5)
+}
+
+fn decode_normalized_dark_bounds_ribbon(
+    luma: &GrayImage,
+    otsu: u8,
+) -> std::result::Result<AutoDecodedSymbol, DecodeError> {
+    const MODULE_PX: u32 = 4;
+    const SYMBOL_WIDTH: u32 = 96;
+    const SYMBOL_HEIGHT: u32 = 36;
+    const QUIET_MODULES: u32 = 4;
+    const TOTAL_WIDTH: u32 = (SYMBOL_WIDTH + QUIET_MODULES * 2) * MODULE_PX;
+    const TOTAL_HEIGHT: u32 = (SYMBOL_HEIGHT + QUIET_MODULES * 2) * MODULE_PX;
+
+    for threshold in [otsu.saturating_sub(80).clamp(40, 72), 48, 56] {
+        let Some(bounds) = dark_bounds_luma(luma, threshold) else {
+            continue;
+        };
+        let (min_x, min_y, max_x, max_y) = bounds;
+        let width = max_x.saturating_sub(min_x).saturating_add(1);
+        let height = max_y.saturating_sub(min_y).saturating_add(1);
+        if width < SYMBOL_WIDTH || height < SYMBOL_HEIGHT {
+            continue;
+        }
+        let Some(quad) = dark_content_quad(luma, threshold, min_x, max_x) else {
+            continue;
+        };
+        let mut normalized = warp_perspective_gray(
+            luma,
+            quad,
+            SYMBOL_WIDTH * MODULE_PX,
+            SYMBOL_HEIGHT * MODULE_PX,
+        )
+        .map_err(|_| DecodeError::AutoDetectFailed)?;
+        let normalized_threshold = fractional_threshold(&normalized).clamp(96, 160);
+        for pixel in normalized.pixels_mut() {
+            pixel.0[0] = if pixel.0[0] < normalized_threshold {
+                0
+            } else {
+                255
+            };
+        }
+        let mut canvas = GrayImage::from_pixel(TOTAL_WIDTH, TOTAL_HEIGHT, Luma([255]));
+        image::imageops::overlay(
+            &mut canvas,
+            &normalized,
+            i64::from(QUIET_MODULES * MODULE_PX),
+            i64::from(QUIET_MODULES * MODULE_PX),
+        );
+        let image = DynamicImage::ImageLuma8(canvas);
+        let region = ScanRegion {
+            x: 0,
+            y: 0,
+            width: TOTAL_WIDTH,
+            height: TOTAL_HEIGHT,
+        };
+        if let Ok(decoded) = decode_exact_ribbon_candidate(&image, region) {
+            return Ok(decoded);
+        }
+    }
+    Err(DecodeError::AutoDetectFailed)
+}
+
+fn dark_content_quad(luma: &GrayImage, threshold: u8, min_x: u32, max_x: u32) -> Option<Quad> {
+    let span = max_x.saturating_sub(min_x).saturating_add(1);
+    let band = (span / 5).max(16);
+    let left = vertical_dark_extent(luma, threshold, min_x, min_x.saturating_add(band))?;
+    let right = vertical_dark_extent(luma, threshold, max_x.saturating_sub(band), max_x)?;
+    let expand_edge = |top: u32, bottom: u32| {
+        let module = bottom.saturating_sub(top).max(1) as f32 / 29.0;
+        (
+            (top as f32 - module * 3.0).max(0.0),
+            (bottom as f32 + module * 4.0).min(luma.height().saturating_sub(1) as f32),
+        )
+    };
+    let left = expand_edge(left.0, left.1);
+    let right = expand_edge(right.0, right.1);
+    Some(Quad {
+        top_left: Point {
+            x: min_x as f32,
+            y: left.0,
+        },
+        top_right: Point {
+            x: max_x as f32,
+            y: right.0,
+        },
+        bottom_right: Point {
+            x: max_x as f32,
+            y: right.1,
+        },
+        bottom_left: Point {
+            x: min_x as f32,
+            y: left.1,
+        },
+    })
+}
+
+fn vertical_dark_extent(
+    luma: &GrayImage,
+    threshold: u8,
+    start_x: u32,
+    end_x: u32,
+) -> Option<(u32, u32)> {
+    let mut min_y = u32::MAX;
+    let mut max_y = 0u32;
+    let mut found = false;
+    for y in 0..luma.height() {
+        for x in start_x..=end_x.min(luma.width().saturating_sub(1)) {
+            if luma.get_pixel(x, y)[0] < threshold {
+                min_y = min_y.min(y);
+                max_y = max_y.max(y);
+                found = true;
+            }
+        }
+    }
+    found.then_some((min_y, max_y))
+}
+
+fn dark_bounds_luma(luma: &GrayImage, threshold: u8) -> Option<(u32, u32, u32, u32)> {
+    let mut min_x = u32::MAX;
+    let mut min_y = u32::MAX;
+    let mut max_x = 0u32;
+    let mut max_y = 0u32;
+    let mut found = false;
+    for (x, y, pixel) in luma.enumerate_pixels() {
+        if pixel[0] >= threshold {
+            continue;
+        }
+        found = true;
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x);
+        max_y = max_y.max(y);
+    }
+    found.then_some((min_x, min_y, max_x, max_y))
 }
 
 fn fractional_header_precheck(
@@ -290,6 +632,7 @@ fn decode_fractional_with_params(
 
     let mut matrix =
         SymbolMatrix::with_layout(SYMBOL_WIDTH, SYMBOL_HEIGHT, LayoutFamily::RibbonWeave);
+    let mut bit_confidence = Vec::new();
     for y in 0..SYMBOL_HEIGHT {
         for x in 0..SYMBOL_WIDTH {
             if let Some(cell) = layout::function_cell_for(
@@ -310,10 +653,13 @@ fn decode_fractional_with_params(
                 scale_y,
             );
             matrix.set(x, y, Cell::Data(avg < threshold))?;
+            bit_confidence.push(avg.abs_diff(threshold));
         }
     }
 
-    let decoded = decode_matrix(&matrix)?;
+    let suspect_bytes =
+        glyphnet_decode::suspect_bytes_from_confidence(&matrix, &bit_confidence, 16);
+    let decoded = decode_matrix_with_suspect_bytes(&matrix, &suspect_bytes)?;
     Ok(AutoDecodedSymbol {
         decoded,
         info: glyphnet_decode::AutoDecodeInfo {

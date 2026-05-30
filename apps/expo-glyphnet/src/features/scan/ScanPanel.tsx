@@ -1,6 +1,6 @@
 import { CameraView, useCameraPermissions } from "expo-camera";
+import { Directory, File, Paths } from "expo-file-system";
 import * as NavigationBar from "expo-navigation-bar";
-import * as FileSystem from "expo-file-system";
 import * as ImageManipulator from "expo-image-manipulator";
 import { useMemo, useRef, useState } from "react";
 import { Modal, Vibration } from "react-native";
@@ -15,24 +15,6 @@ import { Pressable, Text, TextInput, View } from "@/tw";
 const MODES = ["print", "screen", "burst"] as const;
 // Wide ribbon-like scan guide (GlyphNet print profile), centered in portrait view.
 const GUIDE_ROI = { x: 0.06, y: 0.34, w: 0.88, h: 0.26 } as const;
-
-function getWritableBaseDir(): string | null {
-    const fsAny = FileSystem as unknown as {
-        documentDirectory?: string | null;
-        cacheDirectory?: string | null;
-        Paths?: {
-            document?: { uri?: string };
-            cache?: { uri?: string };
-        };
-    };
-    return (
-        fsAny.documentDirectory ??
-        fsAny.cacheDirectory ??
-        fsAny.Paths?.document?.uri ??
-        fsAny.Paths?.cache?.uri ??
-        null
-    );
-}
 
 export function ScanPanel() {
     const cameraRef = useRef<any>(null);
@@ -161,22 +143,13 @@ export function ScanPanel() {
             return;
         }
         try {
-            const dir = getWritableBaseDir();
-            if (!dir) {
-                setDebugSaveMessage("No writable app directory available.");
-                return;
-            }
             const stamp = Date.now();
-            const outDir = `${dir}glyphnet-debug-${stamp}/`;
-            await FileSystem.makeDirectoryAsync(outDir, {
-                intermediates: true,
-            });
+            const outDir = new Directory(Paths.document, `glyphnet-debug-${stamp}`);
+            outDir.create({ idempotent: true, intermediates: true });
 
-            const captureOut = `${outDir}capture.jpg`;
-            await FileSystem.copyAsync({
-                from: lastCaptureUri,
-                to: captureOut,
-            });
+            const captureOut = new File(outDir, "capture.jpg");
+            captureOut.create({ overwrite: true, intermediates: true });
+            new File(lastCaptureUri).copy(captureOut, { overwrite: true });
 
             const crop = {
                 originX: Math.max(
@@ -198,8 +171,9 @@ export function ScanPanel() {
                 [{ crop }],
                 { compress: 1, format: ImageManipulator.SaveFormat.JPEG },
             );
-            const roiOut = `${outDir}roi.jpg`;
-            await FileSystem.copyAsync({ from: cropped.uri, to: roiOut });
+            const roiOut = new File(outDir, "roi.jpg");
+            roiOut.create({ overwrite: true, intermediates: true });
+            new File(cropped.uri).copy(roiOut, { overwrite: true });
 
             const debugJson = {
                 ts: stamp,
@@ -213,19 +187,16 @@ export function ScanPanel() {
                 },
                 result: parsedResult ?? result,
             };
-            const jsonOut = `${outDir}result.json`;
-            await FileSystem.writeAsStringAsync(
-                jsonOut,
-                JSON.stringify(debugJson, null, 2),
-                {
-                    encoding: FileSystem.EncodingType.UTF8,
-                },
-            );
+            const jsonOut = new File(outDir, "result.json");
+            jsonOut.create({ overwrite: true, intermediates: true });
+            jsonOut.write(JSON.stringify(debugJson, null, 2), {
+                encoding: "utf8",
+            });
 
             try {
                 const Sharing = await import("expo-sharing");
                 if (await Sharing.isAvailableAsync()) {
-                    await Sharing.shareAsync(roiOut, {
+                    await Sharing.shareAsync(roiOut.uri, {
                         mimeType: "image/jpeg",
                         dialogTitle: "Share GlyphNet ROI debug image",
                     });
@@ -234,7 +205,7 @@ export function ScanPanel() {
                 // no-op: sharing may be unavailable in current runtime.
             }
 
-            setDebugSaveMessage(`Saved debug bundle: ${outDir}`);
+            setDebugSaveMessage(`Saved debug bundle: ${outDir.uri}`);
         } catch (error) {
             setDebugSaveMessage(
                 error instanceof Error

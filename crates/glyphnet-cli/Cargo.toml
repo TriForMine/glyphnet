@@ -17,6 +17,7 @@ path = "src/main.rs"
 anyhow.workspace = true
 clap.workspace = true
 glyphnet-core = { path = "../glyphnet-core", version = "0.1.0" }
+glyphnet-cv = { path = "../glyphnet-cv", version = "0.1.0" }
 glyphnet-decode = { path = "../glyphnet-decode", version = "0.1.0" }
 glyphnet-encode = { path = "../glyphnet-encode", version = "0.1.0" }
 glyphnet-render = { path = "../glyphnet-render", version = "0.1.0" }
