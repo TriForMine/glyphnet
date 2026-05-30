@@ -8,6 +8,7 @@
 *.wasm
 *.dSYM/
 .playwright-mcp/
+.serena/
 .DS_Store
 Thumbs.db
 node_modules/

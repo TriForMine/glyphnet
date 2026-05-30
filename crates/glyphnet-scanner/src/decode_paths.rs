@@ -24,23 +24,6 @@ pub(crate) fn decode_candidate(
         if let Ok(decoded) = decode_fractional_ribbon_candidate(image) {
             return Ok(decoded);
         }
-        let target_module_px = 4;
-        let resized = image::imageops::resize(
-            image,
-            104 * target_module_px,
-            44 * target_module_px,
-            image::imageops::FilterType::Triangle,
-        );
-        let resized = DynamicImage::ImageRgba8(resized);
-        let normalized_region = ScanRegion {
-            x: 0,
-            y: 0,
-            width: 104 * target_module_px,
-            height: 44 * target_module_px,
-        };
-        if let Ok(decoded) = decode_exact_ribbon_candidate(&resized, normalized_region) {
-            return Ok(decoded);
-        }
         return Err(DecodeError::AutoDetectFailed);
     }
 
@@ -117,49 +100,62 @@ fn decode_exact_ribbon_candidate(
     image: &DynamicImage,
     region: ScanRegion,
 ) -> std::result::Result<AutoDecodedSymbol, DecodeError> {
-    if region.width >= 104 && region.height >= 44 {
-        let module_px = (region.width / 104).max(1);
-        if region.width == 104 * module_px && region.height == 44 * module_px {
-            for threshold in [160, 192, 224] {
-                let exact = RasterDecoder::new(DecodeOptions {
-                    module_px,
-                    quiet_zone_modules: 4,
-                    threshold,
-                    layout: LayoutFamily::RibbonWeave,
+    for module_px in ribbon_module_px_candidates(region) {
+        let symbol_width = region.width / module_px - 8;
+        let symbol_height = region.height / module_px - 8;
+        if !reference_ribbon_geometry(symbol_width, symbol_height) {
+            continue;
+        }
+        for threshold in [160, 192, 224] {
+            let exact = RasterDecoder::new(DecodeOptions {
+                module_px,
+                quiet_zone_modules: 4,
+                threshold,
+                layout: LayoutFamily::RibbonWeave,
+            });
+            if let Ok(decoded) = exact.decode(image) {
+                return Ok(AutoDecodedSymbol {
+                    decoded,
+                    info: glyphnet_decode::AutoDecodeInfo {
+                        module_px,
+                        quiet_zone_modules: 4,
+                        threshold,
+                        layout: LayoutFamily::RibbonWeave,
+                    },
                 });
-                if let Ok(decoded) = exact.decode(image) {
-                    return Ok(AutoDecodedSymbol {
-                        decoded,
-                        info: glyphnet_decode::AutoDecodeInfo {
-                            module_px,
-                            quiet_zone_modules: 4,
-                            threshold,
-                            layout: LayoutFamily::RibbonWeave,
-                        },
-                    });
-                }
             }
         }
     }
     Err(DecodeError::AutoDetectFailed)
 }
 
+fn ribbon_module_px_candidates(region: ScanRegion) -> Vec<u32> {
+    let gcd = gcd_u32(region.width, region.height);
+    let mut candidates = Vec::new();
+    for module_px in 1..=32 {
+        if gcd % module_px != 0 {
+            continue;
+        }
+        let width_modules = region.width / module_px;
+        let height_modules = region.height / module_px;
+        if width_modules <= 8 || height_modules <= 8 {
+            continue;
+        }
+        if reference_ribbon_geometry(width_modules - 8, height_modules - 8) {
+            candidates.push(module_px);
+        }
+    }
+    candidates.sort_unstable_by(|a, b| b.cmp(a));
+    candidates
+}
+
 fn decode_fractional_ribbon_candidate(
     image: &DynamicImage,
 ) -> std::result::Result<AutoDecodedSymbol, DecodeError> {
-    const SYMBOL_WIDTH: u16 = 96;
-    const SYMBOL_HEIGHT: u16 = 36;
-    const TOTAL_WIDTH_MODULES: f32 = 104.0;
-    const TOTAL_HEIGHT_MODULES: f32 = 44.0;
     const QUIET_MODULES: f32 = 4.0;
 
     let luma = image.to_luma8();
     if luma.width() < 104 || luma.height() < 44 {
-        return Err(DecodeError::AutoDetectFailed);
-    }
-    let base_scale_x = luma.width() as f32 / TOTAL_WIDTH_MODULES;
-    let base_scale_y = luma.height() as f32 / TOTAL_HEIGHT_MODULES;
-    if base_scale_x < 1.0 || base_scale_y < 1.0 {
         return Err(DecodeError::AutoDetectFailed);
     }
 
@@ -169,40 +165,47 @@ fn decode_fractional_ribbon_candidate(
     thresholds.sort_unstable();
     thresholds.dedup();
 
-    for scale_adjust in [1.0_f32, 0.985, 1.015, 0.97, 1.03] {
-        let scale_x = base_scale_x * scale_adjust;
-        let scale_y = base_scale_y * scale_adjust;
-        if scale_x < 1.0 || scale_y < 1.0 {
+    for geometry in fractional_ribbon_geometry_candidates(luma.width(), luma.height()) {
+        let base_scale_x = luma.width() as f32 / geometry.total_width_modules() as f32;
+        let base_scale_y = luma.height() as f32 / geometry.total_height_modules() as f32;
+        if base_scale_x < 1.0 || base_scale_y < 1.0 {
             continue;
         }
-        for y_shift in module_shifts(3) {
-            for x_shift in module_shifts(2) {
-                let origin_x = QUIET_MODULES + x_shift;
-                let origin_y = QUIET_MODULES + y_shift;
-                if origin_x < -2.0 || origin_y < -8.0 {
-                    continue;
-                }
-                if !fractional_grid_fits(
-                    &luma,
-                    origin_x,
-                    origin_y,
-                    scale_x,
-                    scale_y,
-                    SYMBOL_WIDTH,
-                    SYMBOL_HEIGHT,
-                ) {
-                    continue;
-                }
-                for &threshold in &thresholds {
-                    if !fractional_header_precheck(
-                        &integral, origin_x, origin_y, scale_x, scale_y, threshold,
+        for scale_adjust in [1.0_f32, 0.985, 1.015, 0.97, 1.03] {
+            let scale_x = base_scale_x * scale_adjust;
+            let scale_y = base_scale_y * scale_adjust;
+            if scale_x < 1.0 || scale_y < 1.0 {
+                continue;
+            }
+            for y_shift in module_shifts(3) {
+                for x_shift in module_shifts(3) {
+                    let origin_x = QUIET_MODULES + x_shift;
+                    let origin_y = QUIET_MODULES + y_shift;
+                    if origin_x < -2.0 || origin_y < -8.0 {
+                        continue;
+                    }
+                    if !fractional_grid_fits(
+                        &luma,
+                        origin_x,
+                        origin_y,
+                        scale_x,
+                        scale_y,
+                        geometry.symbol_width,
+                        geometry.symbol_height,
                     ) {
                         continue;
                     }
-                    if let Ok(decoded) = decode_fractional_with_params(
-                        &integral, origin_x, origin_y, scale_x, scale_y, threshold,
-                    ) {
-                        return Ok(decoded);
+                    for &threshold in &thresholds {
+                        if !fractional_header_precheck(
+                            &integral, geometry, origin_x, origin_y, scale_x, scale_y, threshold,
+                        ) {
+                            continue;
+                        }
+                        if let Ok(decoded) = decode_fractional_with_params(
+                            &integral, geometry, origin_x, origin_y, scale_x, scale_y, threshold,
+                        ) {
+                            return Ok(decoded);
+                        }
                     }
                 }
             }
@@ -212,28 +215,77 @@ fn decode_fractional_ribbon_candidate(
     Err(DecodeError::AutoDetectFailed)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RibbonGeometry {
+    symbol_width: u16,
+    symbol_height: u16,
+}
+
+impl RibbonGeometry {
+    const fn total_width_modules(self) -> u16 {
+        self.symbol_width + 8
+    }
+
+    const fn total_height_modules(self) -> u16 {
+        self.symbol_height + 8
+    }
+}
+
+fn fractional_ribbon_geometry_candidates(
+    image_width: u32,
+    image_height: u32,
+) -> Vec<RibbonGeometry> {
+    const DEFAULT_PRINT_RIBBON: RibbonGeometry = RibbonGeometry {
+        symbol_width: 96,
+        symbol_height: 36,
+    };
+
+    let scale_x = image_width as f32 / DEFAULT_PRINT_RIBBON.total_width_modules() as f32;
+    let scale_y = image_height as f32 / DEFAULT_PRINT_RIBBON.total_height_modules() as f32;
+    if scale_x >= 1.0 && scale_y >= 1.0 && (0.6..=1.7).contains(&(scale_x / scale_y)) {
+        vec![DEFAULT_PRINT_RIBBON]
+    } else {
+        Vec::new()
+    }
+}
+
+fn reference_ribbon_geometry(width: u32, height: u32) -> bool {
+    width >= 96
+        && height >= 28
+        && width % 4 == 0
+        && height % 4 == 0
+        && (2.0..=8.0).contains(&(width as f32 / height.max(1) as f32))
+}
+
+fn gcd_u32(mut a: u32, mut b: u32) -> u32 {
+    while b != 0 {
+        let tmp = a % b;
+        a = b;
+        b = tmp;
+    }
+    a
+}
+
 fn module_shifts(radius: i32) -> impl Iterator<Item = f32> {
     (-radius * 2..=radius * 2).map(|value| value as f32 * 0.5)
 }
 
 fn fractional_header_precheck(
     integral: &IntegralGray,
+    geometry: RibbonGeometry,
     origin_x_modules: f32,
     origin_y_modules: f32,
     scale_x: f32,
     scale_y: f32,
     threshold: u8,
 ) -> bool {
-    const SYMBOL_WIDTH: u16 = 96;
-    const SYMBOL_HEIGHT: u16 = 36;
-
     let mut bits = Vec::with_capacity(HEADER_LEN * 8);
-    'rows: for y in 0..SYMBOL_HEIGHT {
-        for x in 0..SYMBOL_WIDTH {
+    'rows: for y in 0..geometry.symbol_height {
+        for x in 0..geometry.symbol_width {
             if !layout::is_data_module_for(
                 LayoutFamily::RibbonWeave,
-                SYMBOL_WIDTH,
-                SYMBOL_HEIGHT,
+                geometry.symbol_width,
+                geometry.symbol_height,
                 x,
                 y,
             ) {
@@ -279,23 +331,24 @@ fn fractional_grid_fits(
 
 fn decode_fractional_with_params(
     integral: &IntegralGray,
+    geometry: RibbonGeometry,
     origin_x_modules: f32,
     origin_y_modules: f32,
     scale_x: f32,
     scale_y: f32,
     threshold: u8,
 ) -> std::result::Result<AutoDecodedSymbol, DecodeError> {
-    const SYMBOL_WIDTH: u16 = 96;
-    const SYMBOL_HEIGHT: u16 = 36;
-
-    let mut matrix =
-        SymbolMatrix::with_layout(SYMBOL_WIDTH, SYMBOL_HEIGHT, LayoutFamily::RibbonWeave);
-    for y in 0..SYMBOL_HEIGHT {
-        for x in 0..SYMBOL_WIDTH {
+    let mut matrix = SymbolMatrix::with_layout(
+        geometry.symbol_width,
+        geometry.symbol_height,
+        LayoutFamily::RibbonWeave,
+    );
+    for y in 0..geometry.symbol_height {
+        for x in 0..geometry.symbol_width {
             if let Some(cell) = layout::function_cell_for(
                 LayoutFamily::RibbonWeave,
-                SYMBOL_WIDTH,
-                SYMBOL_HEIGHT,
+                geometry.symbol_width,
+                geometry.symbol_height,
                 x,
                 y,
             ) {
