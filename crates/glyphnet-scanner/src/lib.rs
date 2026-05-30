@@ -1303,6 +1303,40 @@ mod tests {
     }
 
     #[test]
+    fn decode_candidate_accepts_variable_size_ribbon_geometry() {
+        let payload = vec![0x47; 384];
+        let encoded = Encoder::default().encode_static(&payload).unwrap();
+        assert_ne!(
+            (encoded.matrix.width(), encoded.matrix.height()),
+            (96, 36),
+            "payload should force a non-reference RibbonWeave geometry"
+        );
+        let symbol = RasterRenderer::new(RenderOptions {
+            module_px: 3,
+            quiet_zone_modules: 4,
+            ..RenderOptions::default()
+        })
+        .render(&encoded.matrix)
+        .unwrap();
+        let image = DynamicImage::ImageRgba8(symbol.clone());
+        let candidate = ScanCandidate::new(
+            CandidateDetector::RibbonWeave,
+            Some(LayoutFamily::RibbonWeave),
+            "dark-ribbon",
+            ScanRegion {
+                x: 0,
+                y: 0,
+                width: symbol.width(),
+                height: symbol.height(),
+            },
+        );
+
+        let result = decode_candidate(&RasterDecoder::default(), &image, candidate).unwrap();
+        assert_eq!(result.decoded.frame.payload, payload);
+        assert_eq!(result.info.layout, LayoutFamily::RibbonWeave);
+    }
+
+    #[test]
     fn scan_still_decodes_generated_matrix_canvas() {
         let payload = b"matrix baseline";
         let symbol = rendered_sample_with_layout(payload, 4, LayoutFamily::Matrix);
