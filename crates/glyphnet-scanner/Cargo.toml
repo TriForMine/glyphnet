@@ -13,6 +13,7 @@ readme.workspace = true
 default = ["std"]
 std = []
 async = ["tokio"]
+opencv-fallback = ["dep:opencv"]
 
 [dependencies]
 glyphnet-core = { path = "../glyphnet-core", version = "0.1.0" }
@@ -26,6 +27,7 @@ tracing.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rayon = "1"
+opencv = { version = "0.98.2", optional = true, default-features = false, features = ["imgproc"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"

@@ -3,9 +3,13 @@ use glyphnet_cv::{Point, Quad, warp_perspective_gray};
 use glyphnet_decode::{
     AutoDecodedSymbol, DecodeError, DecodeOptions, RasterDecoder, decode_matrix_with_suspect_bytes,
 };
-use image::{DynamicImage, GrayImage, Luma};
+use image::{DynamicImage, GrayImage, Luma, Rgba, RgbaImage};
+use std::fs;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::ScanRegion;
+static NORMALIZED_DEBUG_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 pub(crate) fn decode_candidate(
     decoder: &RasterDecoder,
@@ -18,11 +22,23 @@ pub(crate) fn decode_candidate(
     {
         return Ok(decoded);
     }
-    if matches!(candidate.stage, "signature-window" | "coarse-grid") {
+    if matches!(
+        candidate.stage,
+        "signature-window" | "coarse-grid" | "top-left-scale" | "roi-group" | "border-trim"
+    ) {
+        let region_area = region.width.saturating_mul(region.height);
         if let Ok(decoded) = decode_exact_ribbon_candidate(image, region) {
             return Ok(decoded);
         }
-        if let Ok(decoded) = decode_fractional_ribbon_candidate(image) {
+        if let Ok(decoded) = decode_forced_normalized_ribbon_candidate(image, region) {
+            return Ok(decoded);
+        }
+        if region_area <= 700_000
+            && let Ok(decoded) = decode_fractional_ribbon_candidate(image)
+        {
+            return Ok(decoded);
+        }
+        if let Ok(decoded) = decode_with_padding_variants(decoder, image) {
             return Ok(decoded);
         }
         let target_module_px = 4;
@@ -42,6 +58,9 @@ pub(crate) fn decode_candidate(
         if let Ok(decoded) = decode_exact_ribbon_candidate(&resized, normalized_region) {
             return Ok(decoded);
         }
+        if let Ok(decoded) = decode_with_padding_variants(decoder, &resized) {
+            return Ok(decoded);
+        }
         return Err(DecodeError::AutoDetectFailed);
     }
 
@@ -55,8 +74,49 @@ pub(crate) fn decode_candidate(
         if let Ok(decoded) = decode_fractional_ribbon_candidate(image) {
             return Ok(decoded);
         }
+        if let Ok(decoded) = decode_with_padding_variants(decoder, image) {
+            return Ok(decoded);
+        }
     }
-    decoder.decode_auto_with_info(image)
+    decoder
+        .decode_auto_with_info(image)
+        .or_else(|_| decode_with_padding_variants(decoder, image))
+}
+
+fn decode_with_padding_variants(
+    decoder: &RasterDecoder,
+    image: &DynamicImage,
+) -> std::result::Result<AutoDecodedSymbol, DecodeError> {
+    for pad_pct in [4u32, 8, 12, 16] {
+        let padded = white_pad_image(image, pad_pct);
+        if let Ok(decoded) = decoder.decode_auto_with_info(&padded) {
+            return Ok(decoded);
+        }
+        if let Ok(decoded) = decode_fractional_ribbon_candidate(&padded) {
+            return Ok(decoded);
+        }
+        let region = crate::ScanRegion {
+            x: 0,
+            y: 0,
+            width: padded.width(),
+            height: padded.height(),
+        };
+        if let Ok(decoded) = decode_exact_ribbon_candidate(&padded, region) {
+            return Ok(decoded);
+        }
+    }
+    Err(DecodeError::AutoDetectFailed)
+}
+
+fn white_pad_image(image: &DynamicImage, pad_pct: u32) -> DynamicImage {
+    let rgba = image.to_rgba8();
+    let pad_x = (rgba.width().saturating_mul(pad_pct) / 100).max(2);
+    let pad_y = (rgba.height().saturating_mul(pad_pct) / 100).max(2);
+    let out_w = rgba.width().saturating_add(pad_x.saturating_mul(2));
+    let out_h = rgba.height().saturating_add(pad_y.saturating_mul(2));
+    let mut canvas = RgbaImage::from_pixel(out_w, out_h, Rgba([255, 255, 255, 255]));
+    image::imageops::overlay(&mut canvas, &rgba, i64::from(pad_x), i64::from(pad_y));
+    DynamicImage::ImageRgba8(canvas)
 }
 
 fn decode_exact_matrix_candidate(
@@ -121,23 +181,25 @@ fn decode_exact_ribbon_candidate(
     if region.width >= 104 && region.height >= 44 {
         let module_px = (region.width / 104).max(1);
         if region.width == 104 * module_px && region.height == 44 * module_px {
-            for threshold in [160, 192, 224] {
-                let exact = RasterDecoder::new(DecodeOptions {
-                    module_px,
-                    quiet_zone_modules: 4,
-                    threshold,
-                    layout: LayoutFamily::RibbonWeave,
-                });
-                if let Ok(decoded) = exact.decode(image) {
-                    return Ok(AutoDecodedSymbol {
-                        decoded,
-                        info: glyphnet_decode::AutoDecodeInfo {
-                            module_px,
-                            quiet_zone_modules: 4,
-                            threshold,
-                            layout: LayoutFamily::RibbonWeave,
-                        },
+            for quiet_zone_modules in [0u32, 1, 2, 3, 4, 5, 6, 7, 8] {
+                for threshold in [144, 160, 176, 192, 208, 224] {
+                    let exact = RasterDecoder::new(DecodeOptions {
+                        module_px,
+                        quiet_zone_modules,
+                        threshold,
+                        layout: LayoutFamily::RibbonWeave,
                     });
+                    if let Ok(decoded) = exact.decode(image) {
+                        return Ok(AutoDecodedSymbol {
+                            decoded,
+                            info: glyphnet_decode::AutoDecodeInfo {
+                                module_px,
+                                quiet_zone_modules,
+                                threshold,
+                                layout: LayoutFamily::RibbonWeave,
+                            },
+                        });
+                    }
                 }
             }
         }
@@ -215,6 +277,147 @@ fn decode_fractional_ribbon_candidate(
     }
 
     Err(DecodeError::AutoDetectFailed)
+}
+
+fn decode_forced_normalized_ribbon_candidate(
+    image: &DynamicImage,
+    region: ScanRegion,
+) -> std::result::Result<AutoDecodedSymbol, DecodeError> {
+    const SYMBOL_WIDTH: u32 = 96;
+    const SYMBOL_HEIGHT: u32 = 36;
+    const QUIET: u32 = 4;
+
+    let x = region.x.min(image.width().saturating_sub(1));
+    let y = region.y.min(image.height().saturating_sub(1));
+    let max_w = image.width().saturating_sub(x);
+    let max_h = image.height().saturating_sub(y);
+    let w = region.width.min(max_w);
+    let h = region.height.min(max_h);
+    if w < 80 || h < 30 {
+        return Err(DecodeError::AutoDetectFailed);
+    }
+
+    let full = image.to_luma8();
+    let trims = [0.00f32, 0.06];
+    let shifts = [0.00f32, -0.04, 0.04];
+
+    let est_w = (w / 104).max(2);
+    let est_h = (h / 44).max(2);
+    let est = ((est_w + est_h) / 2).clamp(2, 24);
+    let mut module_candidates = Vec::new();
+    for d in -3i32..=3 {
+        let m = (est as i32 + d).clamp(2, 24) as u32;
+        if !module_candidates.contains(&m) {
+            module_candidates.push(m);
+        }
+    }
+
+    for trim in trims {
+        let trim_x = ((w as f32) * trim).round() as u32;
+        let trim_y = ((h as f32) * trim).round() as u32;
+        let base_w = w.saturating_sub(trim_x.saturating_mul(2));
+        let base_h = h.saturating_sub(trim_y.saturating_mul(2));
+        if base_w < 60 || base_h < 24 {
+            continue;
+        }
+        let base_x = x.saturating_add(trim_x);
+        let base_y = y.saturating_add(trim_y);
+
+        for sx in shifts {
+            for sy in shifts {
+                let dx = ((base_w as f32) * sx).round() as i32;
+                let dy = ((base_h as f32) * sy).round() as i32;
+                let rx = (base_x as i32 + dx).max(0) as u32;
+                let ry = (base_y as i32 + dy).max(0) as u32;
+                let rw = base_w.min(full.width().saturating_sub(rx));
+                let rh = base_h.min(full.height().saturating_sub(ry));
+                if rw < 60 || rh < 24 {
+                    continue;
+                }
+
+                let sub = image::imageops::crop_imm(&full, rx, ry, rw, rh).to_image();
+                for module_px in &module_candidates {
+                    let total_w = (SYMBOL_WIDTH + QUIET * 2) * *module_px;
+                    let total_h = (SYMBOL_HEIGHT + QUIET * 2) * *module_px;
+                    let content_w = SYMBOL_WIDTH * *module_px;
+                    let content_h = SYMBOL_HEIGHT * *module_px;
+                    let resized = image::imageops::resize(
+                        &sub,
+                        content_w,
+                        content_h,
+                        image::imageops::FilterType::CatmullRom,
+                    );
+
+                    let mut thresholds = vec![fractional_threshold(&resized), 120, 136, 152];
+                    thresholds.sort_unstable();
+                    thresholds.dedup();
+
+                    for threshold in thresholds {
+                        let mut bin = resized.clone();
+                        for px in bin.pixels_mut() {
+                            px.0[0] = if px.0[0] < threshold { 0 } else { 255 };
+                        }
+                        dump_normalized_debug(region, threshold, &resized, &bin);
+                        let mut canvas = GrayImage::from_pixel(total_w, total_h, Luma([255]));
+                        image::imageops::overlay(
+                            &mut canvas,
+                            &bin,
+                            i64::from(QUIET * *module_px),
+                            i64::from(QUIET * *module_px),
+                        );
+                        let candidate = DynamicImage::ImageLuma8(canvas);
+                        let full_region = ScanRegion {
+                            x: 0,
+                            y: 0,
+                            width: total_w,
+                            height: total_h,
+                        };
+                        if let Ok(decoded) = decode_exact_ribbon_candidate(&candidate, full_region) {
+                            return Ok(decoded);
+                        }
+                        let auto = RasterDecoder::default();
+                        if let Ok(decoded) = auto.decode_auto_with_info(&candidate) {
+                            return Ok(decoded);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Err(DecodeError::AutoDetectFailed)
+}
+
+fn dump_normalized_debug(region: ScanRegion, threshold: u8, resized: &GrayImage, bin: &GrayImage) {
+    if std::env::var_os("GLYPHNET_SCAN_DEBUG").is_none() {
+        return;
+    }
+    let base_dir = std::env::var_os("GLYPHNET_SCAN_DEBUG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("target/scan-debug"));
+    let out_dir = base_dir.join("normalized");
+    if fs::create_dir_all(&out_dir).is_err() {
+        return;
+    }
+    let idx = NORMALIZED_DEBUG_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let prefix = format!(
+        "n{:04}-{}x{}+{}+{}-t{}",
+        idx, region.width, region.height, region.x, region.y, threshold
+    );
+    let _ = resized.save(out_dir.join(format!("{prefix}-normalized-resized.png")));
+    let _ = bin.save(out_dir.join(format!("{prefix}-normalized-binary.png")));
+    let mut txt = String::new();
+    for y in 0..bin.height() {
+        for x in 0..bin.width() {
+            let value = if bin.get_pixel(x, y).0[0] == 0 { '1' } else { '0' };
+            txt.push(value);
+        }
+        txt.push('\n');
+    }
+    let _ = fs::write(
+        out_dir.join(format!("{prefix}-normalized-binary.txt")),
+        txt,
+    );
 }
 
 fn module_shifts(radius: i32) -> impl Iterator<Item = f32> {

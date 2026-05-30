@@ -41,6 +41,490 @@ pub use detectors::CandidateDetector;
 use detectors::ScanCandidate;
 use rectification::{scan_quad_candidates as build_quad_candidates, should_try_quad_rectification};
 pub use types::{FailedStillScan, ScanAttempt, ScanTelemetry, ScanTimings, StillScanResult};
+#[cfg(all(not(target_arch = "wasm32"), feature = "opencv-fallback"))]
+mod opencv_fallback {
+    use glyphnet_decode::{AutoDecodedSymbol, RasterDecoder};
+    use image::{DynamicImage, GrayImage, Luma};
+    use opencv::{
+        core::{self, Mat, Point2f, Rect, Scalar, Size, Vector},
+        imgproc,
+        prelude::*,
+    };
+
+    pub(crate) fn try_decode_with_opencv(image: &DynamicImage) -> Option<AutoDecodedSymbol> {
+        let luma = image.to_luma8();
+        let Ok(src) = gray_to_mat(&luma) else {
+            return None;
+        };
+        let mut variants = Vec::new();
+        let mut page_src = src.clone();
+        if let Some(page) = page_rectified_variant(&src) {
+            page_src = page;
+        }
+
+        if let Ok(clahe) = clahe_variant(&page_src) {
+            variants.push(clahe);
+        }
+        if let Ok(adaptive) = adaptive_variant(&page_src) {
+            variants.push(adaptive);
+        }
+        if let Ok(clahe) = clahe_variant(&page_src)
+            && let Ok(combo) = adaptive_variant(&clahe)
+        {
+            variants.push(combo);
+        }
+
+        let mut roi_variants: Vec<DynamicImage> = Vec::new();
+        if let Some(rois) = detect_symbol_rois(&page_src) {
+            for roi in rois {
+                if let Ok(crop) = page_src.roi(roi)
+                    && let Ok(crop_mat) = crop.try_clone()
+                    && let Ok(gray) = mat_to_gray(&crop_mat)
+                {
+                    let crop_img = DynamicImage::ImageLuma8(gray);
+                    roi_variants.push(crop_img.clone());
+                    roi_variants.push(white_pad(&crop_img, 8));
+                    roi_variants.push(white_pad(&crop_img, 14));
+                }
+            }
+        }
+        if let Some(warped) = quad_warp_variant(&page_src) {
+            roi_variants.push(warped.clone());
+            roi_variants.push(white_pad(&warped, 8));
+            roi_variants.push(white_pad(&warped, 14));
+        }
+
+        let decoder = RasterDecoder::default();
+        for candidate in roi_variants {
+            if let Ok(decoded) = decoder.decode_auto_with_info(&candidate) {
+                return Some(decoded);
+            }
+        }
+        for mat in variants {
+            let Ok(gray) = mat_to_gray(&mat) else {
+                continue;
+            };
+            let candidate = DynamicImage::ImageLuma8(gray);
+            if let Ok(decoded) = decoder.decode_auto_with_info(&candidate) {
+                return Some(decoded);
+            }
+        }
+        None
+    }
+
+    fn detect_symbol_rois(src: &Mat) -> Option<Vec<Rect>> {
+        let mut thresh = Mat::default();
+        imgproc::adaptive_threshold(
+            src,
+            &mut thresh,
+            255.0,
+            imgproc::ADAPTIVE_THRESH_GAUSSIAN_C,
+            imgproc::THRESH_BINARY_INV,
+            31,
+            7.0,
+        )
+        .ok()?;
+        let kernel = imgproc::get_structuring_element(
+            imgproc::MORPH_RECT,
+            core::Size::new(3, 3),
+            core::Point::new(-1, -1),
+        )
+        .ok()?;
+        let mut closed = Mat::default();
+        imgproc::morphology_ex(
+            &thresh,
+            &mut closed,
+            imgproc::MORPH_CLOSE,
+            &kernel,
+            core::Point::new(-1, -1),
+            2,
+            core::BORDER_CONSTANT,
+            core::Scalar::all(0.0),
+        )
+        .ok()?;
+
+        let mut contours: Vector<Vector<core::Point>> = Vector::new();
+        imgproc::find_contours(
+            &closed,
+            &mut contours,
+            imgproc::RETR_EXTERNAL,
+            imgproc::CHAIN_APPROX_SIMPLE,
+            core::Point::new(0, 0),
+        )
+        .ok()?;
+
+        let w = src.cols().max(1) as f32;
+        let h = src.rows().max(1) as f32;
+        let img_area = w * h;
+
+        let mut scored: Vec<(f32, Rect)> = Vec::new();
+        for contour in contours {
+            let rect = imgproc::bounding_rect(&contour).ok()?;
+            if rect.width <= 0 || rect.height <= 0 {
+                continue;
+            }
+            let area = (rect.width * rect.height) as f32;
+            let area_ratio = area / img_area;
+            if !(0.001..=0.90).contains(&area_ratio) {
+                continue;
+            }
+            let aspect = rect.width as f32 / rect.height as f32;
+            if !(0.8..=14.0).contains(&aspect) {
+                continue;
+            }
+            let top_penalty = if rect.y < (h * 0.03) as i32 { 0.15 } else { 0.0 };
+            let width_ratio = rect.width as f32 / w;
+            let height_ratio = rect.height as f32 / h;
+            let mut score = 0.0f32;
+            score += (aspect / 3.0).min(1.0) * 0.45;
+            score += (area_ratio / 0.15).min(1.0) * 0.35;
+            score += (width_ratio.min(0.8) / 0.8) * 0.2;
+            score -= top_penalty;
+            if height_ratio > 0.70 {
+                score -= 0.10;
+            }
+            scored.push((score, rect));
+        }
+
+        scored.sort_by(|a, b| b.0.total_cmp(&a.0));
+        if scored.is_empty() {
+            return None;
+        }
+
+        let mut out = Vec::new();
+        for (_, rect) in scored.into_iter().take(12) {
+            out.push(expand_rect(rect, src.cols(), src.rows(), 0.20));
+            out.push(expand_rect(rect, src.cols(), src.rows(), 0.35));
+        }
+        Some(out)
+    }
+
+    fn expand_rect(rect: Rect, max_w: i32, max_h: i32, ratio: f32) -> Rect {
+        let dx = ((rect.width as f32) * ratio).round() as i32;
+        let dy = ((rect.height as f32) * ratio).round() as i32;
+        let x = (rect.x - dx).max(0);
+        let y = (rect.y - dy).max(0);
+        let r = (rect.x + rect.width + dx).min(max_w);
+        let b = (rect.y + rect.height + dy).min(max_h);
+        Rect::new(x, y, (r - x).max(1), (b - y).max(1))
+    }
+
+    fn white_pad(image: &DynamicImage, pct: u32) -> DynamicImage {
+        let luma = image.to_luma8();
+        let pad_x = ((luma.width() as f32) * (pct as f32 / 100.0)).round() as u32;
+        let pad_y = ((luma.height() as f32) * (pct as f32 / 100.0)).round() as u32;
+        let out_w = luma.width().saturating_add(pad_x.saturating_mul(2));
+        let out_h = luma.height().saturating_add(pad_y.saturating_mul(2));
+        let mut out = GrayImage::from_pixel(out_w.max(1), out_h.max(1), Luma([255]));
+        for y in 0..luma.height() {
+            for x in 0..luma.width() {
+                out.put_pixel(x + pad_x, y + pad_y, *luma.get_pixel(x, y));
+            }
+        }
+        DynamicImage::ImageLuma8(out)
+    }
+
+    fn page_rectified_variant(src: &Mat) -> Option<Mat> {
+        let mut blur = Mat::default();
+        imgproc::gaussian_blur(
+            src,
+            &mut blur,
+            Size::new(5, 5),
+            0.0,
+            0.0,
+            core::BORDER_DEFAULT,
+            core::AlgorithmHint::ALGO_HINT_DEFAULT,
+        )
+        .ok()?;
+        let mut edges = Mat::default();
+        imgproc::canny(&blur, &mut edges, 60.0, 180.0, 3, false).ok()?;
+        let kernel = imgproc::get_structuring_element(
+            imgproc::MORPH_RECT,
+            Size::new(5, 5),
+            core::Point::new(-1, -1),
+        )
+        .ok()?;
+        let mut closed = Mat::default();
+        imgproc::morphology_ex(
+            &edges,
+            &mut closed,
+            imgproc::MORPH_CLOSE,
+            &kernel,
+            core::Point::new(-1, -1),
+            2,
+            core::BORDER_CONSTANT,
+            Scalar::all(0.0),
+        )
+        .ok()?;
+
+        let mut contours: Vector<Vector<core::Point>> = Vector::new();
+        imgproc::find_contours(
+            &closed,
+            &mut contours,
+            imgproc::RETR_EXTERNAL,
+            imgproc::CHAIN_APPROX_SIMPLE,
+            core::Point::new(0, 0),
+        )
+        .ok()?;
+
+        let img_w = src.cols().max(1) as f32;
+        let img_h = src.rows().max(1) as f32;
+        let img_area = img_w * img_h;
+        let mut best_quad: Option<[Point2f; 4]> = None;
+        let mut best_score = f32::MIN;
+
+        for contour in contours {
+            let area = imgproc::contour_area(&contour, false).ok()? as f32;
+            let area_ratio = area / img_area;
+            if !(0.25..=0.98).contains(&area_ratio) {
+                continue;
+            }
+            let peri = imgproc::arc_length(&contour, true).ok()?;
+            let mut approx: Vector<core::Point> = Vector::new();
+            imgproc::approx_poly_dp(&contour, &mut approx, 0.02 * peri, true).ok()?;
+            if approx.len() != 4 {
+                continue;
+            }
+            let mut pts: Vec<Point2f> = approx
+                .iter()
+                .map(|p| Point2f::new(p.x as f32, p.y as f32))
+                .collect();
+            if pts.len() != 4 {
+                continue;
+            }
+            pts.sort_by(|a, b| a.y.total_cmp(&b.y).then(a.x.total_cmp(&b.x)));
+            let (tl, tr) = if pts[0].x <= pts[1].x {
+                (pts[0], pts[1])
+            } else {
+                (pts[1], pts[0])
+            };
+            let (bl, br) = if pts[2].x <= pts[3].x {
+                (pts[2], pts[3])
+            } else {
+                (pts[3], pts[2])
+            };
+            let top_w = ((tr.x - tl.x).powi(2) + (tr.y - tl.y).powi(2)).sqrt();
+            let bot_w = ((br.x - bl.x).powi(2) + (br.y - bl.y).powi(2)).sqrt();
+            let left_h = ((bl.x - tl.x).powi(2) + (bl.y - tl.y).powi(2)).sqrt();
+            let right_h = ((br.x - tr.x).powi(2) + (br.y - tr.y).powi(2)).sqrt();
+            let width = top_w.max(bot_w).max(1.0);
+            let height = left_h.max(right_h).max(1.0);
+            let aspect = width / height;
+            if !(0.55..=1.9).contains(&aspect) {
+                continue;
+            }
+            let score = area_ratio - (aspect - 1.414).abs() * 0.08;
+            if score > best_score {
+                best_score = score;
+                best_quad = Some([tl, tr, br, bl]);
+            }
+        }
+
+        let quad = best_quad?;
+        let dst_w = 2200;
+        let dst_h = 1550;
+        let mut src_vec: Vector<Point2f> = Vector::new();
+        for p in quad {
+            src_vec.push(p);
+        }
+        let mut dst_vec: Vector<Point2f> = Vector::new();
+        dst_vec.push(Point2f::new(0.0, 0.0));
+        dst_vec.push(Point2f::new((dst_w - 1) as f32, 0.0));
+        dst_vec.push(Point2f::new((dst_w - 1) as f32, (dst_h - 1) as f32));
+        dst_vec.push(Point2f::new(0.0, (dst_h - 1) as f32));
+        let m = imgproc::get_perspective_transform(&src_vec, &dst_vec, 0).ok()?;
+        let mut warped = Mat::default();
+        imgproc::warp_perspective(
+            src,
+            &mut warped,
+            &m,
+            Size::new(dst_w, dst_h),
+            imgproc::INTER_LINEAR,
+            core::BORDER_CONSTANT,
+            Scalar::all(255.0),
+        )
+        .ok()?;
+        Some(warped)
+    }
+
+    fn quad_warp_variant(src: &Mat) -> Option<DynamicImage> {
+        let mut thresh = Mat::default();
+        imgproc::adaptive_threshold(
+            src,
+            &mut thresh,
+            255.0,
+            imgproc::ADAPTIVE_THRESH_GAUSSIAN_C,
+            imgproc::THRESH_BINARY_INV,
+            31,
+            7.0,
+        )
+        .ok()?;
+        let kernel = imgproc::get_structuring_element(
+            imgproc::MORPH_RECT,
+            Size::new(3, 3),
+            core::Point::new(-1, -1),
+        )
+        .ok()?;
+        let mut closed = Mat::default();
+        imgproc::morphology_ex(
+            &thresh,
+            &mut closed,
+            imgproc::MORPH_CLOSE,
+            &kernel,
+            core::Point::new(-1, -1),
+            2,
+            core::BORDER_CONSTANT,
+            Scalar::all(0.0),
+        )
+        .ok()?;
+
+        let mut contours: Vector<Vector<core::Point>> = Vector::new();
+        imgproc::find_contours(
+            &closed,
+            &mut contours,
+            imgproc::RETR_EXTERNAL,
+            imgproc::CHAIN_APPROX_SIMPLE,
+            core::Point::new(0, 0),
+        )
+        .ok()?;
+
+        let w = src.cols().max(1) as f32;
+        let h = src.rows().max(1) as f32;
+        let img_area = w * h;
+        let mut best_quad: Option<[Point2f; 4]> = None;
+        let mut best_score = f32::MIN;
+
+        for contour in contours {
+            let area = imgproc::contour_area(&contour, false).ok()? as f32;
+            let area_ratio = area / img_area;
+            if !(0.01..=0.65).contains(&area_ratio) {
+                continue;
+            }
+            let peri = imgproc::arc_length(&contour, true).ok()?;
+            let mut approx: Vector<core::Point> = Vector::new();
+            imgproc::approx_poly_dp(&contour, &mut approx, 0.03 * peri, true).ok()?;
+            if approx.len() != 4 {
+                continue;
+            }
+            let rect = imgproc::bounding_rect(&approx).ok()?;
+            if rect.y < (h * 0.04) as i32 {
+                continue;
+            }
+            let aspect = rect.width as f32 / rect.height.max(1) as f32;
+            if !(1.5..=5.5).contains(&aspect) {
+                continue;
+            }
+            let score = area_ratio * 0.7 + (1.0 - (aspect - (104.0 / 44.0)).abs() / 4.0) * 0.3;
+            if score <= best_score {
+                continue;
+            }
+            let mut pts: Vec<Point2f> = approx
+                .iter()
+                .map(|p| Point2f::new(p.x as f32, p.y as f32))
+                .collect();
+            if pts.len() != 4 {
+                continue;
+            }
+            pts.sort_by(|a, b| a.y.total_cmp(&b.y).then(a.x.total_cmp(&b.x)));
+            let (tl, tr) = if pts[0].x <= pts[1].x {
+                (pts[0], pts[1])
+            } else {
+                (pts[1], pts[0])
+            };
+            let (bl, br) = if pts[2].x <= pts[3].x {
+                (pts[2], pts[3])
+            } else {
+                (pts[3], pts[2])
+            };
+            best_quad = Some([tl, tr, br, bl]);
+            best_score = score;
+        }
+
+        let src_pts = best_quad?;
+        let dst_w = 104 * 8;
+        let dst_h = 44 * 8;
+        let mut src_vec: Vector<Point2f> = Vector::new();
+        for p in src_pts {
+            src_vec.push(p);
+        }
+        let mut dst_vec: Vector<Point2f> = Vector::new();
+        dst_vec.push(Point2f::new(0.0, 0.0));
+        dst_vec.push(Point2f::new((dst_w - 1) as f32, 0.0));
+        dst_vec.push(Point2f::new((dst_w - 1) as f32, (dst_h - 1) as f32));
+        dst_vec.push(Point2f::new(0.0, (dst_h - 1) as f32));
+        let m = imgproc::get_perspective_transform(&src_vec, &dst_vec, 0).ok()?;
+        let mut warped = Mat::default();
+        imgproc::warp_perspective(
+            src,
+            &mut warped,
+            &m,
+            Size::new(dst_w, dst_h),
+            imgproc::INTER_LINEAR,
+            core::BORDER_CONSTANT,
+            Scalar::all(255.0),
+        )
+        .ok()?;
+        let gray = mat_to_gray(&warped).ok()?;
+        Some(DynamicImage::ImageLuma8(gray))
+    }
+
+    fn gray_to_mat(gray: &GrayImage) -> opencv::Result<Mat> {
+        let mat = Mat::from_slice(gray.as_raw())?;
+        let reshaped = mat.reshape(1, gray.height() as i32)?;
+        reshaped.try_clone()
+    }
+
+    fn mat_to_gray(mat: &Mat) -> opencv::Result<GrayImage> {
+        let width = mat.cols().max(0) as u32;
+        let height = mat.rows().max(0) as u32;
+        let data = mat.data_bytes()?;
+        let mut out = GrayImage::new(width, height);
+        for y in 0..height {
+            for x in 0..width {
+                let idx = (y * width + x) as usize;
+                out.put_pixel(x, y, Luma([data.get(idx).copied().unwrap_or(255)]));
+            }
+        }
+        Ok(out)
+    }
+
+    fn clahe_variant(src: &Mat) -> opencv::Result<Mat> {
+        let mut dst = Mat::default();
+        let mut clahe = imgproc::create_clahe(2.0, core::Size::new(8, 8))?;
+        clahe.apply(src, &mut dst)?;
+        Ok(dst)
+    }
+
+    fn adaptive_variant(src: &Mat) -> opencv::Result<Mat> {
+        let mut bin = Mat::default();
+        imgproc::adaptive_threshold(
+            src,
+            &mut bin,
+            255.0,
+            imgproc::ADAPTIVE_THRESH_GAUSSIAN_C,
+            imgproc::THRESH_BINARY,
+            31,
+            7.0,
+        )?;
+        let kernel = imgproc::get_structuring_element(
+            imgproc::MORPH_RECT,
+            core::Size::new(3, 3),
+            core::Point::new(-1, -1),
+        )?;
+        let mut closed = Mat::default();
+        imgproc::morphology_ex(
+            &bin,
+            &mut closed,
+            imgproc::MORPH_CLOSE,
+            &kernel,
+            core::Point::new(-1, -1),
+            1,
+            core::BORDER_CONSTANT,
+            core::Scalar::all(255.0),
+        )?;
+        Ok(closed)
+    }
+}
 
 /// Result type for scanner operations.
 pub type Result<T> = std::result::Result<T, ScannerError>;
@@ -549,6 +1033,20 @@ fn scan_still_with_diagnostics_inner(
     }
     timings.decode_attempts_micros = elapsed_micros(decode_started);
     timings.total_micros = elapsed_micros(started);
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "opencv-fallback"))]
+    if std::env::var_os("GLYPHNET_SCAN_OPENCV").is_some()
+        && let Some(decoded) = opencv_fallback::try_decode_with_opencv(image)
+    {
+        return Ok(StillScanResult {
+            decoded,
+            crop: None,
+            quad: None,
+            warp_size: None,
+            attempts,
+            timings,
+        });
+    }
 
     if std::env::var_os("GLYPHNET_SCAN_DEBUG").is_some() {
         eprintln!("scan attempts: {attempts:#?}");
