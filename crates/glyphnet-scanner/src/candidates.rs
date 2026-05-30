@@ -898,6 +898,7 @@ fn ribbon_weave_candidates(
     image_height: u32,
 ) -> Vec<ScanCandidate> {
     let mut regions = Vec::new();
+    regions.extend(page_ribbon_regions(binary, image_width, image_height));
     regions.extend(ribbon_totem_regions(binary, image_width, image_height));
     regions.extend(ribbon_rail_regions(binary, image_width, image_height));
     regions.truncate(MAX_CANDIDATE_REGIONS);
@@ -964,6 +965,93 @@ struct TotemGroup {
     max_y: u32,
     dark: u32,
     columns: u32,
+}
+
+fn page_ribbon_regions(
+    binary: &GrayImage,
+    image_width: u32,
+    image_height: u32,
+) -> Vec<ScanCandidate> {
+    if image_width.saturating_mul(image_height) <= 900_000 {
+        return Vec::new();
+    }
+
+    let Some(bounds) = page_ribbon_dark_band_bounds(binary, image_width, image_height) else {
+        return Vec::new();
+    };
+    let region = ribbon_region_from_dark_bounds(bounds, image_width, image_height)
+        .unwrap_or_else(|| clamp_region(bounds, image_width, image_height));
+    if !plausible_region(region) {
+        return Vec::new();
+    }
+    vec![ScanCandidate::new(
+        CandidateDetector::RibbonWeave,
+        Some(LayoutFamily::RibbonWeave),
+        "page-ribbon",
+        region,
+    )]
+}
+
+fn page_ribbon_dark_band_bounds(
+    binary: &GrayImage,
+    image_width: u32,
+    image_height: u32,
+) -> Option<ScanRegion> {
+    let border_y = image_height / 32;
+    let row_threshold = (image_width / 80).clamp(24, 96);
+    let mut rows = Vec::new();
+    for y in border_y..image_height.saturating_sub(border_y) {
+        let mut dark = 0u32;
+        let mut min_x = image_width;
+        let mut max_x = 0u32;
+        for x in 0..image_width {
+            if binary.get_pixel(x, y).0[0] == 0 {
+                dark += 1;
+                min_x = min_x.min(x);
+                max_x = max_x.max(x);
+            }
+        }
+        if dark >= row_threshold {
+            rows.push((y, min_x, max_x, dark));
+        }
+    }
+
+    let mut best: Option<(u32, ScanRegion)> = None;
+    let mut index = 0usize;
+    while index < rows.len() {
+        let start_y = rows[index].0;
+        let mut end_y = start_y;
+        let mut min_x = rows[index].1;
+        let mut max_x = rows[index].2;
+        let mut dark_sum = rows[index].3;
+        index += 1;
+
+        while index < rows.len() && rows[index].0 <= end_y + 96 {
+            end_y = rows[index].0;
+            min_x = min_x.min(rows[index].1);
+            max_x = max_x.max(rows[index].2);
+            dark_sum += rows[index].3;
+            index += 1;
+        }
+
+        let width = max_x.saturating_sub(min_x).saturating_add(1);
+        let height = end_y.saturating_sub(start_y).saturating_add(1);
+        if width < image_width / 3 || height < image_height / 8 {
+            continue;
+        }
+        let region = ScanRegion {
+            x: min_x,
+            y: start_y,
+            width,
+            height,
+        };
+        let score = width.saturating_mul(height).saturating_add(dark_sum);
+        if best.is_none_or(|(best_score, _)| score > best_score) {
+            best = Some((score, region));
+        }
+    }
+
+    best.map(|(_, region)| region)
 }
 
 fn ribbon_totem_regions(

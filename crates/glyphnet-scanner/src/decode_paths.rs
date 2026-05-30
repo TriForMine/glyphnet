@@ -2,7 +2,7 @@ use glyphnet_core::{Cell, FrameHeader, HEADER_LEN, LayoutFamily, SymbolMatrix, b
 use glyphnet_decode::{
     AutoDecodedSymbol, DecodeError, DecodeOptions, RasterDecoder, decode_matrix,
 };
-use image::{DynamicImage, GrayImage};
+use image::{DynamicImage, GrayImage, imageops::FilterType};
 
 use crate::ScanRegion;
 
@@ -17,6 +17,10 @@ pub(crate) fn decode_candidate(
     {
         return Ok(decoded);
     }
+    if candidate.stage == "page-ribbon" {
+        return decode_page_ribbon_candidate(image);
+    }
+
     if matches!(candidate.stage, "signature-window" | "coarse-grid") {
         if let Ok(decoded) = decode_exact_ribbon_candidate(image, region) {
             return Ok(decoded);
@@ -39,6 +43,22 @@ pub(crate) fn decode_candidate(
         }
     }
     decoder.decode_auto_with_info(image)
+}
+
+fn decode_page_ribbon_candidate(
+    image: &DynamicImage,
+) -> std::result::Result<AutoDecodedSymbol, DecodeError> {
+    const MAX_PAGE_RIBBON_EDGE: u32 = 640;
+
+    let max_edge = image.width().max(image.height());
+    if max_edge <= MAX_PAGE_RIBBON_EDGE {
+        return decode_fractional_ribbon_candidate(image);
+    }
+    let scale = MAX_PAGE_RIBBON_EDGE as f32 / max_edge as f32;
+    let width = ((image.width() as f32 * scale).round() as u32).max(104);
+    let height = ((image.height() as f32 * scale).round() as u32).max(44);
+    let resized = image.resize(width, height, FilterType::Triangle);
+    decode_fractional_ribbon_candidate(&resized)
 }
 
 fn decode_exact_matrix_candidate(

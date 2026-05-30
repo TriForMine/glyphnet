@@ -1562,6 +1562,42 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "large real-print fixture localization is slow in debug builds"]
+    fn scan_candidates_include_page_scale_real_print_fixture() {
+        let image = image::load_from_memory(include_bytes!(
+            "../../glyphnet-testkit/fixtures/corpus/real/print/print-clean-001.jpg"
+        ))
+        .unwrap();
+        let profile = glyphnet_cv::VisionProfile::for_mode(TransmissionMode::Print);
+        let gray = glyphnet_cv::grayscale(&image).unwrap();
+        let binary = glyphnet_cv::adaptive_threshold(
+            &gray,
+            profile.threshold_radius,
+            profile.threshold_bias,
+        )
+        .unwrap();
+        let candidates = crate::candidates::still_scan_candidates(
+            &image,
+            &binary,
+            profile,
+            profile.min_anchor_px.max(8),
+            false,
+        );
+        let candidate = candidates
+            .iter()
+            .find(|candidate| candidate.stage == "page-ribbon")
+            .expect("real print fixture should produce a page-scale Ribbon candidate");
+        assert!(
+            candidate.region.width >= image.width() / 2,
+            "page-ribbon candidate too narrow: {candidate:?}"
+        );
+        assert!(
+            candidate.region.height >= image.height() / 5,
+            "page-ribbon candidate too short: {candidate:?}"
+        );
+    }
+
+    #[test]
     fn scan_still_decodes_mild_horizontal_skew() {
         let encoded = Encoder::default().encode_static(b"skew").unwrap();
         let symbol = RasterRenderer::default().render(&encoded.matrix).unwrap();
