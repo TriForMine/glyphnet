@@ -1,7 +1,4 @@
-use glyphnet_core::{
-    Cell, FrameHeader, GeometryProfile, HEADER_LEN, LayoutFamily, SymbolMatrix, TransmissionMode,
-    bitstream, layout,
-};
+use glyphnet_core::{Cell, FrameHeader, HEADER_LEN, LayoutFamily, SymbolMatrix, bitstream, layout};
 use glyphnet_decode::{
     AutoDecodedSymbol, DecodeError, DecodeOptions, RasterDecoder, decode_matrix,
 };
@@ -168,7 +165,7 @@ fn decode_fractional_ribbon_candidate(
     thresholds.sort_unstable();
     thresholds.dedup();
 
-    for geometry in ribbon_geometry_candidates(luma.width(), luma.height()) {
+    for geometry in fractional_ribbon_geometry_candidates(luma.width(), luma.height()) {
         let base_scale_x = luma.width() as f32 / geometry.total_width_modules() as f32;
         let base_scale_y = luma.height() as f32 / geometry.total_height_modules() as f32;
         if base_scale_x < 1.0 || base_scale_y < 1.0 {
@@ -234,57 +231,22 @@ impl RibbonGeometry {
     }
 }
 
-fn ribbon_geometry_candidates(image_width: u32, image_height: u32) -> Vec<RibbonGeometry> {
-    const MAX_CANDIDATES: usize = 8;
+fn fractional_ribbon_geometry_candidates(
+    image_width: u32,
+    image_height: u32,
+) -> Vec<RibbonGeometry> {
+    const DEFAULT_PRINT_RIBBON: RibbonGeometry = RibbonGeometry {
+        symbol_width: 96,
+        symbol_height: 36,
+    };
 
-    let image_aspect = image_width as f32 / image_height.max(1) as f32;
-    let mut candidates = Vec::new();
-    for mode in [
-        TransmissionMode::Print,
-        TransmissionMode::Screen,
-        TransmissionMode::Burst,
-    ] {
-        candidates.extend(ribbon_geometry_sequence(mode));
+    let scale_x = image_width as f32 / DEFAULT_PRINT_RIBBON.total_width_modules() as f32;
+    let scale_y = image_height as f32 / DEFAULT_PRINT_RIBBON.total_height_modules() as f32;
+    if scale_x >= 1.0 && scale_y >= 1.0 && (0.6..=1.7).contains(&(scale_x / scale_y)) {
+        vec![DEFAULT_PRINT_RIBBON]
+    } else {
+        Vec::new()
     }
-    candidates.sort_unstable_by_key(|geometry| (geometry.symbol_width, geometry.symbol_height));
-    candidates.dedup();
-    candidates.retain(|geometry| {
-        let scale_x = image_width as f32 / geometry.total_width_modules() as f32;
-        let scale_y = image_height as f32 / geometry.total_height_modules() as f32;
-        scale_x >= 1.0 && scale_y >= 1.0 && (0.6..=1.7).contains(&(scale_x / scale_y))
-    });
-    candidates.sort_by(|a, b| {
-        let a_aspect = a.total_width_modules() as f32 / a.total_height_modules() as f32;
-        let b_aspect = b.total_width_modules() as f32 / b.total_height_modules() as f32;
-        (a_aspect - image_aspect)
-            .abs()
-            .total_cmp(&(b_aspect - image_aspect).abs())
-    });
-    candidates.truncate(MAX_CANDIDATES);
-    candidates
-}
-
-fn ribbon_geometry_sequence(mode: TransmissionMode) -> Vec<RibbonGeometry> {
-    const MAX_SYMBOL_WIDTH: u16 = 512;
-    const MAX_SYMBOL_HEIGHT: u16 = 256;
-
-    let profile = GeometryProfile::for_mode_layout(mode, LayoutFamily::RibbonWeave);
-    let mut width = profile.min_width;
-    let mut height = profile.min_height;
-    let mut geometries = Vec::new();
-    while width <= MAX_SYMBOL_WIDTH && height <= MAX_SYMBOL_HEIGHT {
-        geometries.push(RibbonGeometry {
-            symbol_width: width,
-            symbol_height: height,
-        });
-        let aspect = f32::from(width) / f32::from(height.max(1));
-        if aspect < profile.target_aspect {
-            width = width.saturating_add(profile.step_width);
-        } else {
-            height = height.saturating_add(profile.step_height);
-        }
-    }
-    geometries
 }
 
 fn reference_ribbon_geometry(width: u32, height: u32) -> bool {
